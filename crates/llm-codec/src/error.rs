@@ -104,7 +104,12 @@ mod tests {
 
     async fn http_err() -> reqwest::Error {
         // A real reqwest error from an impossible request (port 1, no HTTP).
-        let client = reqwest::Client::new();
+        // The client-level timeout bounds the call: on some environments a
+        // connect to a closed port hangs instead of being refused instantly.
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(1))
+            .build()
+            .expect("client must build");
         let request = client
             .request(reqwest::Method::GET, "http://127.0.0.1:1")
             .build()
