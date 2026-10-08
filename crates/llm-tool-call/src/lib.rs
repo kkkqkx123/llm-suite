@@ -1,4 +1,4 @@
-//! Tool-call protocol parsing for the llm-kit group.
+//! Tool-call protocol parsing for the llm-suite group.
 //!
 //! Protocol parsers are gated behind feature flags so callers only pay for
 //! what they use:

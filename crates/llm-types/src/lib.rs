@@ -1,4 +1,4 @@
-//! Shared data models for the llm-kit crates.
+//! Shared data models for the llm-suite crates.
 //!
 //! This crate is a dependency-free protocol leaf: messages, LLM request and
 //! response envelopes, wire tool declarations, parameter schemas and usage

@@ -1,4 +1,4 @@
-//! Embedding capability for the llm-kit group.
+//! Embedding capability for the llm-suite group.
 //!
 //! Provides a provider trait plus an OpenAI-compatible HTTP implementation
 //! covering every OpenAI-compatible endpoint (OpenAI, Gemini, Azure, Ollama).

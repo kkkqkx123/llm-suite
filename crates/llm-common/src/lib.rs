@@ -1,4 +1,4 @@
-//! Shared runtime helpers for the llm-kit crates.
+//! Shared runtime helpers for the llm-suite crates.
 //!
 //! Leaf utilities that the provider crates need but that are independent of
 //! any host project: poisoned-lock recovery, wall-clock time, id generation,

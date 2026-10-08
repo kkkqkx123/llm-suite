@@ -1,8 +1,8 @@
-//! Error types shared across llm-kit crates.
+//! Error types shared across llm-suite crates.
 
 use thiserror::Error;
 
-/// Result alias used by llm-kit crates.
+/// Result alias used by llm-suite crates.
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Unified error type for shared LLM capabilities.

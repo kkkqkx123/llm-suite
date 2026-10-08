@@ -1,4 +1,4 @@
-# llm-kit
+# llm-suite
 
 A modular Rust toolkit that turns "call an LLM" from scattered ad-hoc HTTP
 code into a layered, provider-agnostic stack: protocol types, wire codecs,

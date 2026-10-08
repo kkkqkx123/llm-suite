@@ -1,4 +1,4 @@
-//! Basic OpenAI-compatible chat HTTP client for the llm-kit group.
+//! Basic OpenAI-compatible chat HTTP client for the llm-suite group.
 //!
 //! Ported from the code-context-engine `cce-llm-client` chat handler: plain
 //! `/chat/completions` calls without protocol codecs, tool-call handling, or

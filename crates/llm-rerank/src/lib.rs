@@ -1,4 +1,4 @@
-//! Rerank capability for the llm-kit group.
+//! Rerank capability for the llm-suite group.
 //!
 //! Two providers ported from code-context-engine `cce-llm-client`: a
 //! Cohere-compatible dedicated `/rerank` endpoint and a generative provider
