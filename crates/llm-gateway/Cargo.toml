@@ -3,6 +3,8 @@ name = "llm-gateway"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+description = "Request routing gateway for LLM clients"
 
 [features]
 default = []

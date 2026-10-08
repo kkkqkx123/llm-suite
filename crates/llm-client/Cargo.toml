@@ -3,6 +3,8 @@ name = "llm-client"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+description = "Unified LLM client abstraction"
 
 [features]
 default = []

@@ -3,6 +3,8 @@ name = "llm-types"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+description = "Core model and helper types for llm-suite"
 
 [dependencies]
 serde = { workspace = true }

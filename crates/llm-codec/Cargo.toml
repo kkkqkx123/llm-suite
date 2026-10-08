@@ -3,6 +3,8 @@ name = "llm-codec"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+description = "Provider codec layer for llm-suite"
 
 [dependencies]
 llm-tool-call = { path = "../llm-tool-call", features = ["json-partial", "xml"] }

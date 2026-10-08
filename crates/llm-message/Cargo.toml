@@ -3,6 +3,8 @@ name = "llm-message"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+description = "LLM message construction and manipulation"
 
 [dependencies]
 llm-types = { path = "../llm-types" }

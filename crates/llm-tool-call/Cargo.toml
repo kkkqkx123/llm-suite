@@ -3,6 +3,8 @@ name = "llm-tool-call"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+description = "Tool-call parsing and rendering (JSON partial, XML)"
 
 [features]
 default = []

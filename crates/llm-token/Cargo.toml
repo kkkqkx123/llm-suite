@@ -3,6 +3,8 @@ name = "llm-token"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+description = "Token counting and handling for LLM messages"
 
 [dependencies]
 llm-types = { path = "../llm-types" }

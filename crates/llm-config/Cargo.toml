@@ -3,6 +3,8 @@ name = "llm-config"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+description = "Configuration and provider registry for llm-suite"
 
 [dependencies]
 llm-codec = { path = "../llm-codec" }
