@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Unified LLM client abstraction"
 
 [features]
@@ -12,12 +13,12 @@ default = []
 mock = []
 
 [dependencies]
-llm-codec = { path = "../llm-codec" }
-llm-token = { path = "../llm-token" }
-llm-message = { path = "../llm-message" }
-llm-tool-call = { path = "../llm-tool-call", features = ["json-partial"] }
-llm-types = { path = "../llm-types" }
-llm-common = { path = "../llm-common" }
+llm-codec = { version = "0.1.0", path = "../llm-codec" }
+llm-token = { version = "0.1.0", path = "../llm-token" }
+llm-message = { version = "0.1.0", path = "../llm-message" }
+llm-tool-call = { version = "0.1.0", path = "../llm-tool-call", features = ["json-partial"] }
+llm-types = { version = "0.1.0", path = "../llm-types" }
+llm-common = { version = "0.1.0", path = "../llm-common" }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

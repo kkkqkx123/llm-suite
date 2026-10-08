@@ -4,20 +4,21 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Provider codec layer for llm-suite"
 
 [dependencies]
-llm-tool-call = { path = "../llm-tool-call", features = ["json-partial", "xml"] }
-llm-token = { path = "../llm-token" }
-llm-message = { path = "../llm-message" }
-llm-types = { path = "../llm-types" }
+llm-tool-call = { version = "0.1.0", path = "../llm-tool-call", features = ["json-partial", "xml"] }
+llm-token = { version = "0.1.0", path = "../llm-token" }
+llm-message = { version = "0.1.0", path = "../llm-message" }
+llm-types = { version = "0.1.0", path = "../llm-types" }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 dashmap = { workspace = true }
 regex = { workspace = true }
-llm-common = { path = "../llm-common" }
+llm-common = { version = "0.1.0", path = "../llm-common" }
 reqwest = { workspace = true }
 tracing = { workspace = true }
 

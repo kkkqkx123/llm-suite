@@ -4,10 +4,11 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Shared utilities for the llm-suite crates"
 
 [dependencies]
-llm-types = { path = "../llm-types" }
+llm-types = { version = "0.1.0", path = "../llm-types" }
 chrono = { workspace = true }
 uuid = { workspace = true }
 tokio = { workspace = true }

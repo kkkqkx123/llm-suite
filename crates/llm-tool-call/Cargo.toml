@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Tool-call parsing and rendering (JSON partial, XML)"
 
 [features]
@@ -17,5 +18,5 @@ xml = ["dep:llm-types", "dep:llm-common"]
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 # Shared model/helper types used by the XML protocol parser/renderer.
-llm-types = { path = "../llm-types", optional = true }
-llm-common = { path = "../llm-common", optional = true }
+llm-types = { version = "0.1.0", path = "../llm-types", optional = true }
+llm-common = { version = "0.1.0", path = "../llm-common", optional = true }

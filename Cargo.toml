@@ -20,6 +20,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.88"
 license = "Apache-2.0"
+repository = "https://github.com/kkkqkx123/llm-suite"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -1,6 +1,6 @@
 //! Configuration for embedding providers.
 //!
-//! Aligned with linkrs `graphdb-embedding`: the API key is optional (local
+//! Aligned with linkrs `linkrs-embedding`: the API key is optional (local
 //! servers such as Ollama need none), the expected vector dimension is part
 //! of the config so misconfigured deployments fail fast, and a preprocessor
 //! selects query/document prompt prefixes.
