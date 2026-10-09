@@ -119,7 +119,10 @@ async fn mock_scripted_failure_repeats_each_call() {
         .rerank(&request(vec![candidate("a", 1.0)]))
         .await
         .expect_err("first call must hit the scripted failure");
-    assert!(matches!(first, RerankError::Provider { status: 429, .. }), "{first:?}");
+    assert!(
+        matches!(first, RerankError::Provider { status: 429, .. }),
+        "{first:?}"
+    );
     // Steps exhausted: the mock recovers.
     mock.rerank(&request(vec![candidate("a", 1.0)]))
         .await

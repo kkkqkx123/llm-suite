@@ -68,8 +68,8 @@ impl OpenAICompatibleProvider {
     /// Creates a provider; fails fast when the config is incomplete.
     pub fn new(config: EmbeddingConfig) -> Result<Self> {
         config.validate()?;
-        let mut builder = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(config.timeout_secs));
+        let mut builder =
+            reqwest::Client::builder().timeout(std::time::Duration::from_secs(config.timeout_secs));
         if let Some(proxy_url) = config.proxy.as_deref() {
             let proxy = reqwest::Proxy::all(proxy_url).map_err(|err| {
                 EmbeddingError::Config(format!("invalid proxy '{proxy_url}': {err}"))
@@ -249,8 +249,7 @@ mod tests {
     fn build_request_omits_dimensions_for_fixed_dimension_models() {
         // Fixed-dimension models (e.g. BAAI/bge-m3) reject the `dimensions`
         // request parameter; only the validation dimension is configured.
-        let config =
-            EmbeddingConfig::new("http://example.com", "bge-m3").with_dimension(1024);
+        let config = EmbeddingConfig::new("http://example.com", "bge-m3").with_dimension(1024);
         let provider = OpenAICompatibleProvider::new(config).expect("valid config");
         let request = provider.build_request(&["rust".to_string()]);
         assert_eq!(request.dimensions, None);

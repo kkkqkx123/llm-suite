@@ -94,7 +94,8 @@ impl MockEmbeddingProvider {
 
     /// Deterministic vector for one text: seeded by a stable hash of the
     /// input, normalized to unit length so similarity assertions behave.
-    fn vector_for(&self, text: &str) -> Vec<f32> {        let mut seed: u64 = 0xcbf2_9ce4_8422_2325;
+    fn vector_for(&self, text: &str) -> Vec<f32> {
+        let mut seed: u64 = 0xcbf2_9ce4_8422_2325;
         for byte in text.as_bytes() {
             seed ^= u64::from(*byte);
             seed = seed.wrapping_mul(0x1000_0000_01b3);
@@ -184,7 +185,10 @@ mod tests {
             .embed(&["a".to_string(), "b".to_string(), "c".to_string()])
             .await
             .unwrap_or_else(|e| panic!("embed must succeed: {e}"));
-        provider.embed_one("d").await.unwrap_or_else(|e| panic!("embed_one must succeed: {e}"));
+        provider
+            .embed_one("d")
+            .await
+            .unwrap_or_else(|e| panic!("embed_one must succeed: {e}"));
         assert_eq!(provider.recorded_batch_sizes(), vec![3, 1]);
     }
 }

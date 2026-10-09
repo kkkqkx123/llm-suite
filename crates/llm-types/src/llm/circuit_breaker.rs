@@ -79,8 +79,8 @@ mod tests {
 
     #[test]
     fn rate_limit_burst_defaults_when_missing() {
-        let config: RateLimitConfig =
-            serde_json::from_str(r#"{"requests_per_second": 5.0}"#).unwrap_or_else(|e| {
+        let config: RateLimitConfig = serde_json::from_str(r#"{"requests_per_second": 5.0}"#)
+            .unwrap_or_else(|e| {
                 panic!("missing burst must default: {e}");
             });
         assert!((config.requests_per_second - 5.0).abs() < f64::EPSILON);
@@ -124,8 +124,13 @@ mod tests {
         let profile: crate::llm::LlmProfile =
             serde_json::from_value(json).unwrap_or_else(|e| panic!("deserialize: {e}"));
         assert_eq!(profile.proxy.as_deref(), Some("socks5://127.0.0.1:1080"));
-        let cb = profile.circuit_breaker.unwrap_or_else(|| panic!("circuit_breaker must parse"));
+        let cb = profile
+            .circuit_breaker
+            .unwrap_or_else(|| panic!("circuit_breaker must parse"));
         assert_eq!(cb.min_samples, 3);
-        assert_eq!(cb.open_duration_ms, 30_000, "unspecified fields must default");
+        assert_eq!(
+            cb.open_duration_ms, 30_000,
+            "unspecified fields must default"
+        );
     }
 }

@@ -1,5 +1,5 @@
-pub mod generation;
 pub mod circuit_breaker;
+pub mod generation;
 pub mod message_stream_events;
 pub mod model_discovery;
 pub mod model_info;

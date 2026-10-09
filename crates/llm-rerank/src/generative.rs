@@ -69,8 +69,8 @@ pub struct GenerativeRerankProvider {
 impl GenerativeRerankProvider {
     /// Creates a provider for a chat endpoint and HTTP timeout.
     pub fn new(endpoint: GenerativeChatEndpoint, timeout_secs: u64) -> Result<Self> {
-        let mut builder = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(timeout_secs.max(1)));
+        let mut builder =
+            reqwest::Client::builder().timeout(std::time::Duration::from_secs(timeout_secs.max(1)));
         if let Some(proxy_url) = endpoint.proxy.as_deref() {
             let proxy = reqwest::Proxy::all(proxy_url)
                 .map_err(|err| RerankError::Transport(format!("invalid proxy: {err}")))?;

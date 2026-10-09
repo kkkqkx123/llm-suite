@@ -159,7 +159,10 @@ mod tests {
     async fn orders_by_initial_score() {
         let mock = MockRerankProvider::by_score();
         let result = mock
-            .rerank(&request(vec![candidate("low", 0.1), candidate("high", 0.9)]))
+            .rerank(&request(vec![
+                candidate("low", 0.1),
+                candidate("high", 0.9),
+            ]))
             .await
             .unwrap_or_else(|e| panic!("rerank must succeed: {e}"));
         assert_eq!(result.reranked_candidates[0].id, "high");
@@ -184,8 +187,14 @@ mod tests {
                 retry_after_ms: None,
             },
         )]);
-        assert!(mock.rerank(&request(vec![candidate("a", 1.0)])).await.is_err());
-        assert!(mock.rerank(&request(vec![candidate("a", 1.0)])).await.is_ok());
+        assert!(mock
+            .rerank(&request(vec![candidate("a", 1.0)]))
+            .await
+            .is_err());
+        assert!(mock
+            .rerank(&request(vec![candidate("a", 1.0)]))
+            .await
+            .is_ok());
     }
 
     #[tokio::test]

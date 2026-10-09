@@ -218,5 +218,3 @@ impl<'de> Deserialize<'de> for MessageContentValue {
         }
     }
 }
-
-

@@ -38,7 +38,10 @@ async fn service_batches_through_mock_preserve_order() {
     let provider = MockEmbeddingProvider::new("mock-model", 8);
     let service = EmbeddingService::new(provider, 2);
 
-    let texts: Vec<String> = ["a", "b", "c", "d", "e"].iter().map(|s| s.to_string()).collect();
+    let texts: Vec<String> = ["a", "b", "c", "d", "e"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     let result = service
         .embed_batch(&texts)
         .await
@@ -48,8 +51,14 @@ async fn service_batches_through_mock_preserve_order() {
     // The mock is deterministic: re-embedding the same text alone must
     // reproduce the batch's vector at the same position.
     let provider = MockEmbeddingProvider::new("mock-model", 8);
-    let single = provider.embed_one("c").await.unwrap_or_else(|e| panic!("embed_one: {e}"));
-    assert_eq!(result.embeddings[2], single, "batch order must match input order");
+    let single = provider
+        .embed_one("c")
+        .await
+        .unwrap_or_else(|e| panic!("embed_one: {e}"));
+    assert_eq!(
+        result.embeddings[2], single,
+        "batch order must match input order"
+    );
 }
 
 #[tokio::test]
@@ -70,13 +79,13 @@ async fn service_records_each_chunk_as_a_mock_call() {
 
 #[tokio::test]
 async fn scripted_failure_propagates_through_service() {
-    let provider = MockEmbeddingProvider::with_steps(vec![
-        MockEmbeddingStep::Fail(EmbeddingError::Provider {
+    let provider = MockEmbeddingProvider::with_steps(vec![MockEmbeddingStep::Fail(
+        EmbeddingError::Provider {
             status: 503,
             message: "overloaded".to_string(),
             retry_after_ms: None,
-        }),
-    ]);
+        },
+    )]);
     let service = EmbeddingService::new(provider, 10);
     let err = service
         .embed_batch(&["x".to_string()])
