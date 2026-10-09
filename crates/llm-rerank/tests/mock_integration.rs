@@ -112,6 +112,7 @@ async fn mock_scripted_failure_repeats_each_call() {
         RerankError::Provider {
             status: 429,
             message: "slow down".to_string(),
+            retry_after_ms: None,
         },
     )]);
     let first = mock

@@ -5,6 +5,8 @@
 //! of the config so misconfigured deployments fail fast, and a preprocessor
 //! selects query/document prompt prefixes.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::EmbeddingError;
@@ -29,6 +31,15 @@ pub struct EmbeddingConfig {
     /// Text preprocessing applied before sending the request.
     #[serde(default)]
     pub preprocessor: PreprocessorConfig,
+    /// Proxy URL (http/https/socks5); absent for direct connections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
+    /// Extra HTTP headers sent with every request.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub headers: std::collections::HashMap<String, String>,
+    /// Extra query parameters appended to every request URL.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub query_params: std::collections::HashMap<String, String>,
 }
 
 fn default_timeout_secs() -> u64 {
@@ -45,6 +56,9 @@ impl EmbeddingConfig {
             timeout_secs: default_timeout_secs(),
             dimension: None,
             preprocessor: PreprocessorConfig::default(),
+            proxy: None,
+            headers: std::collections::HashMap::new(),
+            query_params: std::collections::HashMap::new(),
         }
     }
 
@@ -103,6 +117,12 @@ impl EmbeddingConfig {
         self
     }
 
+    /// Sets the proxy URL (http/https/socks5).
+    pub fn with_proxy(mut self, proxy: impl Into<String>) -> Self {
+        self.proxy = Some(proxy.into());
+        self
+    }
+
     /// Validates the wiring before any request is sent.
     pub fn validate(&self) -> crate::error::Result<()> {
         if self.base_url.is_empty() {
@@ -131,6 +151,9 @@ impl Default for EmbeddingConfig {
             timeout_secs: default_timeout_secs(),
             dimension: None,
             preprocessor: PreprocessorConfig::default(),
+            proxy: None,
+            headers: std::collections::HashMap::new(),
+            query_params: std::collections::HashMap::new(),
         }
     }
 }

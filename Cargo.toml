@@ -33,7 +33,7 @@ tracing = "0.1"
 dashmap = "6"
 async-trait = "0.1"
 # Kept in lockstep with the host workspace so both resolve one reqwest line.
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream", "query"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream", "query", "socks"] }
 eventsource-stream = "0.2"
 futures = "0.3"
 tokio-util = "0.7"

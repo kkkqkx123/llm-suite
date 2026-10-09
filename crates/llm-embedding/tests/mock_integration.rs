@@ -74,6 +74,7 @@ async fn scripted_failure_propagates_through_service() {
         MockEmbeddingStep::Fail(EmbeddingError::Provider {
             status: 503,
             message: "overloaded".to_string(),
+            retry_after_ms: None,
         }),
     ]);
     let service = EmbeddingService::new(provider, 10);

@@ -138,6 +138,7 @@ mod tests {
             EmbeddingError::Provider {
                 status: 500,
                 message: "boom".to_string(),
+                retry_after_ms: None,
             },
         )]);
         assert!(provider.embed(&["x".to_string()]).await.is_err());

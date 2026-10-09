@@ -24,8 +24,14 @@ pub struct CohereRerankProvider {
 impl CohereRerankProvider {
     /// Creates a provider; `config.base_url` is the full `/rerank` URL.
     pub fn new(config: RerankConfig) -> Result<Self> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(config.timeout_secs.max(1)))
+        let mut builder = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(config.timeout_secs.max(1)));
+        if let Some(proxy_url) = config.proxy.as_deref() {
+            let proxy = reqwest::Proxy::all(proxy_url)
+                .map_err(|err| RerankError::Transport(format!("invalid proxy: {err}")))?;
+            builder = builder.proxy(proxy);
+        }
+        let client = builder
             .build()
             .map_err(|err| RerankError::Transport(err.to_string()))?;
         Ok(Self { config, client })
@@ -125,13 +131,25 @@ impl RerankProvider for CohereRerankProvider {
             if let Some(api_key) = &self.config.api_key {
                 outgoing = outgoing.bearer_auth(api_key);
             }
+            for (name, value) in &self.config.headers {
+                outgoing = outgoing.header(name, value);
+            }
+            if !self.config.query_params.is_empty() {
+                outgoing = outgoing.query(&self.config.query_params);
+            }
             let response = outgoing.send().await?;
             let status = response.status();
             if !status.is_success() {
+                let retry_after = response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned);
                 let text = response.text().await.unwrap_or_default();
                 return Err(RerankError::Provider {
                     status: status.as_u16(),
                     message: text,
+                    retry_after_ms: llm_common::parse_retry_after_ms(retry_after.as_deref()),
                 });
             }
             let text = response

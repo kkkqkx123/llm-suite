@@ -5,12 +5,14 @@
 //! retry execution and timeout wrapping.
 
 pub mod exec;
+pub mod http;
 pub mod id;
 pub mod lock;
 pub mod ratelimit;
 pub mod retry;
 pub mod time;
 
+pub use http::parse_retry_after_ms;
 pub use id::generate_id;
 pub use lock::lock_ok;
 pub use time::now;

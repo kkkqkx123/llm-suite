@@ -1,5 +1,7 @@
 //! Endpoint configuration for rerank providers.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Configuration shared by rerank providers.
@@ -17,6 +19,15 @@ pub struct RerankConfig {
     /// HTTP request timeout in seconds.
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
+    /// Proxy URL (http/https/socks5); absent for direct connections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
+    /// Extra HTTP headers sent with every request.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub headers: std::collections::HashMap<String, String>,
+    /// Extra query parameters appended to every request URL.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub query_params: std::collections::HashMap<String, String>,
 }
 
 fn default_timeout_secs() -> u64 {
@@ -31,12 +42,21 @@ impl RerankConfig {
             api_key: None,
             model: model.into(),
             timeout_secs: default_timeout_secs(),
+            proxy: None,
+            headers: std::collections::HashMap::new(),
+            query_params: std::collections::HashMap::new(),
         }
     }
 
     /// Sets the bearer API key.
     pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
         self.api_key = Some(api_key.into());
+        self
+    }
+
+    /// Sets the proxy URL (http/https/socks5).
+    pub fn with_proxy(mut self, proxy: impl Into<String>) -> Self {
+        self.proxy = Some(proxy.into());
         self
     }
 

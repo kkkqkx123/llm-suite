@@ -6,6 +6,8 @@
 //! helpers. The chat call is a minimal inline POST on purpose: depending on
 //! `llm-chat-basic` would couple the two leaf crates.
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use serde::Deserialize;
 
@@ -24,6 +26,12 @@ pub struct GenerativeChatEndpoint {
     pub api_key: Option<String>,
     /// Chat model used for scoring.
     pub model: String,
+    /// Proxy URL (http/https/socks5); absent for direct connections.
+    pub proxy: Option<String>,
+    /// Extra HTTP headers sent with every request.
+    pub headers: HashMap<String, String>,
+    /// Extra query parameters appended to every request URL.
+    pub query_params: HashMap<String, String>,
 }
 
 impl GenerativeChatEndpoint {
@@ -33,12 +41,21 @@ impl GenerativeChatEndpoint {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key: None,
             model: model.into(),
+            proxy: None,
+            headers: HashMap::new(),
+            query_params: HashMap::new(),
         }
     }
 
     /// Sets the bearer API key.
     pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
         self.api_key = Some(api_key.into());
+        self
+    }
+
+    /// Sets the proxy URL (http/https/socks5).
+    pub fn with_proxy(mut self, proxy: impl Into<String>) -> Self {
+        self.proxy = Some(proxy.into());
         self
     }
 }
@@ -52,8 +69,14 @@ pub struct GenerativeRerankProvider {
 impl GenerativeRerankProvider {
     /// Creates a provider for a chat endpoint and HTTP timeout.
     pub fn new(endpoint: GenerativeChatEndpoint, timeout_secs: u64) -> Result<Self> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(timeout_secs.max(1)))
+        let mut builder = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(timeout_secs.max(1)));
+        if let Some(proxy_url) = endpoint.proxy.as_deref() {
+            let proxy = reqwest::Proxy::all(proxy_url)
+                .map_err(|err| RerankError::Transport(format!("invalid proxy: {err}")))?;
+            builder = builder.proxy(proxy);
+        }
+        let client = builder
             .build()
             .map_err(|err| RerankError::Transport(err.to_string()))?;
         Ok(Self { endpoint, client })
@@ -149,13 +172,25 @@ impl RerankProvider for GenerativeRerankProvider {
             if let Some(api_key) = &self.endpoint.api_key {
                 outgoing = outgoing.bearer_auth(api_key);
             }
+            for (name, value) in &self.endpoint.headers {
+                outgoing = outgoing.header(name, value);
+            }
+            if !self.endpoint.query_params.is_empty() {
+                outgoing = outgoing.query(&self.endpoint.query_params);
+            }
             let response = outgoing.send().await?;
             let status = response.status();
             if !status.is_success() {
+                let retry_after = response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned);
                 let text = response.text().await.unwrap_or_default();
                 return Err(RerankError::Provider {
                     status: status.as_u16(),
                     message: text,
+                    retry_after_ms: llm_common::parse_retry_after_ms(retry_after.as_deref()),
                 });
             }
             let decoded: serde_json::Value = response

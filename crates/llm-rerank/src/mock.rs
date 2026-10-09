@@ -177,6 +177,7 @@ mod tests {
             RerankError::Provider {
                 status: 500,
                 message: "boom".to_string(),
+                retry_after_ms: None,
             },
         )]);
         assert!(mock.rerank(&request(vec![candidate("a", 1.0)])).await.is_err());

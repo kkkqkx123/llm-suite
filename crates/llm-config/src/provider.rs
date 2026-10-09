@@ -102,6 +102,9 @@ pub fn apply_provider_defaults(
     if profile.auth_type.is_none() {
         profile.auth_type = definition.auth_type.clone();
     }
+    if profile.proxy.is_none() {
+        profile.proxy = definition.proxy.clone();
+    }
     if let Some(default_headers) = definition.default_headers.clone() {
         let custom_headers = profile.custom_headers.get_or_insert_with(Default::default);
         for (key, value) in default_headers {
@@ -168,7 +171,7 @@ mod tests {
             model_discovery: None,
             api_version: None,
             metadata: None,
-            proxy: None,
+            proxy: Some("http://proxy.acme.test:8080".to_string()),
             rate_limit: None,
         }
     }
@@ -199,8 +202,26 @@ mod tests {
         );
         assert_eq!(merged.auth_type.as_deref(), Some("bearer"));
         assert_eq!(
+            merged.proxy.as_deref(),
+            Some("http://proxy.acme.test:8080")
+        );
+        assert_eq!(
             merged.custom_headers.as_ref().unwrap().get("x-tenant"),
             Some(&serde_json::json!("t1"))
+        );
+    }
+
+    #[test]
+    fn explicit_proxy_wins_over_definition() {
+        let registry = ProviderDefinitionRegistry::new();
+        registry.register(definition()).unwrap();
+
+        let mut profile = profile("p1");
+        profile.proxy = Some("http://override.test:3128".to_string());
+        let merged = apply_provider_defaults(profile, &registry).unwrap();
+        assert_eq!(
+            merged.proxy.as_deref(),
+            Some("http://override.test:3128")
         );
     }
 

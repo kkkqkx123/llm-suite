@@ -68,8 +68,15 @@ impl OpenAICompatibleProvider {
     /// Creates a provider; fails fast when the config is incomplete.
     pub fn new(config: EmbeddingConfig) -> Result<Self> {
         config.validate()?;
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(config.timeout_secs))
+        let mut builder = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(config.timeout_secs));
+        if let Some(proxy_url) = config.proxy.as_deref() {
+            let proxy = reqwest::Proxy::all(proxy_url).map_err(|err| {
+                EmbeddingError::Config(format!("invalid proxy '{proxy_url}': {err}"))
+            })?;
+            builder = builder.proxy(proxy);
+        }
+        let client = builder
             .build()
             .map_err(|err| EmbeddingError::Config(format!("failed to build HTTP client: {err}")))?;
         let preprocessor = PreprocessorImpl::from_config(&config.preprocessor);
@@ -160,14 +167,26 @@ impl EmbeddingProvider for OpenAICompatibleProvider {
         if let Some(api_key) = &self.config.api_key {
             outgoing = outgoing.bearer_auth(api_key);
         }
+        for (name, value) in &self.config.headers {
+            outgoing = outgoing.header(name, value);
+        }
+        if !self.config.query_params.is_empty() {
+            outgoing = outgoing.query(&self.config.query_params);
+        }
         let response = outgoing.send().await?;
 
         let status = response.status();
         if !status.is_success() {
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
             let body = response.text().await.unwrap_or_default();
             return Err(EmbeddingError::Provider {
                 status: status.as_u16(),
                 message: body,
+                retry_after_ms: llm_common::parse_retry_after_ms(retry_after.as_deref()),
             });
         }
 

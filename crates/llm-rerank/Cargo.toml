@@ -13,6 +13,7 @@ default = []
 mock = []
 
 [dependencies]
+llm-common = { version = "0.1.0", path = "../llm-common" }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

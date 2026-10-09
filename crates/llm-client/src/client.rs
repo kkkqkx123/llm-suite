@@ -8,6 +8,7 @@ use crate::stream::MessageStream;
 use reqwest::Client as ReqwestClient;
 use tokio_util::sync::CancellationToken;
 use llm_common::exec::{execute_with_timeout, TimeoutError};
+use llm_common::parse_retry_after_ms;
 use llm_common::retry::RetryPolicy;
 use llm_types::llm::{LlmProfile, LlmRequest, LlmResult as LlmResponseType};
 
@@ -85,12 +86,18 @@ impl LlmClientImpl {
         status: reqwest::StatusCode,
         body: &str,
         timeout_ms: u64,
+        retry_after: Option<&str>,
     ) -> LlmError {
         if status.is_success() {
             return LlmError::InvalidResponse(format!(
                 "Unexpected success status with body: {}",
                 body
             ));
+        }
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return LlmError::RateLimited {
+                retry_after_ms: parse_retry_after_ms(retry_after),
+            };
         }
         let msg = format!("HTTP {}: {}", status.as_u16(), body);
         // Safety-net classification: a context-window rejection of the actual
@@ -109,6 +116,16 @@ impl LlmClientImpl {
         }
         provisional
     }
+}
+
+/// Reads the `Retry-After` response header as an owned value so the body can
+/// still be consumed afterwards.
+fn retry_after_header(response: &reqwest::Response) -> Option<String> {
+    response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
 }
 
 impl LlmClientImpl {
@@ -139,8 +156,14 @@ impl LlmClientImpl {
 
         if !response.status().is_success() {
             let status = response.status();
+            let retry_after = retry_after_header(&response);
             let body = response.text().await.unwrap_or_default();
-            return Err(Self::map_http_error(status, &body, timeout_ms));
+            return Err(Self::map_http_error(
+                status,
+                &body,
+                timeout_ms,
+                retry_after.as_deref(),
+            ));
         }
 
         let body = response.text().await?;
@@ -179,8 +202,14 @@ impl LlmClientImpl {
 
         if !response.status().is_success() {
             let status = response.status();
+            let retry_after = retry_after_header(&response);
             let body = response.text().await.unwrap_or_default();
-            return Err(Self::map_http_error(status, &body, timeout_ms));
+            return Err(Self::map_http_error(
+                status,
+                &body,
+                timeout_ms,
+                retry_after.as_deref(),
+            ));
         }
 
         let stream = eventsource_stream::EventStream::new(response.bytes_stream());
@@ -232,11 +261,13 @@ impl LlmClientImpl {
 
             if !response.status().is_success() {
                 let status = response.status();
+                let retry_after = retry_after_header(&response);
                 let body = response.text().await.unwrap_or_default();
                 return Err(Self::map_http_error(
                     status,
                     &body,
                     timeout_dur.as_millis() as u64,
+                    retry_after.as_deref(),
                 ));
             }
 
@@ -370,19 +401,19 @@ mod tests {
     #[test]
     fn map_http_error_classifies_auth_and_timeout() {
         assert!(matches!(
-            LlmClientImpl::map_http_error(reqwest::StatusCode::UNAUTHORIZED, "denied", 5000),
+            LlmClientImpl::map_http_error(reqwest::StatusCode::UNAUTHORIZED, "denied", 5000, None),
             LlmError::AuthError(_)
         ));
         assert!(matches!(
-            LlmClientImpl::map_http_error(reqwest::StatusCode::FORBIDDEN, "denied", 5000),
+            LlmClientImpl::map_http_error(reqwest::StatusCode::FORBIDDEN, "denied", 5000, None),
             LlmError::AuthError(_)
         ));
         assert!(matches!(
-            LlmClientImpl::map_http_error(reqwest::StatusCode::REQUEST_TIMEOUT, "", 5000),
+            LlmClientImpl::map_http_error(reqwest::StatusCode::REQUEST_TIMEOUT, "", 5000, None),
             LlmError::Timeout(5000)
         ));
         assert!(matches!(
-            LlmClientImpl::map_http_error(reqwest::StatusCode::GATEWAY_TIMEOUT, "", 5000),
+            LlmClientImpl::map_http_error(reqwest::StatusCode::GATEWAY_TIMEOUT, "", 5000, None),
             LlmError::Timeout(5000)
         ));
     }
@@ -390,19 +421,31 @@ mod tests {
     #[test]
     fn map_http_error_classifies_provider_errors() {
         assert!(matches!(
-            LlmClientImpl::map_http_error(reqwest::StatusCode::BAD_REQUEST, "bad", 5000),
+            LlmClientImpl::map_http_error(reqwest::StatusCode::BAD_REQUEST, "bad", 5000, None),
             LlmError::ProviderError { .. }
         ));
         assert!(matches!(
             LlmClientImpl::map_http_error(
                 reqwest::StatusCode::TOO_MANY_REQUESTS,
                 "slow down",
-                5000
+                5000,
+                None
             ),
-            LlmError::ProviderError { .. }
+            LlmError::RateLimited { .. }
         ));
         assert!(matches!(
-            LlmClientImpl::map_http_error(reqwest::StatusCode::INTERNAL_SERVER_ERROR, "boom", 5000),
+            LlmClientImpl::map_http_error(
+                reqwest::StatusCode::TOO_MANY_REQUESTS,
+                "slow down",
+                5000,
+                Some("2")
+            ),
+            LlmError::RateLimited {
+                retry_after_ms: Some(2000)
+            }
+        ));
+        assert!(matches!(
+            LlmClientImpl::map_http_error(reqwest::StatusCode::INTERNAL_SERVER_ERROR, "boom", 5000, None),
             LlmError::ProviderError { .. }
         ));
     }
@@ -413,6 +456,7 @@ mod tests {
             reqwest::StatusCode::BAD_REQUEST,
             "This model's maximum context length is 200000 tokens",
             5000,
+            None,
         );
         assert!(
             matches!(err, LlmError::ContextLengthExceeded(_)),
@@ -422,8 +466,19 @@ mod tests {
 
     #[test]
     fn map_http_error_flags_success_status() {
-        let err = LlmClientImpl::map_http_error(reqwest::StatusCode::OK, "unexpected", 5000);
+        let err = LlmClientImpl::map_http_error(reqwest::StatusCode::OK, "unexpected", 5000, None);
         assert!(matches!(err, LlmError::InvalidResponse(_)));
+    }
+
+    #[test]
+    fn retry_after_header_parses_seconds_and_dates() {
+        assert_eq!(parse_retry_after_ms(None), None);
+        assert_eq!(parse_retry_after_ms(Some("")), None);
+        assert_eq!(parse_retry_after_ms(Some("2")), Some(2000));
+        assert_eq!(parse_retry_after_ms(Some("not-a-date")), None);
+        let future = (chrono::Utc::now() + chrono::Duration::seconds(120)).to_rfc2822();
+        let parsed = parse_retry_after_ms(Some(&future)).expect("http date must parse");
+        assert!((110_000..=130_000).contains(&parsed));
     }
 
     #[test]

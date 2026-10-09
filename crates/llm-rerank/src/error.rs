@@ -16,6 +16,8 @@ pub enum RerankError {
         status: u16,
         /// Short error description from the provider response.
         message: String,
+        /// Parsed `Retry-After` for 429 responses; `None` when absent.
+        retry_after_ms: Option<u64>,
     },
 
     /// The provider response could not be decoded.
@@ -43,6 +45,7 @@ impl From<reqwest::Error> for RerankError {
             RerankError::Provider {
                 status: status.as_u16(),
                 message: err.to_string(),
+                retry_after_ms: None,
             }
         } else {
             RerankError::Transport(err.to_string())

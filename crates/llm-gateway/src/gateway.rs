@@ -422,19 +422,29 @@ impl LlmGateway {
     }
 
     fn get_or_create_client(&self, profile: &LlmProfile) -> LlmResult<Arc<LlmClientImpl>> {
-        let key = format!("{}::{}", profile.id, profile.model);
+        let key = client_cache_key(profile);
 
         if let Some(client) = self.clients.get(key.as_str()) {
             return Ok(client.clone());
         }
 
         let codec = self.codecs.get_by_format(&profile.format)?;
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(
-                profile.timeout.unwrap_or(60),
-            ))
-            .build()
-            .unwrap_or_default();
+        let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(
+            profile.timeout.unwrap_or(60),
+        ));
+        if let Some(proxy_url) = profile.proxy.as_deref() {
+            let proxy = reqwest::Proxy::all(proxy_url).map_err(|err| {
+                LlmError::ProxyError(format!("invalid proxy '{proxy_url}': {err}"))
+            })?;
+            builder = builder.proxy(proxy);
+        }
+        let client = builder.build().map_err(|err| {
+            if profile.proxy.is_some() {
+                LlmError::ProxyError(format!("failed to build HTTP client: {err}"))
+            } else {
+                LlmError::HttpError(err)
+            }
+        })?;
 
         let client_impl = Arc::new(LlmClientImpl::new(client, codec, profile.clone()));
         self.clients.insert(key, client_impl.clone());
@@ -478,9 +488,20 @@ impl LlmGateway {
     }
 }
 
+/// Cache key for the transport client. The proxy is part of the key so
+/// switching proxies rebuilds the transport instead of reusing a stale
+/// client.
+fn client_cache_key(profile: &LlmProfile) -> String {
+    format!(
+        "{}::{}::{}",
+        profile.id,
+        profile.model,
+        profile.proxy.as_deref().unwrap_or("")
+    )
+}
+
 /// Low-cardinality error classifier for LLM request metrics.
-fn classify_error(error: &llm_codec::error::LlmError) -> &'static str {
-    match error {
+fn classify_error(error: &llm_codec::error::LlmError) -> &'static str {    match error {
         llm_codec::error::LlmError::HttpError(_) => "http_error",
         llm_codec::error::LlmError::SerializationError(_) => "serialization_error",
         llm_codec::error::LlmError::ProviderError { .. } => "provider_error",
@@ -669,7 +690,7 @@ mod tests {
         let client = gateway
             .get_or_create_client(&gateway.profiles.get("p1").unwrap())
             .unwrap();
-        let key = format!("{}::{}", client.profile().id, client.profile().model);
+        let key = super::client_cache_key(client.profile());
         assert!(gateway.clients.contains_key(key.as_str()));
 
         assert!(gateway.remove_profile("p1").is_some());
@@ -694,7 +715,7 @@ mod tests {
         let client = gateway
             .get_or_create_client(&gateway.profiles.get("p2").unwrap())
             .unwrap();
-        let key = format!("{}::{}", client.profile().id, client.profile().model);
+        let key = super::client_cache_key(client.profile());
 
         gateway.remove_profile("p1");
         assert!(
@@ -756,7 +777,7 @@ mod tests {
 
         let stored = gateway.profiles.get("p1").unwrap();
         let client = gateway.get_or_create_client(&stored).unwrap();
-        let key = format!("{}::{}", client.profile().id, client.profile().model);
+        let key = super::client_cache_key(client.profile());
         assert!(gateway.clients.contains_key(key.as_str()));
 
         gateway
@@ -766,5 +787,40 @@ mod tests {
             !gateway.clients.contains_key(key.as_str()),
             "provider change must evict cached clients"
         );
+    }
+
+    #[test]
+    fn proxy_change_rebuilds_cached_client() {
+        let gateway = LlmGateway::new();
+        gateway
+            .register_profile(profile("p1", LlmFormat::OpenaiChat))
+            .unwrap();
+
+        let stored = gateway.profiles.get("p1").unwrap();
+        gateway.get_or_create_client(&stored).unwrap();
+        let direct_key = super::client_cache_key(&stored);
+        assert!(gateway.clients.contains_key(direct_key.as_str()));
+
+        let mut proxied = stored.clone();
+        proxied.proxy = Some("http://127.0.0.1:8080".to_string());
+        gateway.get_or_create_client(&proxied).unwrap();
+        let proxied_key = super::client_cache_key(&proxied);
+        assert_ne!(direct_key, proxied_key);
+        assert!(gateway.clients.contains_key(proxied_key.as_str()));
+    }
+
+    #[test]
+    fn invalid_proxy_url_fails_as_proxy_error() {
+        let gateway = LlmGateway::new();
+        gateway
+            .register_profile(profile("p1", LlmFormat::OpenaiChat))
+            .unwrap();
+
+        let mut stored = gateway.profiles.get("p1").unwrap();
+        stored.proxy = Some("://not a url".to_string());
+        assert!(matches!(
+            gateway.get_or_create_client(&stored),
+            Err(LlmError::ProxyError(_))
+        ));
     }
 }
