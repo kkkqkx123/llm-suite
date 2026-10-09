@@ -104,7 +104,7 @@ impl OpenAICompatibleProvider {
             model: self.config.model.clone(),
             input: self.preprocessor.process_batch(&borrowed),
             encoding_format: Some("float".into()),
-            dimensions: self.config.dimension,
+            dimensions: self.config.request_dimensions,
         }
     }
 
@@ -233,6 +233,7 @@ mod tests {
     fn build_request_applies_preprocessor_and_dimensions() {
         let config = EmbeddingConfig::new("http://example.com", "nomic-embed")
             .with_dimension(768)
+            .with_request_dimensions(512)
             .with_preprocessor(PreprocessorConfig::Prefix {
                 prefix: "search_query: ".into(),
             });
@@ -241,7 +242,18 @@ mod tests {
         assert_eq!(request.model, "nomic-embed");
         assert_eq!(request.input, vec!["search_query: rust".to_string()]);
         assert_eq!(request.encoding_format.as_deref(), Some("float"));
-        assert_eq!(request.dimensions, Some(768));
+        assert_eq!(request.dimensions, Some(512));
+    }
+
+    #[test]
+    fn build_request_omits_dimensions_for_fixed_dimension_models() {
+        // Fixed-dimension models (e.g. BAAI/bge-m3) reject the `dimensions`
+        // request parameter; only the validation dimension is configured.
+        let config =
+            EmbeddingConfig::new("http://example.com", "bge-m3").with_dimension(1024);
+        let provider = OpenAICompatibleProvider::new(config).expect("valid config");
+        let request = provider.build_request(&["rust".to_string()]);
+        assert_eq!(request.dimensions, None);
     }
 
     #[test]

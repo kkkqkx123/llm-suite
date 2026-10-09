@@ -4,6 +4,19 @@
 //! servers such as Ollama need none), the expected vector dimension is part
 //! of the config so misconfigured deployments fail fast, and a preprocessor
 //! selects query/document prompt prefixes.
+//!
+//! Two distinct dimension concepts live in this config and must not be
+//! conflated:
+//! - [`EmbeddingConfig::dimension`] is a *local* value: the expected output
+//!   size used for startup validation and response checking. It is never
+//!   sent to the API.
+//! - [`EmbeddingConfig::request_dimensions`] is a *wire* parameter: the
+//!   OpenAI `dimensions` request field for models supporting output
+//!   truncation. Fixed-dimension models (BAAI/bge-m3, all-minilm, ...) reject
+//!   it, so it stays absent unless explicitly configured.
+//!
+//! General rule: any config field that is purely a local expectation must
+//! never leak into a request body; wire-only parameters get their own field.
 
 use std::collections::HashMap;
 
@@ -28,6 +41,12 @@ pub struct EmbeddingConfig {
     /// Expected vector dimension; required so startup validates the wiring.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dimension: Option<usize>,
+    /// `dimensions` request parameter sent to the API for models that
+    /// support output truncation (e.g. OpenAI `text-embedding-3-*`).
+    /// Absent for fixed-dimension models (e.g. BAAI/bge-m3), which reject
+    /// the parameter with HTTP 400.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_dimensions: Option<usize>,
     /// Text preprocessing applied before sending the request.
     #[serde(default)]
     pub preprocessor: PreprocessorConfig,
@@ -55,6 +74,7 @@ impl EmbeddingConfig {
             model: model.into(),
             timeout_secs: default_timeout_secs(),
             dimension: None,
+            request_dimensions: None,
             preprocessor: PreprocessorConfig::default(),
             proxy: None,
             headers: std::collections::HashMap::new(),
@@ -111,6 +131,13 @@ impl EmbeddingConfig {
         self
     }
 
+    /// Sets the `dimensions` request parameter sent to the API (only for
+    /// models supporting output truncation).
+    pub fn with_request_dimensions(mut self, dimensions: usize) -> Self {
+        self.request_dimensions = Some(dimensions);
+        self
+    }
+
     /// Sets the text preprocessor.
     pub fn with_preprocessor(mut self, preprocessor: PreprocessorConfig) -> Self {
         self.preprocessor = preprocessor;
@@ -150,6 +177,7 @@ impl Default for EmbeddingConfig {
             model: "all-minilm".into(),
             timeout_secs: default_timeout_secs(),
             dimension: None,
+            request_dimensions: None,
             preprocessor: PreprocessorConfig::default(),
             proxy: None,
             headers: std::collections::HashMap::new(),
