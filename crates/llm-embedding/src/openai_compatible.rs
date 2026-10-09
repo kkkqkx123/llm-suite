@@ -68,17 +68,12 @@ impl OpenAICompatibleProvider {
     /// Creates a provider; fails fast when the config is incomplete.
     pub fn new(config: EmbeddingConfig) -> Result<Self> {
         config.validate()?;
-        let mut builder =
-            reqwest::Client::builder().timeout(std::time::Duration::from_secs(config.timeout_secs));
-        if let Some(proxy_url) = config.proxy.as_deref() {
-            let proxy = reqwest::Proxy::all(proxy_url).map_err(|err| {
-                EmbeddingError::Config(format!("invalid proxy '{proxy_url}': {err}"))
-            })?;
-            builder = builder.proxy(proxy);
-        }
-        let client = builder
-            .build()
-            .map_err(|err| EmbeddingError::Config(format!("failed to build HTTP client: {err}")))?;
+        let client = llm_proxy::build_http_client(
+            config.timeout_secs,
+            config.proxy.as_deref(),
+            &config.no_proxy,
+        )
+        .map_err(|err| EmbeddingError::Config(err.to_string()))?;
         let preprocessor = PreprocessorImpl::from_config(&config.preprocessor);
         Ok(Self {
             config,
@@ -227,6 +222,32 @@ mod tests {
     fn requires_complete_config() {
         let missing_dimension = EmbeddingConfig::new("http://example.com", "model");
         assert!(OpenAICompatibleProvider::new(missing_dimension).is_err());
+    }
+
+    #[test]
+    fn accepts_a_proxy_with_a_bypass_list() {
+        let config = test_config().with_proxy("http://127.0.0.1:7890");
+        let config = EmbeddingConfig {
+            no_proxy: vec!["localhost".to_string()],
+            ..config
+        };
+
+        assert!(OpenAICompatibleProvider::new(config).is_ok());
+    }
+
+    #[test]
+    fn rejects_an_unusable_proxy_without_echoing_the_url() {
+        let config = test_config().with_proxy("ftp://user:secret@127.0.0.1:7890");
+
+        let error = OpenAICompatibleProvider::new(config)
+            .expect_err("unsupported scheme must fail")
+            .to_string();
+
+        assert!(error.contains("ftp"), "{error}");
+        assert!(
+            !error.contains("secret") && !error.contains("127.0.0.1:7890"),
+            "credentials must not leak into the error: {error}"
+        );
     }
 
     #[test]

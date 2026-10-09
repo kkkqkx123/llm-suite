@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use llm_types::llm::{MessageStreamEvent, StreamStats, TokenUsageStats};
 
-use llm_codec::error::LlmError;
 use crate::stream::MessageStream;
+use llm_codec::error::LlmError;
 
 /// Generic token-usage sink decoupled from any concrete metrics collector.
 /// Implementations receive prompt/completion token counts, cost and model

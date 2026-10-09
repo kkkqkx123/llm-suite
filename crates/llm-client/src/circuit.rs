@@ -29,10 +29,7 @@ impl Default for CircuitBreakerConfig {
 #[derive(Debug)]
 enum State {
     /// Requests flow through; failures are counted in the window.
-    Closed {
-        failures: u32,
-        samples: u32,
-    },
+    Closed { failures: u32, samples: u32 },
     /// Requests are rejected until `open_until`.
     Open { open_until: Instant },
     /// Limited probes flow; any failure reopens the breaker.
@@ -302,7 +299,10 @@ mod tests {
         }
         // Every admission was paired with a success, so the breaker must be
         // closed and admitting at the end.
-        assert!(cb.check_allowed(), "breaker must be closed after all-success");
+        assert!(
+            cb.check_allowed(),
+            "breaker must be closed after all-success"
+        );
         assert!(
             admitted.load(std::sync::atomic::Ordering::Relaxed) > 0,
             "at least some requests must have been admitted"

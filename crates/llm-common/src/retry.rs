@@ -12,13 +12,21 @@ pub struct RetryPolicy {
 }
 
 impl RetryPolicy {
-    /// Delay before `attempt` (1-based) in ms.
+    /// Delay before `attempt` (1-based) in ms. `floor_ms` (e.g. a provider
+    /// `Retry-After` value) raises the computed delay so rate-limit hints
+    /// are honored even when the backoff would fire earlier.
     pub fn delay_for_attempt(&self, attempt: u32) -> u64 {
-        if self.exponential_backoff {
+        self.delay_for_attempt_with_floor(attempt, 0)
+    }
+
+    /// Delay before `attempt` (1-based) in ms, bounded below by `floor_ms`.
+    pub fn delay_for_attempt_with_floor(&self, attempt: u32, floor_ms: u64) -> u64 {
+        let computed = if self.exponential_backoff {
             self.base_delay_ms * 2u64.pow(attempt.saturating_sub(1))
         } else {
             self.base_delay_ms
-        }
+        };
+        computed.max(floor_ms)
     }
 }
 
@@ -41,12 +49,41 @@ pub struct RetryAttemptDescriptor {
 /// is `None` the operation runs exactly once (fail fast). An optional cancel
 /// token interrupts the retry delay, returning the paired error value.
 /// `reason` labels the failure for the `on_retry` observation callback.
+/// `delay_floor` optionally extracts a minimum wait from the latest result
+/// (e.g. a provider `Retry-After` hint on a rate-limit error), raising the
+/// scheduled delay above the plain backoff value.
 pub async fn execute_with_retry_observed<F, Fut, T, E>(
     policy: Option<&RetryPolicy>,
     should_retry: impl Fn(&Result<T, E>) -> bool,
     reason: impl Fn(&Result<T, E>) -> String,
     on_retry: Option<&(dyn Fn(&RetryAttemptDescriptor) + Send + Sync)>,
     cancel: Option<(&CancellationToken, E)>,
+    operation: F,
+) -> Result<T, E>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    execute_with_retry_floor(
+        policy,
+        should_retry,
+        reason,
+        on_retry,
+        cancel,
+        |_| 0,
+        operation,
+    )
+    .await
+}
+
+/// Like [`execute_with_retry_observed`] with a per-result delay floor.
+pub async fn execute_with_retry_floor<F, Fut, T, E>(
+    policy: Option<&RetryPolicy>,
+    should_retry: impl Fn(&Result<T, E>) -> bool,
+    reason: impl Fn(&Result<T, E>) -> String,
+    on_retry: Option<&(dyn Fn(&RetryAttemptDescriptor) + Send + Sync)>,
+    cancel: Option<(&CancellationToken, E)>,
+    delay_floor: impl Fn(&Result<T, E>) -> u64,
     operation: F,
 ) -> Result<T, E>
 where
@@ -67,7 +104,7 @@ where
             return result;
         }
         attempt += 1;
-        let delay_ms = policy.delay_for_attempt(attempt);
+        let delay_ms = policy.delay_for_attempt_with_floor(attempt, delay_floor(&result));
         if let Some(callback) = on_retry {
             callback(&RetryAttemptDescriptor {
                 attempt,

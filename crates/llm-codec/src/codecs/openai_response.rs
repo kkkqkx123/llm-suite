@@ -1,10 +1,10 @@
 use super::LlmCodec;
 use crate::error::LlmResult;
+use llm_types::llm::{LlmProfile, LlmRequest, LlmResult as LlmResponseType, MessageStreamEvent};
+use llm_types::tool::Tool;
 use reqwest::Method;
 use std::collections::HashMap;
 use std::sync::Mutex;
-use llm_types::llm::{LlmProfile, LlmRequest, LlmResult as LlmResponseType, MessageStreamEvent};
-use llm_types::tool::Tool;
 
 pub struct OpenaiResponseCodec {
     base_url: String,
@@ -731,6 +731,7 @@ mod tests {
             stream_options: None,
             context_window_size: None,
             proxy: None,
+            no_proxy: None,
             circuit_breaker: None,
         }
     }

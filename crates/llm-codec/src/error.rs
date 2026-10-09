@@ -12,6 +12,8 @@ pub enum LlmError {
     ProviderError {
         status: Option<u16>,
         message: String,
+        /// Parsed `Retry-After` for 429 responses; `None` when absent.
+        retry_after_ms: Option<u64>,
     },
 
     /// The provider rejected the request because the actual payload exceeds
@@ -142,6 +144,7 @@ mod tests {
                 LlmError::ProviderError {
                     status: Some(status),
                     message: "boom".to_string(),
+                    retry_after_ms: None,
                 }
                 .is_retryable(),
                 "status {status} must be retryable"
@@ -156,6 +159,7 @@ mod tests {
                 !LlmError::ProviderError {
                     status: Some(status),
                     message: "bad".to_string(),
+                    retry_after_ms: None,
                 }
                 .is_retryable(),
                 "status {status} must not be retryable"
@@ -168,6 +172,7 @@ mod tests {
         assert!(!LlmError::ProviderError {
             status: None,
             message: "500 internal".to_string(),
+            retry_after_ms: None,
         }
         .is_retryable());
     }
@@ -215,8 +220,15 @@ mod tests {
             retry_after_ms: Some(1500),
         };
         assert!(err.is_retryable(), "429 must be retryable");
-        assert!(matches!(err, LlmError::RateLimited { retry_after_ms: Some(1500) }));
-        let bare = LlmError::RateLimited { retry_after_ms: None };
+        assert!(matches!(
+            err,
+            LlmError::RateLimited {
+                retry_after_ms: Some(1500)
+            }
+        ));
+        let bare = LlmError::RateLimited {
+            retry_after_ms: None,
+        };
         assert!(bare.is_retryable());
     }
 
@@ -232,7 +244,10 @@ mod tests {
 
     #[test]
     fn new_variants_are_not_context_length() {
-        assert!(!LlmError::RateLimited { retry_after_ms: None }.is_context_length_exceeded());
+        assert!(!LlmError::RateLimited {
+            retry_after_ms: None
+        }
+        .is_context_length_exceeded());
         assert!(!LlmError::CircuitOpen.is_context_length_exceeded());
         assert!(!LlmError::ProxyError("x".to_string()).is_context_length_exceeded());
     }
@@ -248,6 +263,7 @@ mod tests {
             let err = LlmError::ProviderError {
                 status: Some(400),
                 message: msg.to_string(),
+                retry_after_ms: None,
             };
             assert!(err.is_context_length_exceeded(), "must classify: {msg}");
         }
@@ -260,6 +276,7 @@ mod tests {
         let err = LlmError::ProviderError {
             status: Some(429),
             message: "rate limit".to_string(),
+            retry_after_ms: None,
         };
         assert!(!err.is_context_length_exceeded());
         assert!(!LlmError::Timeout(100).is_context_length_exceeded());

@@ -3,12 +3,15 @@
 //! Provides fast token count estimation supporting ASCII, CJK, and other Unicode.
 //! Used across the codebase for LLM request sizing, chunking, and content compression.
 
-/// Tokens per ASCII symbol (punctuation) character (default: 0.5)
+/// Tokens per ASCII symbol (punctuation) character (default: 1.0)
 ///
 /// Symbols like `->`, `(`, `{` are typically tokenized separately from
 /// identifiers. Counting them at the latin factor would underestimate
-/// code-heavy text; 0.5 per symbol approximates standalone punctuation tokens.
-pub const SYMBOL_FACTOR: f32 = 0.5;
+/// code-heavy text. 1.0 per symbol is the conservative single value shared
+/// with the host token estimation: it errs toward over-counting, which
+/// protects batch budgets against provider 400s rather than silently
+/// truncating provider context.
+pub const SYMBOL_FACTOR: f32 = 1.0;
 
 /// Tokens per message metadata overhead (role, separators, etc.)
 pub const MESSAGE_OVERHEAD_TOKENS: u32 = 4;
@@ -269,8 +272,8 @@ mod tests {
 
         let text = "How are you?";
         let tokens = estimator.estimate_with_config(text);
-        // 9 letters * 0.3 = 2.7 + "?" 0.5 + 2 ws * 0.5 = 4.2 -> 4
-        assert_eq!(tokens, 4, "tokens: {}", tokens);
+        // 9 letters * 0.3 = 2.7 + "?" 1.0 + 2 ws * 0.5 = 4.7 -> 5
+        assert_eq!(tokens, 5, "tokens: {}", tokens);
     }
 
     #[test]
@@ -297,10 +300,10 @@ mod tests {
         let text = "fn foo() -> u32";
         let tokens = estimate_tokens(text);
         // letters: "fnfoou32" = 8 * 0.25 = 2.0
-        // symbols: "()->" = 4 * 0.5 = 2.0
+        // symbols: "()->" = 4 * 1.0 = 4.0
         // whitespace: 3 * 0.5 = 1.5
-        // total 5.5 -> 6
-        assert_eq!(tokens, 6, "tokens: {}", tokens);
+        // total 7.5 -> 8
+        assert_eq!(tokens, 8, "tokens: {}", tokens);
     }
 
     #[test]

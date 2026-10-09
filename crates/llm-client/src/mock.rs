@@ -18,9 +18,9 @@ use llm_types::llm::{
 use llm_types::message::{LlmToolCall, Message, MessageContentValue, MessageRole};
 
 use crate::client::LlmClient;
+use crate::stream::MessageStream;
 use llm_codec::error::{LlmError, LlmResult};
 use llm_message::helper::extract_text_content;
-use crate::stream::MessageStream;
 
 /// Builder that turns a natural-language description into a real `LlmResult`,
 /// generating the matching assistant `Message` (content or tool_calls).

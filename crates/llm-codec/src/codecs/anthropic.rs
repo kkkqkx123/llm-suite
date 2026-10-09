@@ -1,8 +1,8 @@
 use super::LlmCodec;
 use crate::error::LlmResult;
-use reqwest::Method;
 use llm_types::llm::{LlmProfile, LlmRequest, LlmResult as LlmResponseType, MessageStreamEvent};
 use llm_types::tool::Tool;
+use reqwest::Method;
 
 pub struct AnthropicCodec {
     base_url: String,
@@ -37,7 +37,8 @@ impl AnthropicCodec {
         // in the dedicated `system` field. Text mode injects the original
         // system + tool usage instructions + declarations; native mode keeps
         // the original system message.
-        let (system_content, _) = llm_tool_call::tool::protocol::extract_system_message(&request.messages);
+        let (system_content, _) =
+            llm_tool_call::tool::protocol::extract_system_message(&request.messages);
 
         let history = if use_text_mode {
             super::shared::convert_history_for_text_mode(&request.messages, request)
@@ -105,7 +106,8 @@ impl AnthropicCodec {
             "messages": messages,
         });
 
-        let (system_content, _) = llm_tool_call::tool::protocol::extract_system_message(&request.messages);
+        let (system_content, _) =
+            llm_tool_call::tool::protocol::extract_system_message(&request.messages);
         if let Some(system) = system_content {
             if !system.is_empty() {
                 body["system"] = serde_json::json!(system);
@@ -697,6 +699,7 @@ mod tests {
             stream_options: None,
             context_window_size: None,
             proxy: None,
+            no_proxy: None,
             circuit_breaker: None,
         }
     }

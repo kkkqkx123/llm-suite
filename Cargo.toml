@@ -13,6 +13,7 @@ members = [
     "crates/llm-client",
     "crates/llm-config",
     "crates/llm-gateway",
+    "crates/llm-proxy",
 ]
 
 [workspace.package]

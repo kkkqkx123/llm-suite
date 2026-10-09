@@ -1,9 +1,9 @@
 use super::LlmCodec;
 use crate::error::LlmResult;
-use reqwest::Method;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use llm_types::llm::{LlmProfile, LlmRequest, LlmResult as LlmResponseType, MessageStreamEvent};
 use llm_types::tool::Tool;
+use reqwest::Method;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Globally unique tool call indices for Gemini streams (each `functionCall`
 /// part is a complete snapshot; unique indices keep separate calls apart in
@@ -300,7 +300,8 @@ impl GeminiNativeCodec {
         // field in both modes. Text mode injects the original system + tool
         // usage instructions + declarations; native mode keeps the original
         // system message.
-        let (system_content, _) = llm_tool_call::tool::protocol::extract_system_message(&request.messages);
+        let (system_content, _) =
+            llm_tool_call::tool::protocol::extract_system_message(&request.messages);
 
         let history = if use_text_mode {
             super::shared::convert_history_for_text_mode(&request.messages, request)
@@ -530,6 +531,7 @@ mod tests {
             stream_options: None,
             context_window_size: None,
             proxy: None,
+            no_proxy: None,
             circuit_breaker: None,
         }
     }

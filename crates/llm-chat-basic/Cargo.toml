@@ -17,6 +17,7 @@ retry = ["dep:tokio"]
 ratelimit = ["dep:tokio"]
 
 [dependencies]
+llm-proxy = { version = "0.1.0", path = "../llm-proxy" }
 llm-types = { version = "0.1.0", path = "../llm-types" }
 reqwest = { workspace = true }
 serde = { workspace = true }

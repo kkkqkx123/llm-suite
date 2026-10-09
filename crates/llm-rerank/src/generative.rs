@@ -26,8 +26,12 @@ pub struct GenerativeChatEndpoint {
     pub api_key: Option<String>,
     /// Chat model used for scoring.
     pub model: String,
-    /// Proxy URL (http/https/socks5); absent for direct connections.
+    /// Proxy URL (http/https/socks4/socks4a/socks5/socks5h); absent for
+    /// direct connections.
     pub proxy: Option<String>,
+    /// Hosts that bypass `proxy`: domain names (with or without a leading
+    /// dot), CIDR blocks, or `*`.
+    pub no_proxy: Vec<String>,
     /// Extra HTTP headers sent with every request.
     pub headers: HashMap<String, String>,
     /// Extra query parameters appended to every request URL.
@@ -42,6 +46,7 @@ impl GenerativeChatEndpoint {
             api_key: None,
             model: model.into(),
             proxy: None,
+            no_proxy: Vec::new(),
             headers: HashMap::new(),
             query_params: HashMap::new(),
         }
@@ -53,9 +58,15 @@ impl GenerativeChatEndpoint {
         self
     }
 
-    /// Sets the proxy URL (http/https/socks5).
+    /// Sets the proxy URL (http/https/socks4/socks4a/socks5/socks5h).
     pub fn with_proxy(mut self, proxy: impl Into<String>) -> Self {
         self.proxy = Some(proxy.into());
+        self
+    }
+
+    /// Sets the hosts that bypass `proxy`.
+    pub fn with_no_proxy(mut self, no_proxy: Vec<String>) -> Self {
+        self.no_proxy = no_proxy;
         self
     }
 }
@@ -69,16 +80,12 @@ pub struct GenerativeRerankProvider {
 impl GenerativeRerankProvider {
     /// Creates a provider for a chat endpoint and HTTP timeout.
     pub fn new(endpoint: GenerativeChatEndpoint, timeout_secs: u64) -> Result<Self> {
-        let mut builder =
-            reqwest::Client::builder().timeout(std::time::Duration::from_secs(timeout_secs.max(1)));
-        if let Some(proxy_url) = endpoint.proxy.as_deref() {
-            let proxy = reqwest::Proxy::all(proxy_url)
-                .map_err(|err| RerankError::Transport(format!("invalid proxy: {err}")))?;
-            builder = builder.proxy(proxy);
-        }
-        let client = builder
-            .build()
-            .map_err(|err| RerankError::Transport(err.to_string()))?;
+        let client = llm_proxy::build_http_client(
+            timeout_secs,
+            endpoint.proxy.as_deref(),
+            &endpoint.no_proxy,
+        )
+        .map_err(|err| RerankError::Transport(err.to_string()))?;
         Ok(Self { endpoint, client })
     }
 

@@ -38,6 +38,9 @@ pub struct LlmProviderDefinition {
     /// Default proxy URL (http/https/socks5); a profile-level `proxy` wins.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy: Option<String>,
+    /// Default hosts that bypass `proxy`; a profile-level `no_proxy` wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_proxy: Option<Vec<String>>,
     /// Provider-level rate limit shared by all profiles on this base URL.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limit: Option<super::RateLimitConfig>,

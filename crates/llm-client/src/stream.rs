@@ -1,12 +1,9 @@
-use llm_codec::LlmCodec;
 use crate::dead_loop_detector::DeadLoopDetector;
-use llm_codec::error::LlmError;
 use async_trait::async_trait;
 use eventsource_stream::EventStream;
 use futures::StreamExt;
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
+use llm_codec::error::LlmError;
+use llm_codec::LlmCodec;
 use llm_types::llm::{
     MessageStreamEvent, MessageStreamFinal, MessageStreamInputJson, MessageStreamReasoning,
     MessageStreamText, TokenUsageStats,
@@ -14,6 +11,9 @@ use llm_types::llm::{
 use llm_types::message::{
     LlmFunctionCall, LlmToolCall, Message, MessageContent, MessageContentValue, MessageRole,
 };
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 #[async_trait]
 pub trait MessageStream: Send {
@@ -209,10 +209,11 @@ impl MessageAccumulator {
                     .push_str(&input_json.partial_json);
 
                 // Try to parse the accumulated JSON
-                let parsed_snapshot =
-                    llm_tool_call::partial_json_parser::parse_partial_json(&partial_tool_call.arguments)
-                        .as_complete()
-                        .cloned();
+                let parsed_snapshot = llm_tool_call::partial_json_parser::parse_partial_json(
+                    &partial_tool_call.arguments,
+                )
+                .as_complete()
+                .cloned();
 
                 Some(MessageStreamEvent::InputJson(MessageStreamInputJson {
                     partial_json: input_json.partial_json,

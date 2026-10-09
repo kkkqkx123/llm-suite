@@ -53,13 +53,25 @@ pub struct BasicChatClient {
 
 impl BasicChatClient {
     /// Creates a client for a base URL such as `https://api.openai.com/v1`.
+    ///
+    /// `proxy` accepts the same URL schemes as the rest of the suite
+    /// (http/https/socks4/socks4a/socks5/socks5h); `no_proxy` lists hosts
+    /// that bypass it. Both absent means a direct connection.
     pub fn new(
         base_url: impl Into<String>,
         api_key: Option<String>,
         timeout_secs: u64,
+        proxy: Option<&str>,
+        no_proxy: &[String],
     ) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(timeout_secs.max(1)))
+        let mut builder =
+            reqwest::Client::builder().timeout(std::time::Duration::from_secs(timeout_secs.max(1)));
+        if let Some(proxy_url) = proxy {
+            let proxy = llm_proxy::build_proxy(proxy_url, no_proxy)
+                .map_err(|err| ChatError::Transport(err.to_string()))?;
+            builder = builder.proxy(proxy);
+        }
+        let http = builder
             .build()
             .map_err(|err| ChatError::Transport(err.to_string()))?;
         Ok(Self {
@@ -224,8 +236,8 @@ mod tests {
 
     #[test]
     fn build_body_maps_roles_and_config() {
-        let client =
-            BasicChatClient::new("https://api.example.com/v1/", None, 30).expect("client builds");
+        let client = BasicChatClient::new("https://api.example.com/v1/", None, 30, None, &[])
+            .expect("client builds");
         assert_eq!(client.base_url(), "https://api.example.com/v1");
 
         let messages = vec![
@@ -243,8 +255,8 @@ mod tests {
 
     #[test]
     fn build_body_rejects_empty_messages() {
-        let client =
-            BasicChatClient::new("https://api.example.com/v1", None, 30).expect("client builds");
+        let client = BasicChatClient::new("https://api.example.com/v1", None, 30, None, &[])
+            .expect("client builds");
         let result = client.build_body(&[], &ChatConfig::new("m"));
         assert!(matches!(result, Err(ChatError::InvalidRequest(_))));
     }

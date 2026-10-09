@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use llm_types::llm::LlmProfile;
+use std::collections::HashMap;
 
 /// Deep merge two JSON values:
 /// - Arrays are concatenated
@@ -97,6 +97,7 @@ mod tests {
             stream_options: None,
             context_window_size: None,
             proxy: None,
+            no_proxy: None,
             circuit_breaker: None,
         }
     }

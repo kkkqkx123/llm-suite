@@ -37,6 +37,7 @@ fn http_profile(id: &str, base_url: &str, max_retries: u32) -> LlmProfile {
         stream_options: None,
         context_window_size: None,
         proxy: None,
+        no_proxy: None,
         circuit_breaker: None,
     }
 }
@@ -194,8 +195,7 @@ async fn circuit_breaker_half_open_probe_closes_breaker() {
 #[tokio::test]
 async fn rate_limiter_throttles_shared_base_url() {
     // Server answers instantly; the limiter is what paces the calls.
-    let server =
-        MockServer::spawn(move |_| MockResponse::ok_json(chat_response_json("ok"))).await;
+    let server = MockServer::spawn(move |_| MockResponse::ok_json(chat_response_json("ok"))).await;
 
     let gateway = LlmGateway::new();
     let mut profile = http_profile("rl-a", &server.url(""), 0);
@@ -239,8 +239,7 @@ async fn rate_limiter_throttles_shared_base_url() {
 
 #[tokio::test]
 async fn rate_limiter_not_configured_admits_immediately() {
-    let server =
-        MockServer::spawn(move |_| MockResponse::ok_json(chat_response_json("ok"))).await;
+    let server = MockServer::spawn(move |_| MockResponse::ok_json(chat_response_json("ok"))).await;
 
     let gateway = LlmGateway::new();
     gateway

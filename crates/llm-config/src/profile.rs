@@ -1,7 +1,7 @@
-use llm_codec::error::{LlmError, LlmResult};
 use dashmap::DashMap;
-use std::sync::{Arc, Mutex};
+use llm_codec::error::{LlmError, LlmResult};
 use llm_types::llm::LlmProfile;
+use std::sync::{Arc, Mutex};
 
 /// Manages LLM profiles with default-profile semantics (first registered
 /// profile becomes the default; an explicit default can be set; removing the
@@ -190,6 +190,7 @@ mod tests {
             stream_options: None,
             context_window_size: None,
             proxy: None,
+            no_proxy: None,
             circuit_breaker: None,
         }
     }

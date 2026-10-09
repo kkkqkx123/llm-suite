@@ -7,8 +7,8 @@ use std::sync::Arc;
 use llm_client::{LlmResponseSpec, MockLlmClient};
 use llm_gateway::LlmGateway;
 use llm_message::message_builder::user_text;
-use llm_types::llm::{LlmFormat, LlmRequest};
 use llm_types::llm::profile::LlmProfile;
+use llm_types::llm::{LlmFormat, LlmRequest};
 
 fn profile(id: &str) -> LlmProfile {
     profile_with_retries(id, None)
@@ -42,6 +42,7 @@ fn profile_with_retries(id: &str, max_retries: Option<u32>) -> LlmProfile {
         stream_options: None,
         context_window_size: None,
         proxy: None,
+        no_proxy: None,
         circuit_breaker: None,
     }
 }

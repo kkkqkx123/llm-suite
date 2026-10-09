@@ -7,14 +7,14 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use llm_client::client::LlmClientImpl;
+use llm_client::http_mock::{MockResponse, MockServer};
 use llm_client::LlmClient;
 use llm_codec::codecs::OpenaiChatCodec;
-use llm_client::http_mock::{MockResponse, MockServer};
-use llm_client::client::LlmClientImpl;
 use llm_gateway::LlmGateway;
 use llm_message::message_builder::user_text;
-use llm_types::llm::{LlmFormat, LlmRequest};
 use llm_types::llm::profile::LlmProfile;
+use llm_types::llm::{LlmFormat, LlmRequest};
 
 fn http_profile(id: &str, base_url: &str, max_retries: u32) -> LlmProfile {
     LlmProfile {
@@ -41,6 +41,7 @@ fn http_profile(id: &str, base_url: &str, max_retries: u32) -> LlmProfile {
         stream_options: None,
         context_window_size: None,
         proxy: None,
+        no_proxy: None,
         circuit_breaker: None,
     }
 }
@@ -174,10 +175,8 @@ async fn transport_retries_transient_server_error_then_succeeds() {
 
 #[tokio::test]
 async fn retry_exhaustion_surfaces_provider_error() {
-    let server = MockServer::spawn(move |_| {
-        MockResponse::status(429, r#"{"error": "rate limited"}"#)
-    })
-    .await;
+    let server =
+        MockServer::spawn(move |_| MockResponse::status(429, r#"{"error": "rate limited"}"#)).await;
 
     let gateway = LlmGateway::new();
     gateway
@@ -191,7 +190,10 @@ async fn retry_exhaustion_surfaces_provider_error() {
 
     // 1 initial attempt + 1 retry = 2 calls, then the provider error surfaces.
     assert_eq!(server.call_count(), 2);
-    assert!(error.is_retryable(), "429 must classify as retryable: {error}");
+    assert!(
+        error.is_retryable(),
+        "429 must classify as retryable: {error}"
+    );
 }
 
 #[tokio::test]

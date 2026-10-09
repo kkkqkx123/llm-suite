@@ -13,7 +13,6 @@ use llm_config::merge_request;
 use llm_config::profile::ProfileManager;
 use llm_config::provider::{apply_provider_defaults, ProviderDefinitionRegistry};
 
-
 /// Assembled request ready for dispatch: the resolved profile snapshot,
 /// the merged effective request and the cached client bound to them.
 /// Produced only by `LlmGateway::prepare` so every entry point shares
@@ -107,28 +106,75 @@ impl LlmGateway {
         Ok(())
     }
 
-    /// Register a provider definition. All cached clients are evicted so
-    /// profiles referencing the definition pick up the new defaults.
+    /// Register a provider definition. Only cached clients for profiles
+    /// referencing the definition are evicted, so unrelated profiles keep
+    /// their clients.
     pub fn register_provider_definition(
         &self,
         definition: llm_types::llm::LlmProviderDefinition,
     ) -> LlmResult<()> {
+        let provider_id = definition.id.clone();
         self.providers.register(definition)?;
-        self.clients.clear();
+        self.evict_clients_for_provider(&provider_id);
         Ok(())
     }
 
-    /// Remove a provider definition and evict all cached clients. Profiles
-    /// referencing the removed definition keep their merged snapshot.
+    /// Remove a provider definition and evict cached clients for profiles
+    /// referencing it. Those profiles keep their merged snapshot.
     pub fn remove_provider_definition(
         &self,
         id: &str,
     ) -> Option<llm_types::llm::LlmProviderDefinition> {
         let removed = self.providers.remove(id);
         if removed.is_some() {
-            self.clients.clear();
+            self.evict_clients_for_provider(id);
         }
         removed
+    }
+
+    /// Evict cached clients whose profile references the given provider id.
+    fn evict_clients_for_provider(&self, provider_id: &str) {
+        let affected: Vec<String> = self
+            .profiles
+            .list()
+            .into_iter()
+            .filter(|profile| profile.provider_id.as_deref() == Some(provider_id))
+            .map(|profile| client_cache_key(&profile))
+            .collect();
+        for key in affected {
+            self.clients.remove(&key);
+        }
+    }
+
+    /// Circuit breaker for an arbitrary endpoint key (typically
+    /// `base_url::provider_id`), shared with the chat path: embedding and
+    /// rerank providers register against the same registry so one upstream
+    /// shares one breaker across all three call paths.
+    pub fn shared_breaker(
+        &self,
+        key: &str,
+        config: llm_client::CircuitBreakerConfig,
+    ) -> Arc<llm_client::CircuitBreaker> {
+        self.circuit_breakers
+            .entry(key.to_string())
+            .or_insert_with(|| Arc::new(llm_client::CircuitBreaker::new(config)))
+            .clone()
+    }
+
+    /// Rate limiter for an arbitrary endpoint key (typically
+    /// `base_url::provider_id`), shared with the chat path so the combined
+    /// request rate across chat/embedding/rerank stays under the upstream
+    /// budget.
+    pub fn shared_limiter(
+        &self,
+        key: &str,
+        requests_per_second: f64,
+        burst: u32,
+    ) -> Arc<llm_common::ratelimit::RateLimiter> {
+        self.rate_limiters
+            .entry(key.to_string())
+            .or_insert_with(|| Arc::new(llm_common::ratelimit::RateLimiter::new(requests_per_second, burst)))
+            .clone()
     }
 
     /// Register a mock client under an arbitrary id (a real profile id can be
@@ -328,10 +374,7 @@ impl LlmGateway {
     /// wins, otherwise the referenced provider definition's `rate_limit`.
     /// Keyed by resolved base URL so profiles sharing a provider share one
     /// token bucket.
-    fn limiter_for(
-        &self,
-        profile: &LlmProfile,
-    ) -> Option<Arc<llm_common::ratelimit::RateLimiter>> {
+    fn limiter_for(&self, profile: &LlmProfile) -> Option<Arc<llm_common::ratelimit::RateLimiter>> {
         let base_url = profile.base_url.clone().unwrap_or_default();
         let key = format!(
             "{}::{}",
@@ -345,9 +388,7 @@ impl LlmGateway {
             .metadata
             .as_ref()
             .and_then(|m| m.get("rate_limit"))
-            .and_then(|v| {
-                serde_json::from_value::<llm_types::llm::RateLimitConfig>(v.clone()).ok()
-            })
+            .and_then(|v| serde_json::from_value::<llm_types::llm::RateLimitConfig>(v.clone()).ok())
             .or_else(|| {
                 let provider_id = profile.provider_id.as_ref()?;
                 let def = self.providers.get(provider_id)?;
@@ -366,17 +407,23 @@ impl LlmGateway {
     fn breaker_for(&self, profile: &LlmProfile) -> Option<Arc<llm_client::CircuitBreaker>> {
         let config = profile.circuit_breaker.clone()?;
         let base_url = profile.base_url.clone().unwrap_or_default();
-        let key = format!("{}::{}", base_url, profile.provider_id.clone().unwrap_or_default());
+        let key = format!(
+            "{}::{}",
+            base_url,
+            profile.provider_id.clone().unwrap_or_default()
+        );
         Some(
             self.circuit_breakers
                 .entry(key)
                 .or_insert_with(|| {
-                    Arc::new(llm_client::CircuitBreaker::new(llm_client::CircuitBreakerConfig {
-                        min_samples: config.min_samples,
-                        failure_threshold: config.failure_threshold,
-                        open_duration_ms: config.open_duration_ms,
-                        half_open_max_probes: config.half_open_max_probes,
-                    }))
+                    Arc::new(llm_client::CircuitBreaker::new(
+                        llm_client::CircuitBreakerConfig {
+                            min_samples: config.min_samples,
+                            failure_threshold: config.failure_threshold,
+                            open_duration_ms: config.open_duration_ms,
+                            half_open_max_probes: config.half_open_max_probes,
+                        },
+                    ))
                 })
                 .clone(),
         )
@@ -395,9 +442,9 @@ impl LlmGateway {
             Ok(_) => breaker.record_success(),
             Err(error) => {
                 let network_level = match error {
-                    LlmError::HttpError(_)
-                    | LlmError::Timeout(_)
-                    | LlmError::StreamError(_) => true,
+                    LlmError::HttpError(_) | LlmError::Timeout(_) | LlmError::StreamError(_) => {
+                        true
+                    }
                     LlmError::ProviderError { status, .. } => {
                         matches!(status, Some(500..=599))
                     }
@@ -429,22 +476,23 @@ impl LlmGateway {
         }
 
         let codec = self.codecs.get_by_format(&profile.format)?;
-        let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(
+        let no_proxy = profile
+            .no_proxy
+            .clone()
+            .or_else(|| {
+                profile
+                    .provider_id
+                    .as_ref()
+                    .and_then(|id| self.providers.get(id))
+                    .and_then(|def| def.no_proxy.clone())
+            })
+            .unwrap_or_default();
+        let client = llm_proxy::build_http_client(
             profile.timeout.unwrap_or(60),
-        ));
-        if let Some(proxy_url) = profile.proxy.as_deref() {
-            let proxy = reqwest::Proxy::all(proxy_url).map_err(|err| {
-                LlmError::ProxyError(format!("invalid proxy '{proxy_url}': {err}"))
-            })?;
-            builder = builder.proxy(proxy);
-        }
-        let client = builder.build().map_err(|err| {
-            if profile.proxy.is_some() {
-                LlmError::ProxyError(format!("failed to build HTTP client: {err}"))
-            } else {
-                LlmError::HttpError(err)
-            }
-        })?;
+            profile.proxy.as_deref(),
+            &no_proxy,
+        )
+        .map_err(|err| LlmError::ProxyError(err.to_string()))?;
 
         let client_impl = Arc::new(LlmClientImpl::new(client, codec, profile.clone()));
         self.clients.insert(key, client_impl.clone());
@@ -493,15 +541,17 @@ impl LlmGateway {
 /// client.
 fn client_cache_key(profile: &LlmProfile) -> String {
     format!(
-        "{}::{}::{}",
+        "{}::{}::{}::{}",
         profile.id,
         profile.model,
-        profile.proxy.as_deref().unwrap_or("")
+        profile.proxy.as_deref().unwrap_or(""),
+        profile.no_proxy.as_deref().unwrap_or(&[]).join(",")
     )
 }
 
 /// Low-cardinality error classifier for LLM request metrics.
-fn classify_error(error: &llm_codec::error::LlmError) -> &'static str {    match error {
+fn classify_error(error: &llm_codec::error::LlmError) -> &'static str {
+    match error {
         llm_codec::error::LlmError::HttpError(_) => "http_error",
         llm_codec::error::LlmError::SerializationError(_) => "serialization_error",
         llm_codec::error::LlmError::ProviderError { .. } => "provider_error",
@@ -531,9 +581,9 @@ impl Default for LlmGateway {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use llm_codec::LlmCodec;
     use llm_codec::error::LlmError;
     use llm_codec::CodecRegistry;
+    use llm_codec::LlmCodec;
     use llm_types::llm::{LlmFormat, LlmProfile, LlmRequest, MessageStreamEvent};
     use llm_types::tool::Tool;
 
@@ -595,6 +645,7 @@ mod tests {
             stream_options: None,
             context_window_size: None,
             proxy: None,
+            no_proxy: None,
             circuit_breaker: None,
         }
     }
@@ -737,6 +788,7 @@ mod tests {
             api_version: None,
             metadata: None,
             proxy: None,
+            no_proxy: None,
             rate_limit: None,
         }
     }
@@ -822,5 +874,50 @@ mod tests {
             gateway.get_or_create_client(&stored),
             Err(LlmError::ProxyError(_))
         ));
+    }
+
+    #[test]
+    fn proxy_error_hides_credentials() {
+        let gateway = LlmGateway::new();
+        gateway
+            .register_profile(profile("p1", LlmFormat::OpenaiChat))
+            .unwrap();
+
+        let mut stored = gateway.profiles.get("p1").unwrap();
+        stored.proxy = Some("ftp://user:secret@127.0.0.1:2121".to_string());
+        let error = match gateway.get_or_create_client(&stored) {
+            Err(LlmError::ProxyError(message)) => message,
+            Err(other) => panic!("unsupported scheme must fail as a proxy error, got {other}"),
+            Ok(_) => panic!("unsupported scheme must fail as a proxy error"),
+        };
+
+        assert!(error.contains("ftp"), "{error}");
+        assert!(
+            !error.contains("secret") && !error.contains("127.0.0.1"),
+            "credentials must stay out of the message: {error}"
+        );
+    }
+
+    #[test]
+    fn bypass_list_change_rebuilds_cached_client() {
+        let gateway = LlmGateway::new();
+        gateway
+            .register_profile(profile("p1", LlmFormat::OpenaiChat))
+            .unwrap();
+        let stored = gateway.profiles.get("p1").unwrap();
+        gateway.get_or_create_client(&stored).unwrap();
+
+        let mut bypassed = stored.clone();
+        bypassed.proxy = Some("http://127.0.0.1:8080".to_string());
+        bypassed.no_proxy = Some(vec!["localhost".to_string()]);
+        let single_key = super::client_cache_key(&bypassed);
+        gateway.get_or_create_client(&bypassed).unwrap();
+
+        bypassed.no_proxy = Some(vec!["localhost".to_string(), "10.0.0.0/8".to_string()]);
+        let wider_key = super::client_cache_key(&bypassed);
+        assert_ne!(
+            single_key, wider_key,
+            "a different bypass list must rebuild the transport"
+        );
     }
 }

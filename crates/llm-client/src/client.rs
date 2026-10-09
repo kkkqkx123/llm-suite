@@ -2,15 +2,15 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use llm_codec::LlmCodec;
-use llm_codec::error::{LlmError, LlmResult};
 use crate::stream::MessageStream;
-use reqwest::Client as ReqwestClient;
-use tokio_util::sync::CancellationToken;
+use llm_codec::error::{LlmError, LlmResult};
+use llm_codec::LlmCodec;
 use llm_common::exec::{execute_with_timeout, TimeoutError};
 use llm_common::parse_retry_after_ms;
 use llm_common::retry::RetryPolicy;
 use llm_types::llm::{LlmProfile, LlmRequest, LlmResult as LlmResponseType};
+use reqwest::Client as ReqwestClient;
+use tokio_util::sync::CancellationToken;
 
 pub trait LlmClient: Send + Sync {
     fn generate(
@@ -109,6 +109,7 @@ impl LlmClientImpl {
             _ => LlmError::ProviderError {
                 status: Some(status.as_u16()),
                 message: body.to_string(),
+                retry_after_ms: None,
             },
         };
         if provisional.is_context_length_exceeded() {
@@ -394,6 +395,7 @@ mod tests {
             stream_options: None,
             context_window_size: None,
             proxy: None,
+            no_proxy: None,
             circuit_breaker: None,
         }
     }
@@ -445,7 +447,12 @@ mod tests {
             }
         ));
         assert!(matches!(
-            LlmClientImpl::map_http_error(reqwest::StatusCode::INTERNAL_SERVER_ERROR, "boom", 5000, None),
+            LlmClientImpl::map_http_error(
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                "boom",
+                5000,
+                None
+            ),
             LlmError::ProviderError { .. }
         ));
     }

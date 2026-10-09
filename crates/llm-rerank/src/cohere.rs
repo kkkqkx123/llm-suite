@@ -24,16 +24,12 @@ pub struct CohereRerankProvider {
 impl CohereRerankProvider {
     /// Creates a provider; `config.base_url` is the full `/rerank` URL.
     pub fn new(config: RerankConfig) -> Result<Self> {
-        let mut builder = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(config.timeout_secs.max(1)));
-        if let Some(proxy_url) = config.proxy.as_deref() {
-            let proxy = reqwest::Proxy::all(proxy_url)
-                .map_err(|err| RerankError::Transport(format!("invalid proxy: {err}")))?;
-            builder = builder.proxy(proxy);
-        }
-        let client = builder
-            .build()
-            .map_err(|err| RerankError::Transport(err.to_string()))?;
+        let client = llm_proxy::build_http_client(
+            config.timeout_secs,
+            config.proxy.as_deref(),
+            &config.no_proxy,
+        )
+        .map_err(|err| RerankError::Transport(err.to_string()))?;
         Ok(Self { config, client })
     }
 

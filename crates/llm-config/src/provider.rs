@@ -151,6 +151,7 @@ mod tests {
             stream_options: None,
             context_window_size: None,
             proxy: None,
+            no_proxy: None,
             circuit_breaker: None,
         }
     }
@@ -172,6 +173,7 @@ mod tests {
             api_version: None,
             metadata: None,
             proxy: Some("http://proxy.acme.test:8080".to_string()),
+            no_proxy: None,
             rate_limit: None,
         }
     }
@@ -201,10 +203,7 @@ mod tests {
             "explicit profile values win"
         );
         assert_eq!(merged.auth_type.as_deref(), Some("bearer"));
-        assert_eq!(
-            merged.proxy.as_deref(),
-            Some("http://proxy.acme.test:8080")
-        );
+        assert_eq!(merged.proxy.as_deref(), Some("http://proxy.acme.test:8080"));
         assert_eq!(
             merged.custom_headers.as_ref().unwrap().get("x-tenant"),
             Some(&serde_json::json!("t1"))
@@ -219,10 +218,7 @@ mod tests {
         let mut profile = profile("p1");
         profile.proxy = Some("http://override.test:3128".to_string());
         let merged = apply_provider_defaults(profile, &registry).unwrap();
-        assert_eq!(
-            merged.proxy.as_deref(),
-            Some("http://override.test:3128")
-        );
+        assert_eq!(merged.proxy.as_deref(), Some("http://override.test:3128"));
     }
 
     #[test]

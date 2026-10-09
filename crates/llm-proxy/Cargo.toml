@@ -1,0 +1,14 @@
+[package]
+name = "llm-proxy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared proxy construction for the llm-suite HTTP clients"
+
+[dependencies]
+# Kept in lockstep with the host workspace so every client crate and this
+# helper resolve one reqwest line, including the socks feature.
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream", "query", "socks"] }
+thiserror = { workspace = true }

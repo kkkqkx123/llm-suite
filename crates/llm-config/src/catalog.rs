@@ -70,6 +70,7 @@ impl ModelCatalog {
                     return Err(LlmError::ProviderError {
                         status: Some(status.as_u16()),
                         message: body,
+                        retry_after_ms: None,
                     });
                 }
                 let json: serde_json::Value = serde_json::from_str(&body)?;
@@ -106,6 +107,7 @@ impl ModelCatalog {
                     return Err(LlmError::ProviderError {
                         status: Some(status.as_u16()),
                         message: body,
+                        retry_after_ms: None,
                     });
                 }
                 let json: serde_json::Value = serde_json::from_str(&body)?;

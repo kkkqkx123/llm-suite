@@ -1,9 +1,9 @@
 use super::shared;
 use super::LlmCodec;
 use crate::error::LlmResult;
-use reqwest::Method;
 use llm_types::llm::{LlmProfile, LlmRequest, LlmResult as LlmResponseType, MessageStreamEvent};
 use llm_types::tool::Tool;
+use reqwest::Method;
 
 pub struct OpenaiChatCodec {
     base_url: String,
@@ -35,7 +35,8 @@ impl OpenaiChatCodec {
         let use_text_mode = shared::is_text_mode(request);
 
         let messages = if use_text_mode {
-            let (_, filtered) = llm_tool_call::tool::protocol::extract_system_message(&request.messages);
+            let (_, filtered) =
+                llm_tool_call::tool::protocol::extract_system_message(&request.messages);
             let content = shared::text_mode_system_content(request);
             let history = shared::convert_history_for_text_mode(&filtered, request);
             let mut converted = shared::convert_openai_messages(&history);
@@ -84,10 +85,15 @@ impl LlmCodec for OpenaiChatCodec {
         request: &LlmRequest,
         profile: &LlmProfile,
     ) -> LlmResult<reqwest::Request> {
-        let url = format!(
-            "{}/chat/completions",
-            profile.base_url.as_deref().unwrap_or(&self.base_url)
-        );
+        // The profile may carry a full endpoint URL (custom path or query
+        // string such as Azure `.../chat/completions?api-version=...`); in
+        // that case it is used as-is, otherwise the built-in path applies.
+        let profile_url = profile.base_url.as_deref().unwrap_or(&self.base_url);
+        let url = if profile_url.contains("/chat/completions") {
+            profile_url.to_string()
+        } else {
+            format!("{profile_url}/chat/completions")
+        };
 
         let body = self.build_body(request, profile)?;
 
@@ -187,6 +193,7 @@ mod tests {
             stream_options: None,
             context_window_size: None,
             proxy: None,
+            no_proxy: None,
             circuit_breaker: None,
         }
     }

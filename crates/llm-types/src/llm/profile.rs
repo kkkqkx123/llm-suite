@@ -71,6 +71,10 @@ pub struct LlmProfile {
     /// Optional proxy URL (http/https/socks5) applied to the HTTP client.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy: Option<String>,
+    /// Hosts that bypass `proxy`: domain names (with or without a leading
+    /// dot), CIDR blocks, or `*`. Wins over the provider definition list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_proxy: Option<Vec<String>>,
     /// Optional circuit breaker policy for this profile's endpoint.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub circuit_breaker: Option<super::CircuitBreakerConfig>,

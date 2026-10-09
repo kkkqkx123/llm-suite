@@ -19,9 +19,14 @@ pub struct RerankConfig {
     /// HTTP request timeout in seconds.
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
-    /// Proxy URL (http/https/socks5); absent for direct connections.
+    /// Proxy URL (http/https/socks4/socks4a/socks5/socks5h); absent for
+    /// direct connections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<String>,
+    /// Hosts that bypass `proxy`: domain names (with or without a leading
+    /// dot), CIDR blocks, or `*`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub no_proxy: Vec<String>,
     /// Extra HTTP headers sent with every request.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub headers: std::collections::HashMap<String, String>,
@@ -43,6 +48,7 @@ impl RerankConfig {
             model: model.into(),
             timeout_secs: default_timeout_secs(),
             proxy: None,
+            no_proxy: Vec::new(),
             headers: std::collections::HashMap::new(),
             query_params: std::collections::HashMap::new(),
         }
@@ -54,9 +60,15 @@ impl RerankConfig {
         self
     }
 
-    /// Sets the proxy URL (http/https/socks5).
+    /// Sets the proxy URL (http/https/socks4/socks4a/socks5/socks5h).
     pub fn with_proxy(mut self, proxy: impl Into<String>) -> Self {
         self.proxy = Some(proxy.into());
+        self
+    }
+
+    /// Sets the hosts that bypass `proxy`.
+    pub fn with_no_proxy(mut self, no_proxy: Vec<String>) -> Self {
+        self.no_proxy = no_proxy;
         self
     }
 
