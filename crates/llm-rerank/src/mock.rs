@@ -4,7 +4,7 @@
 //! by descending initial score when no order is given), so assertions never
 //! depend on a remote service.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use async_trait::async_trait;
 
@@ -21,16 +21,16 @@ pub enum MockRerankStep {
 }
 
 // A plain std Mutex is enough: no await is held across the lock.
-type SharedVec<T> = std::sync::Mutex<Vec<T>>;
+type Shared<T> = std::sync::Mutex<T>;
 
 /// Scripted, deterministic `RerankProvider` for tests.
 pub struct MockRerankProvider {
     /// Target order by candidate id; ids absent from the list keep their
     /// relative order after the listed ones.
     id_order: Vec<String>,
-    steps: SharedVec<MockRerankStep>,
+    steps: Shared<VecDeque<MockRerankStep>>,
     /// Recorded candidate counts, in call order.
-    calls: SharedVec<usize>,
+    calls: Shared<Vec<usize>>,
 }
 
 impl MockRerankProvider {
@@ -38,7 +38,7 @@ impl MockRerankProvider {
     pub fn by_score() -> Self {
         Self {
             id_order: Vec::new(),
-            steps: std::sync::Mutex::new(Vec::new()),
+            steps: std::sync::Mutex::new(VecDeque::new()),
             calls: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -47,14 +47,14 @@ impl MockRerankProvider {
     pub fn with_order(id_order: Vec<String>) -> Self {
         Self {
             id_order,
-            steps: std::sync::Mutex::new(Vec::new()),
+            steps: std::sync::Mutex::new(VecDeque::new()),
             calls: std::sync::Mutex::new(Vec::new()),
         }
     }
 
     /// Queue scripted steps consumed in call order.
     pub fn with_steps(self, steps: Vec<MockRerankStep>) -> Self {
-        *self.steps.lock().unwrap_or_else(|p| p.into_inner()) = steps;
+        *self.steps.lock().unwrap_or_else(|p| p.into_inner()) = steps.into();
         self
     }
 
@@ -92,7 +92,11 @@ impl RerankProvider for MockRerankProvider {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .push(request.candidates.len());
-        let step = self.steps.lock().unwrap_or_else(|p| p.into_inner()).pop();
+        let step = self
+            .steps
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .pop_front();
         match step {
             Some(MockRerankStep::Fail(err)) => Err(err),
             _ => {

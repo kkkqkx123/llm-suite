@@ -3,6 +3,8 @@
 //! Deterministic: vectors are derived from a stable hash of the input text,
 //! so tests can assert ordering and equality without a real endpoint.
 
+use std::collections::VecDeque;
+
 use async_trait::async_trait;
 
 use crate::error::{EmbeddingError, Result};
@@ -13,22 +15,29 @@ use crate::provider::{EmbeddingProvider, EmbeddingResult};
 pub enum MockEmbeddingStep {
     /// Return embeddings for the batch.
     Respond,
+    /// Sleep before responding normally.
+    Delayed {
+        /// Delay before responding, in milliseconds.
+        delay_ms: u64,
+    },
     /// Fail the call with an injected error.
     Fail(EmbeddingError),
 }
 
 // A plain std Mutex is enough: no await is held across the lock.
-type SharedVec<T> = std::sync::Mutex<Vec<T>>;
+type Shared<T> = std::sync::Mutex<T>;
 
 /// Scripted, deterministic `EmbeddingProvider` for tests.
 pub struct MockEmbeddingProvider {
     model: String,
     dimension: usize,
-    /// Optional scripted step sequence; when exhausted (or absent) every
-    /// call responds normally.
-    steps: SharedVec<MockEmbeddingStep>,
+    /// Optional scripted step sequence, consumed in call order; when
+    /// exhausted (or absent) every call responds normally.
+    steps: Shared<VecDeque<MockEmbeddingStep>>,
     /// Recorded batch sizes, in call order.
-    calls: SharedVec<usize>,
+    calls: Shared<Vec<usize>>,
+    /// Texts of the most recent call.
+    last_texts: Shared<Vec<String>>,
 }
 
 impl MockEmbeddingProvider {
@@ -36,8 +45,9 @@ impl MockEmbeddingProvider {
         Self {
             model: model.into(),
             dimension,
-            steps: std::sync::Mutex::new(Vec::new()),
+            steps: std::sync::Mutex::new(VecDeque::new()),
             calls: std::sync::Mutex::new(Vec::new()),
+            last_texts: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -46,9 +56,16 @@ impl MockEmbeddingProvider {
         Self {
             model: "mock-embedding".to_string(),
             dimension: 8,
-            steps: std::sync::Mutex::new(steps),
+            steps: std::sync::Mutex::new(steps.into()),
             calls: std::sync::Mutex::new(Vec::new()),
+            last_texts: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// Overrides the vector dimension (chainable with [`Self::with_steps`]).
+    pub fn with_dimension(mut self, dimension: usize) -> Self {
+        self.dimension = dimension;
+        self
     }
 
     /// Batch sizes observed so far, in call order.
@@ -56,10 +73,28 @@ impl MockEmbeddingProvider {
         self.calls.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
+    /// Texts of the most recent call.
+    pub fn last_texts(&self) -> Vec<String> {
+        self.last_texts
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// Normal scripted response for a batch.
+    fn respond(&self, texts: &[String]) -> EmbeddingResult {
+        let embeddings = texts.iter().map(|t| self.vector_for(t)).collect();
+        let tokens = texts.iter().map(|t| t.len() as u64).sum::<u64>();
+        EmbeddingResult {
+            embeddings,
+            prompt_tokens: tokens,
+            total_tokens: tokens,
+        }
+    }
+
     /// Deterministic vector for one text: seeded by a stable hash of the
     /// input, normalized to unit length so similarity assertions behave.
-    fn vector_for(&self, text: &str) -> Vec<f32> {
-        let mut seed: u64 = 0xcbf2_9ce4_8422_2325;
+    fn vector_for(&self, text: &str) -> Vec<f32> {        let mut seed: u64 = 0xcbf2_9ce4_8422_2325;
         for byte in text.as_bytes() {
             seed ^= u64::from(*byte);
             seed = seed.wrapping_mul(0x1000_0000_01b3);
@@ -90,22 +125,19 @@ impl EmbeddingProvider for MockEmbeddingProvider {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .push(texts.len());
+        *self.last_texts.lock().unwrap_or_else(|p| p.into_inner()) = texts.to_vec();
         let step = self
             .steps
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .pop();
+            .pop_front();
         match step {
             Some(MockEmbeddingStep::Fail(err)) => Err(err),
-            _ => {
-                let embeddings = texts.iter().map(|t| self.vector_for(t)).collect();
-                let tokens = texts.iter().map(|t| t.len() as u64).sum::<u64>();
-                Ok(EmbeddingResult {
-                    embeddings,
-                    prompt_tokens: tokens,
-                    total_tokens: tokens,
-                })
+            Some(MockEmbeddingStep::Delayed { delay_ms }) => {
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                Ok(self.respond(texts))
             }
+            _ => Ok(self.respond(texts)),
         }
     }
 
