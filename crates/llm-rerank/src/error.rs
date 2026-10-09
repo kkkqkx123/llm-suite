@@ -3,7 +3,7 @@
 use thiserror::Error;
 
 /// Rerank-specific error.
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub enum RerankError {
     /// The request payload is invalid before it reaches the transport.
     #[error("invalid rerank request: {0}")]

@@ -68,4 +68,10 @@ pub struct LlmProfile {
     /// 256000 (Gemini 2.5 Pro), 1048576 (Gemini 2.5 Pro extended).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window_size: Option<u32>,
+    /// Optional proxy URL (http/https/socks5) applied to the HTTP client.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
+    /// Optional circuit breaker policy for this profile's endpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub circuit_breaker: Option<super::CircuitBreakerConfig>,
 }

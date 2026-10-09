@@ -15,6 +15,7 @@ mock = ["llm-client/mock"]
 [dependencies]
 llm-client = { version = "0.1.0", path = "../llm-client" }
 llm-codec = { version = "0.1.0", path = "../llm-codec" }
+llm-common = { version = "0.1.0", path = "../llm-common" }
 llm-config = { version = "0.1.0", path = "../llm-config" }
 llm-message = { version = "0.1.0", path = "../llm-message" }
 llm-types = { version = "0.1.0", path = "../llm-types" }

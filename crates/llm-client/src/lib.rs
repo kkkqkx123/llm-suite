@@ -1,5 +1,6 @@
 // Transport layer: client trait and HTTP implementation, stream accumulation,
 // dead-loop guard, generic usage sink and feature-gated mocks.
+pub mod circuit;
 pub mod client;
 pub mod dead_loop_detector;
 pub mod stream;
@@ -10,6 +11,7 @@ pub mod http_mock;
 #[cfg(feature = "mock")]
 pub mod mock;
 
+pub use circuit::{CircuitBreaker, CircuitBreakerConfig};
 pub use client::LlmClient;
 pub use dead_loop_detector::{DeadLoopDetectionResult, DeadLoopDetector, DeadLoopDetectorConfig};
 pub use stream::MessageStream;

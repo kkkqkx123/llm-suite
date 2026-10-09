@@ -3,7 +3,7 @@
 use thiserror::Error;
 
 /// Embedding-specific error.
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub enum EmbeddingError {
     /// Local configuration is invalid before any request is sent.
     #[error("invalid embedding config: {0}")]

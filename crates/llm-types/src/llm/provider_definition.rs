@@ -35,4 +35,10 @@ pub struct LlmProviderDefinition {
     pub api_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<crate::Metadata>,
+    /// Default proxy URL (http/https/socks5); a profile-level `proxy` wins.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
+    /// Provider-level rate limit shared by all profiles on this base URL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<super::RateLimitConfig>,
 }

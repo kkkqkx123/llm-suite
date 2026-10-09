@@ -1,4 +1,5 @@
 pub mod generation;
+pub mod circuit_breaker;
 pub mod message_stream_events;
 pub mod model_discovery;
 pub mod model_info;
@@ -11,6 +12,7 @@ pub mod state;
 pub mod tool_call_protocol;
 pub mod usage;
 
+pub use circuit_breaker::*;
 pub use generation::*;
 pub use message_stream_events::*;
 pub use model_discovery::*;

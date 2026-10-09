@@ -11,6 +11,8 @@
 
 pub mod config;
 pub mod error;
+#[cfg(feature = "mock")]
+pub mod mock;
 pub mod openai_compatible;
 pub mod preprocessor;
 pub mod provider;

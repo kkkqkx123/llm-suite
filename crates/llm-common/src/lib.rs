@@ -7,6 +7,7 @@
 pub mod exec;
 pub mod id;
 pub mod lock;
+pub mod ratelimit;
 pub mod retry;
 pub mod time;
 

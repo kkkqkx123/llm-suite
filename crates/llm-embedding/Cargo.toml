@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 description = "Embedding client for LLM providers"
 
+[features]
+default = []
+# Feature-gated mock provider for tests.
+mock = []
+
 [dependencies]
 llm-types = { version = "0.1.0", path = "../llm-types" }
 reqwest = { workspace = true }
@@ -19,3 +24,4 @@ url = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+async-trait = { workspace = true }

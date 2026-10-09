@@ -559,6 +559,8 @@ mod enhancement_tests {
             ),
             stream_options: None,
             context_window_size: None,
+            proxy: None,
+            circuit_breaker: None,
         }
     }
 

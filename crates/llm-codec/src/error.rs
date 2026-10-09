@@ -51,6 +51,20 @@ pub enum LlmError {
 
     #[error("Request was cancelled")]
     Cancelled,
+
+    /// The provider returned 429. `retry_after_ms` carries the parsed
+    /// `Retry-After` header when present.
+    #[error("Rate limited by provider (retry after {}ms)", retry_after_ms.unwrap_or(0))]
+    RateLimited { retry_after_ms: Option<u64> },
+
+    /// The circuit breaker for this endpoint is open; requests are rejected
+    /// until the breaker transitions to half-open.
+    #[error("Circuit breaker is open")]
+    CircuitOpen,
+
+    /// Establishing or using the configured proxy failed.
+    #[error("Proxy error: {0}")]
+    ProxyError(String),
 }
 
 impl LlmError {
@@ -60,7 +74,8 @@ impl LlmError {
             // Retryability comes from the structured status, never from
             // parsing the message text.
             LlmError::ProviderError { status, .. } => matches!(status, Some(429) | Some(500..=599)),
-            LlmError::Timeout(_) | LlmError::StreamError(_) => true,
+            LlmError::Timeout(_) | LlmError::StreamError(_) | LlmError::RateLimited { .. } => true,
+            LlmError::CircuitOpen | LlmError::ProxyError(_) => false,
             LlmError::Cancelled
             | LlmError::SerializationError(_)
             | LlmError::ConfigError(_)
@@ -192,6 +207,34 @@ mod tests {
     #[test]
     fn explicit_context_length_exceeded_is_detected() {
         assert!(LlmError::ContextLengthExceeded("nope".to_string()).is_context_length_exceeded());
+    }
+
+    #[test]
+    fn rate_limited_is_retryable_and_carryes_retry_after() {
+        let err = LlmError::RateLimited {
+            retry_after_ms: Some(1500),
+        };
+        assert!(err.is_retryable(), "429 must be retryable");
+        assert!(matches!(err, LlmError::RateLimited { retry_after_ms: Some(1500) }));
+        let bare = LlmError::RateLimited { retry_after_ms: None };
+        assert!(bare.is_retryable());
+    }
+
+    #[test]
+    fn circuit_open_is_not_retryable() {
+        assert!(!LlmError::CircuitOpen.is_retryable());
+    }
+
+    #[test]
+    fn proxy_error_is_not_retryable() {
+        assert!(!LlmError::ProxyError("connect refused".to_string()).is_retryable());
+    }
+
+    #[test]
+    fn new_variants_are_not_context_length() {
+        assert!(!LlmError::RateLimited { retry_after_ms: None }.is_context_length_exceeded());
+        assert!(!LlmError::CircuitOpen.is_context_length_exceeded());
+        assert!(!LlmError::ProxyError("x".to_string()).is_context_length_exceeded());
     }
 
     #[test]

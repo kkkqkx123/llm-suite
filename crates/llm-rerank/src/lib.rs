@@ -13,6 +13,8 @@ pub mod config;
 pub mod error;
 pub mod fusion;
 pub mod generative;
+#[cfg(feature = "mock")]
+pub mod mock;
 pub mod provider;
 
 pub use cohere::CohereRerankProvider;

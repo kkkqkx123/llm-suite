@@ -40,6 +40,8 @@ fn http_profile(id: &str, base_url: &str, max_retries: u32) -> LlmProfile {
         query_params: None,
         stream_options: None,
         context_window_size: None,
+        proxy: None,
+        circuit_breaker: None,
     }
 }
 

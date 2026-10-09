@@ -22,6 +22,8 @@ struct PreparedRequest {
     profile: LlmProfile,
     effective: LlmRequest,
     client: Arc<LlmClientImpl>,
+    breaker: Option<Arc<llm_client::CircuitBreaker>>,
+    limiter: Option<Arc<llm_common::ratelimit::RateLimiter>>,
 }
 
 /// Apply the optional per-request wall-clock bound (milliseconds) to a
@@ -57,6 +59,12 @@ pub struct LlmGateway {
     codecs: CodecRegistry,
     providers: ProviderDefinitionRegistry,
     model_catalog: ModelCatalog,
+    /// Circuit breakers keyed by the resolved endpoint base URL, shared by
+    /// all profiles pointing at the same provider.
+    circuit_breakers: Arc<DashMap<String, Arc<llm_client::CircuitBreaker>>>,
+    /// Rate limiters keyed by the resolved endpoint base URL, shared by
+    /// all profiles pointing at the same provider.
+    rate_limiters: Arc<DashMap<String, Arc<llm_common::ratelimit::RateLimiter>>>,
     #[cfg(feature = "mock")]
     mock_clients: Arc<DashMap<String, Arc<llm_client::MockLlmClient>>>,
     token_metrics: Option<SharedLlmMetricsSink>,
@@ -76,6 +84,8 @@ impl LlmGateway {
             codecs,
             providers: ProviderDefinitionRegistry::new(),
             model_catalog: ModelCatalog::new(),
+            circuit_breakers: Arc::new(DashMap::new()),
+            rate_limiters: Arc::new(DashMap::new()),
             #[cfg(feature = "mock")]
             mock_clients: Arc::new(DashMap::new()),
             token_metrics: None,
@@ -187,12 +197,23 @@ impl LlmGateway {
         }
 
         let prepared = self.prepare(request)?;
+        // Rate limit after the breaker check: an open breaker rejects
+        // without queueing, a closed one admits into the limiter.
+        if let Some(breaker) = &prepared.breaker {
+            if !breaker.check_allowed() {
+                return Err(LlmError::CircuitOpen);
+            }
+        }
+        if let Some(limiter) = &prepared.limiter {
+            limiter.acquire().await;
+        }
         let start = std::time::Instant::now();
         let timeout_ms = prepared.effective.timeout_ms;
         let result = bound(timeout_ms, async {
             prepared.client.generate(&prepared.effective, cancel).await
         })
         .await;
+        Self::record_breaker(prepared.breaker.as_ref(), &result);
         let duration_ms = start.elapsed().as_millis() as f64;
         match &result {
             Ok(response) => {
@@ -217,6 +238,14 @@ impl LlmGateway {
         }
 
         let prepared = self.prepare(request)?;
+        if let Some(breaker) = &prepared.breaker {
+            if !breaker.check_allowed() {
+                return Err(LlmError::CircuitOpen);
+            }
+        }
+        if let Some(limiter) = &prepared.limiter {
+            limiter.acquire().await;
+        }
         let start = std::time::Instant::now();
         let timeout_ms = prepared.effective.timeout_ms;
         // The per-request bound covers stream establishment only (including
@@ -229,6 +258,7 @@ impl LlmGateway {
                 .await
         })
         .await;
+        Self::record_breaker(prepared.breaker.as_ref(), &stream);
         let duration_ms = start.elapsed().as_millis() as f64;
         match &stream {
             Ok(_) => {
@@ -262,6 +292,14 @@ impl LlmGateway {
         }
 
         let prepared = self.prepare(request)?;
+        if let Some(breaker) = &prepared.breaker {
+            if !breaker.check_allowed() {
+                return Err(LlmError::CircuitOpen);
+            }
+        }
+        if let Some(limiter) = &prepared.limiter {
+            limiter.acquire().await;
+        }
         prepared
             .client
             .count_tokens(&prepared.effective, cancel)
@@ -275,11 +313,101 @@ impl LlmGateway {
         let profile = self.resolve_profile(&request.profile_id)?;
         let effective = merge_request(request, &profile)?;
         let client = self.get_or_create_client(&profile)?;
+        let breaker = self.breaker_for(&profile);
+        let limiter = self.limiter_for(&profile);
         Ok(PreparedRequest {
             profile,
             effective,
             client,
+            breaker,
+            limiter,
         })
+    }
+
+    /// Rate limiter for the profile's endpoint: explicit profile config
+    /// wins, otherwise the referenced provider definition's `rate_limit`.
+    /// Keyed by resolved base URL so profiles sharing a provider share one
+    /// token bucket.
+    fn limiter_for(
+        &self,
+        profile: &LlmProfile,
+    ) -> Option<Arc<llm_common::ratelimit::RateLimiter>> {
+        let base_url = profile.base_url.clone().unwrap_or_default();
+        let key = format!(
+            "{}::{}",
+            base_url,
+            profile.provider_id.clone().unwrap_or_default()
+        );
+        if let Some(entry) = self.rate_limiters.get(&key) {
+            return Some(entry.clone());
+        }
+        let config = profile
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("rate_limit"))
+            .and_then(|v| {
+                serde_json::from_value::<llm_types::llm::RateLimitConfig>(v.clone()).ok()
+            })
+            .or_else(|| {
+                let provider_id = profile.provider_id.as_ref()?;
+                let def = self.providers.get(provider_id)?;
+                def.rate_limit
+            })?;
+        let limiter = Arc::new(llm_common::ratelimit::RateLimiter::new(
+            config.requests_per_second,
+            config.burst,
+        ));
+        self.rate_limiters.insert(key, limiter.clone());
+        Some(limiter)
+    }
+
+    /// Circuit breaker for the profile's endpoint, keyed by resolved base
+    /// URL so profiles sharing a provider share one breaker.
+    fn breaker_for(&self, profile: &LlmProfile) -> Option<Arc<llm_client::CircuitBreaker>> {
+        let config = profile.circuit_breaker.clone()?;
+        let base_url = profile.base_url.clone().unwrap_or_default();
+        let key = format!("{}::{}", base_url, profile.provider_id.clone().unwrap_or_default());
+        Some(
+            self.circuit_breakers
+                .entry(key)
+                .or_insert_with(|| {
+                    Arc::new(llm_client::CircuitBreaker::new(llm_client::CircuitBreakerConfig {
+                        min_samples: config.min_samples,
+                        failure_threshold: config.failure_threshold,
+                        open_duration_ms: config.open_duration_ms,
+                        half_open_max_probes: config.half_open_max_probes,
+                    }))
+                })
+                .clone(),
+        )
+    }
+
+    /// Count a network-classified failure (or success) into the breaker
+    /// window. Semantic 4xx errors do not trip the breaker.
+    fn record_breaker(
+        breaker: Option<&Arc<llm_client::CircuitBreaker>>,
+        result: &LlmResult<impl Sized>,
+    ) {
+        let Some(breaker) = breaker else {
+            return;
+        };
+        match result {
+            Ok(_) => breaker.record_success(),
+            Err(error) => {
+                let network_level = match error {
+                    LlmError::HttpError(_)
+                    | LlmError::Timeout(_)
+                    | LlmError::StreamError(_) => true,
+                    LlmError::ProviderError { status, .. } => {
+                        matches!(status, Some(500..=599))
+                    }
+                    _ => false,
+                };
+                if network_level {
+                    breaker.record_failure();
+                }
+            }
+        }
     }
 
     fn resolve_profile(&self, profile_id: &str) -> LlmResult<LlmProfile> {
@@ -367,6 +495,9 @@ fn classify_error(error: &llm_codec::error::LlmError) -> &'static str {
         llm_codec::error::LlmError::ToolNotFound(_) => "tool_not_found",
         llm_codec::error::LlmError::InvalidResponse(_) => "invalid_response",
         llm_codec::error::LlmError::Cancelled => "cancelled",
+        llm_codec::error::LlmError::RateLimited { .. } => "rate_limited",
+        llm_codec::error::LlmError::CircuitOpen => "circuit_open",
+        llm_codec::error::LlmError::ProxyError(_) => "proxy_error",
     }
 }
 
@@ -442,6 +573,8 @@ mod tests {
             query_params: None,
             stream_options: None,
             context_window_size: None,
+            proxy: None,
+            circuit_breaker: None,
         }
     }
 
@@ -582,6 +715,8 @@ mod tests {
             model_discovery: None,
             api_version: None,
             metadata: None,
+            proxy: None,
+            rate_limit: None,
         }
     }
 
