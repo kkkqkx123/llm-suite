@@ -40,11 +40,36 @@ pub fn convert_to_text_mode(
                 convert_assistant_message(msg, format, markers)
             } else if msg.role == MessageRole::Tool && msg.tool_call_id.is_some() {
                 convert_tool_result_message(msg, format, markers)
+            } else if matches!(msg.content, MessageContentValue::Rich(ref blocks)
+                if blocks.iter().any(|b| matches!(b, llm_types::message::MessageContent::ImageUrl { .. }))) {
+                convert_image_message(msg)
             } else {
                 msg.clone()
             }
         })
         .collect()
+}
+
+/// Text-mode protocols cannot carry images inline; render image blocks as a
+/// `[image: <url>]` placeholder line instead of silently dropping them.
+fn convert_image_message(message: &Message) -> Message {
+    let mut converted = message.clone();
+    let text = message.text_content();
+    let mut lines: Vec<String> = Vec::new();
+    if let MessageContentValue::Rich(blocks) = &message.content {
+        for block in blocks {
+            if let llm_types::message::MessageContent::ImageUrl { image_url } = block {
+                lines.push(format!("[image: {}]", image_url.url));
+            }
+        }
+    }
+    let placeholders = lines.join("\n");
+    converted.content = MessageContentValue::Text(if text.is_empty() {
+        placeholders
+    } else {
+        format!("{text}\n{placeholders}")
+    });
+    converted
 }
 
 /// Convert an assistant message with tool calls into a text-only message.
@@ -203,6 +228,48 @@ mod tests {
         let mut msg = make_msg(MessageRole::Tool, output);
         msg.tool_call_id = Some(id.to_string());
         msg
+    }
+
+    fn make_rich_image_message() -> Message {
+        Message {
+            id: llm_types::Id::new(),
+            role: MessageRole::User,
+            content: MessageContentValue::Rich(vec![
+                llm_types::message::MessageContent::Text {
+                    text: "look at this".to_string(),
+                },
+                llm_types::message::MessageContent::ImageUrl {
+                    image_url: llm_types::message::ImageUrlContent {
+                        url: "https://e.com/a.png".to_string(),
+                        detail: None,
+                    },
+                },
+            ]),
+            timestamp: 0,
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+            thinking: None,
+            metadata: None,
+        }
+    }
+
+    #[test]
+    fn image_blocks_become_placeholders_in_text_mode() {
+        for format in [ToolCallProtocol::Xml, ToolCallProtocol::JsonWrapped] {
+            let converted = convert_to_text_mode(
+                &[make_rich_image_message()],
+                &format,
+                None,
+            );
+            match &converted[0].content {
+                MessageContentValue::Text(text) => {
+                    assert!(text.contains("look at this"), "text kept: {text}");
+                    assert!(text.contains("[image: https://e.com/a.png]"), "placeholder kept: {text}");
+                }
+                other => panic!("expected Text content, got {:?}", other),
+            }
+        }
     }
 
     #[test]

@@ -73,6 +73,33 @@ impl GeminiNativeCodec {
                             llm_types::message::MessageContent::Text { text } => {
                                 Some(serde_json::json!({"text": text}))
                             }
+                            llm_types::message::MessageContent::ImageUrl { image_url } => {
+                                // Inline base64 images become `inline_data`;
+                                // remote URLs become `file_data` references.
+                                // Unresolvable references are skipped rather
+                                // than silently corrupted.
+                                match super::helpers::resolve_image_payload(&image_url.url) {
+                                    Ok(super::helpers::ResolvedImage::Base64 {
+                                        media_type,
+                                        data,
+                                    }) => Some(serde_json::json!({
+                                        "inline_data": {
+                                            "mime_type": media_type,
+                                            "data": data,
+                                        }
+                                    })),
+                                    Ok(super::helpers::ResolvedImage::Url(url)) => {
+                                        Some(serde_json::json!({
+                                            "file_data": {
+                                                "mime_type":
+                                                    super::helpers::guess_image_media_type(&url),
+                                                "file_uri": url,
+                                            }
+                                        }))
+                                    }
+                                    Err(_) => None,
+                                }
+                            }
                             llm_types::message::MessageContent::ToolResult { tool_result } => {
                                 let content_val: serde_json::Value =
                                     serde_json::from_str(&tool_result.content).unwrap_or_else(
@@ -569,6 +596,48 @@ mod tests {
             protocol_auto_converted: None,
             timeout_ms: None,
         }
+    }
+
+    #[test]
+    fn rich_image_blocks_become_inline_data_or_file_data() {
+        let codec = GeminiNativeCodec::new();
+        let image_msg = llm_types::message::Message {
+            id: llm_types::Id::new(),
+            role: llm_types::message::MessageRole::User,
+            content: llm_types::message::MessageContentValue::Rich(vec![
+                llm_types::message::MessageContent::Text {
+                    text: "what is this".to_string(),
+                },
+                llm_types::message::MessageContent::ImageUrl {
+                    image_url: llm_types::message::ImageUrlContent {
+                        url: "data:image/png;base64,AAAA".to_string(),
+                        detail: None,
+                    },
+                },
+                llm_types::message::MessageContent::ImageUrl {
+                    image_url: llm_types::message::ImageUrlContent {
+                        url: "https://example.com/a.jpg".to_string(),
+                        detail: None,
+                    },
+                },
+            ]),
+            timestamp: 0,
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+            thinking: None,
+            metadata: None,
+        };
+        let entries = codec.convert_messages(&[image_msg]);
+        assert_eq!(entries.len(), 1);
+        let parts = entries[0]["parts"].as_array().expect("parts array");
+        // Regression guard: none of the three blocks may be silently dropped.
+        assert_eq!(parts.len(), 3, "text + inline_data + file_data");
+        assert_eq!(parts[0]["text"], "what is this");
+        assert_eq!(parts[1]["inline_data"]["mime_type"], "image/png");
+        assert_eq!(parts[1]["inline_data"]["data"], "AAAA");
+        assert_eq!(parts[2]["file_data"]["file_uri"], "https://example.com/a.jpg");
+        assert_eq!(parts[2]["file_data"]["mime_type"], "image/jpeg");
     }
 
     #[test]

@@ -1,5 +1,92 @@
-use llm_types::llm::LlmProfile;
 use std::collections::HashMap;
+use crate::error::{LlmError, LlmResult};
+use llm_types::llm::LlmProfile;
+
+/// An image reference resolved into a form a provider can carry on the wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedImage {
+    /// A `data:` URI: media type plus base64 payload (without the `data:...;base64,` prefix).
+    Base64 { media_type: String, data: String },
+    /// A remote http(s) URL, for providers that accept URL references directly.
+    Url(String),
+}
+
+/// Parse an image reference (data URI or remote URL).
+///
+/// Never fabricates data: a malformed `data:` URI is an error, not a guess.
+/// No network I/O happens here — remote URLs are returned as-is and providers
+/// that cannot carry them must reject them explicitly.
+pub fn resolve_image_payload(url: &str) -> LlmResult<ResolvedImage> {
+    if let Some(rest) = url.strip_prefix("data:") {
+        let Some(meta) = rest.split_once(',').map(|(m, _)| m) else {
+            return Err(LlmError::ConfigError(format!(
+                "malformed data URI (missing ','): {}",
+                truncate(url)
+            )));
+        };
+        let Some(media_type) = meta.strip_suffix(";base64") else {
+            return Err(LlmError::ConfigError(format!(
+                "data URI is not base64-encoded: {}",
+                truncate(url)
+            )));
+        };
+        let data = rest.split_once(',').map(|(_, d)| d).unwrap_or_default();
+        if data.is_empty() {
+            return Err(LlmError::ConfigError(format!(
+                "data URI has empty payload: {}",
+                truncate(url)
+            )));
+        }
+        let media_type = if media_type.is_empty() {
+            "application/octet-stream".to_string()
+        } else {
+            media_type.to_string()
+        };
+        Ok(ResolvedImage::Base64 {
+            media_type,
+            data: data.to_string(),
+        })
+    } else if url.starts_with("http://") || url.starts_with("https://") {
+        Ok(ResolvedImage::Url(url.to_string()))
+    } else {
+        Err(LlmError::ConfigError(format!(
+            "unsupported image reference scheme: {}",
+            truncate(url)
+        )))
+    }
+}
+
+/// Infer an image media type from a URL: data URI prefix first, then file
+/// extension. Falls back to `image/png`.
+pub fn guess_image_media_type(url: &str) -> String {
+    if let Some(rest) = url.strip_prefix("data:") {
+        if let Some(meta) = rest.split(',').next() {
+            let meta = meta.trim_end_matches(";base64");
+            if !meta.is_empty() {
+                return meta.to_string();
+            }
+        }
+    }
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        _ => "image/png",
+    }
+    .to_string()
+}
+
+fn truncate(s: &str) -> String {
+    if s.len() <= 64 {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..64])
+    }
+}
 
 /// Deep merge two JSON values:
 /// - Arrays are concatenated
@@ -183,5 +270,44 @@ mod tests {
             Some(("Authorization".to_string(), "Bearer sk-1".to_string()))
         );
         assert_eq!(build_bearer_header(&None), None);
+    }
+
+    #[test]
+    fn resolve_data_uri_parses_media_type_and_payload() {
+        let resolved = resolve_image_payload("data:image/png;base64,AAAA").expect("must resolve");
+        assert_eq!(
+            resolved,
+            ResolvedImage::Base64 {
+                media_type: "image/png".to_string(),
+                data: "AAAA".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_malformed_and_non_base64_data_uris() {
+        assert!(resolve_image_payload("data:image/png;base64").is_err());
+        assert!(resolve_image_payload("data:image/png,AAAA").is_err());
+        assert!(resolve_image_payload("data:;base64,").is_err());
+    }
+
+    #[test]
+    fn resolve_passes_remote_url_through() {
+        let resolved = resolve_image_payload("https://example.com/a.png").expect("must resolve");
+        assert_eq!(
+            resolved,
+            ResolvedImage::Url("https://example.com/a.png".to_string())
+        );
+        assert!(resolve_image_payload("ftp://example.com/a.png").is_err());
+    }
+
+    #[test]
+    fn guess_media_type_prefers_data_uri_then_extension() {
+        assert_eq!(guess_image_media_type("data:image/webp;base64,AA"), "image/webp");
+        assert_eq!(
+            guess_image_media_type("https://e.com/x.jpg?a=1"),
+            "image/jpeg"
+        );
+        assert_eq!(guess_image_media_type("https://e.com/unknown"), "image/png");
     }
 }

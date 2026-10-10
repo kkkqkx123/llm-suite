@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::EmbeddingConfig;
 use crate::error::{EmbeddingError, Result};
 use crate::preprocessor::PreprocessorImpl;
-use crate::provider::{EmbeddingProvider, EmbeddingResult};
+use crate::provider::{EmbeddingInput, EmbeddingProvider, EmbeddingResult};
 
 /// Provider that talks to any OpenAI-compatible `/embeddings` endpoint.
 pub struct OpenAICompatibleProvider {
@@ -33,7 +33,9 @@ impl std::fmt::Debug for OpenAICompatibleProvider {
 #[derive(Debug, Serialize)]
 struct EmbeddingRequest {
     model: String,
-    input: Vec<String>,
+    /// Text strings or `input_image` content-part objects, per the OpenAI
+    /// multimodal embedding input contract.
+    input: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     encoding_format: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -97,7 +99,33 @@ impl OpenAICompatibleProvider {
         let borrowed: Vec<&str> = texts.iter().map(String::as_str).collect();
         EmbeddingRequest {
             model: self.config.model.clone(),
-            input: self.preprocessor.process_batch(&borrowed),
+            input: self
+                .preprocessor
+                .process_batch(&borrowed)
+                .into_iter()
+                .map(serde_json::Value::String)
+                .collect(),
+            encoding_format: Some("float".into()),
+            dimensions: self.config.request_dimensions,
+        }
+    }
+
+    /// Builds the request body for a mixed text/image batch. Preprocessing
+    /// applies to text inputs only; image inputs pass through untouched.
+    fn build_multimodal_request(&self, inputs: &[EmbeddingInput]) -> EmbeddingRequest {
+        EmbeddingRequest {
+            model: self.config.model.clone(),
+            input: inputs
+                .iter()
+                .map(|item| match item {
+                    EmbeddingInput::Text(text) => {
+                        serde_json::Value::String(self.preprocessor.preprocess(text))
+                    }
+                    image @ EmbeddingInput::Image { .. } => {
+                        serde_json::to_value(image).unwrap_or(serde_json::Value::Null)
+                    }
+                })
+                .collect(),
             encoding_format: Some("float".into()),
             dimensions: self.config.request_dimensions,
         }
@@ -115,6 +143,42 @@ impl OpenAICompatibleProvider {
             prompt_tokens: usage.prompt_tokens,
             total_tokens: usage.total_tokens,
         })
+    }
+
+    /// Sends one request to the `/embeddings` endpoint and decodes the result.
+    async fn send_request(&self, request: EmbeddingRequest) -> Result<EmbeddingResult> {
+        let mut outgoing = self.client.post(&self.config.base_url).json(&request);
+        if let Some(api_key) = &self.config.api_key {
+            outgoing = outgoing.bearer_auth(api_key);
+        }
+        for (name, value) in &self.config.headers {
+            outgoing = outgoing.header(name, value);
+        }
+        if !self.config.query_params.is_empty() {
+            outgoing = outgoing.query(&self.config.query_params);
+        }
+        let response = outgoing.send().await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            let body = response.text().await.unwrap_or_default();
+            return Err(EmbeddingError::Provider {
+                status: status.as_u16(),
+                message: body,
+                retry_after_ms: llm_common::parse_retry_after_ms(retry_after.as_deref()),
+            });
+        }
+
+        let decoded: EmbeddingResponse = response
+            .json()
+            .await
+            .map_err(|err| EmbeddingError::Decode(err.to_string()))?;
+        self.parse_response(decoded)
     }
 }
 
@@ -158,42 +222,28 @@ impl EmbeddingProvider for OpenAICompatibleProvider {
         }
 
         let request = self.build_request(texts);
-        let mut outgoing = self.client.post(&self.config.base_url).json(&request);
-        if let Some(api_key) = &self.config.api_key {
-            outgoing = outgoing.bearer_auth(api_key);
-        }
-        for (name, value) in &self.config.headers {
-            outgoing = outgoing.header(name, value);
-        }
-        if !self.config.query_params.is_empty() {
-            outgoing = outgoing.query(&self.config.query_params);
-        }
-        let response = outgoing.send().await?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let retry_after = response
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_owned);
-            let body = response.text().await.unwrap_or_default();
-            return Err(EmbeddingError::Provider {
-                status: status.as_u16(),
-                message: body,
-                retry_after_ms: llm_common::parse_retry_after_ms(retry_after.as_deref()),
-            });
-        }
-
-        let decoded: EmbeddingResponse = response
-            .json()
-            .await
-            .map_err(|err| EmbeddingError::Decode(err.to_string()))?;
-        let result = self.parse_response(decoded)?;
+        let result = self.send_request(request).await?;
         if result.embeddings.len() != texts.len() {
             return Err(EmbeddingError::Decode(format!(
                 "embedding count mismatch: expected {}, received {}",
                 texts.len(),
+                result.embeddings.len()
+            )));
+        }
+        Ok(result)
+    }
+
+    async fn embed_multimodal(&self, inputs: &[EmbeddingInput]) -> Result<EmbeddingResult> {
+        if inputs.is_empty() {
+            return Ok(EmbeddingResult::default());
+        }
+
+        let request = self.build_multimodal_request(inputs);
+        let result = self.send_request(request).await?;
+        if result.embeddings.len() != inputs.len() {
+            return Err(EmbeddingError::Decode(format!(
+                "embedding count mismatch: expected {}, received {}",
+                inputs.len(),
                 result.embeddings.len()
             )));
         }
@@ -264,6 +314,28 @@ mod tests {
         assert_eq!(request.input, vec!["search_query: rust".to_string()]);
         assert_eq!(request.encoding_format.as_deref(), Some("float"));
         assert_eq!(request.dimensions, Some(512));
+    }
+
+    #[test]
+    fn build_multimodal_request_encodes_image_inputs() {
+        let config =
+            EmbeddingConfig::new("http://example.com", "bge-m3").with_dimension(1024);
+        let provider = OpenAICompatibleProvider::new(config).expect("valid config");
+
+        let request = provider.build_multimodal_request(&[
+            EmbeddingInput::Text("hello".to_string()),
+            EmbeddingInput::image("data:image/png;base64,AA"),
+        ]);
+        assert_eq!(
+            request.input,
+            vec![
+                serde_json::json!("hello"),
+                serde_json::json!({
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,AA"},
+                }),
+            ]
+        );
     }
 
     #[test]

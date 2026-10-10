@@ -61,9 +61,61 @@ impl OpenaiResponseCodec {
                     llm_types::message::MessageRole::Tool => "tool",
                 };
 
+                let content = match &msg.content {
+                    llm_types::message::MessageContentValue::Text(text) => {
+                        serde_json::Value::String(text.clone())
+                    }
+                    // The Responses API uses `input_text` / `input_image`
+                    // content part types (not Chat's `text` / `image_url`),
+                    // so Rich blocks are mapped explicitly.
+                    llm_types::message::MessageContentValue::Rich(blocks) => {
+                        serde_json::Value::Array(
+                            blocks
+                                .iter()
+                                .map(|block| match block {
+                                    llm_types::message::MessageContent::Text { text } => {
+                                        serde_json::json!({"type": "input_text", "text": text})
+                                    }
+                                    llm_types::message::MessageContent::ImageUrl { image_url } => {
+                                        let mut part = serde_json::json!({
+                                            "type": "input_image",
+                                            "image_url": image_url.url,
+                                        });
+                                        if let Some(ref detail) = image_url.detail {
+                                            part["detail"] = serde_json::json!(detail);
+                                        }
+                                        part
+                                    }
+                                    llm_types::message::MessageContent::Thinking {
+                                        thinking,
+                                        ..
+                                    } => serde_json::json!({"type": "input_text", "text": thinking}),
+                                    // Tool blocks are not valid user content in
+                                    // the Responses API; render them as text so
+                                    // history is not silently dropped.
+                                    llm_types::message::MessageContent::ToolUse { tool_use } => {
+                                        serde_json::json!({
+                                            "type": "input_text",
+                                            "text": tool_use.input.to_string(),
+                                        })
+                                    }
+                                    llm_types::message::MessageContent::ToolResult {
+                                        tool_result,
+                                    } => {
+                                        serde_json::json!({
+                                            "type": "input_text",
+                                            "text": tool_result.content,
+                                        })
+                                    }
+                                })
+                                .collect(),
+                        )
+                    }
+                };
+
                 let mut entry = serde_json::json!({
                     "role": role,
-                    "content": msg.content,
+                    "content": content,
                 });
 
                 if let Some(ref tool_calls) = msg.tool_calls {
@@ -770,6 +822,54 @@ mod tests {
             .as_bytes()
             .map(|b| serde_json::from_slice(b).unwrap())
             .unwrap()
+    }
+
+    #[test]
+    fn rich_image_blocks_map_to_input_image_parts() {
+        let codec = OpenaiResponseCodec::new();
+        let req = LlmRequest {
+            profile_id: "p1".to_string(),
+            messages: vec![llm_types::message::Message {
+                id: llm_types::Id::new(),
+                role: llm_types::message::MessageRole::User,
+                content: llm_types::message::MessageContentValue::Rich(vec![
+                    llm_types::message::MessageContent::Text {
+                        text: "describe".to_string(),
+                    },
+                    llm_types::message::MessageContent::ImageUrl {
+                        image_url: llm_types::message::ImageUrlContent {
+                            url: "https://example.com/a.png".to_string(),
+                            detail: Some("auto".to_string()),
+                        },
+                    },
+                ]),
+                timestamp: 0,
+                tool_call_id: None,
+                tool_name: None,
+                tool_calls: None,
+                thinking: None,
+                metadata: None,
+            }],
+            parameters: None,
+            generation: None,
+            tools: None,
+            tool_call_protocol: None,
+            locked_tool_call_protocol: None,
+            violation_policy: None,
+            execution_id: None,
+            stream: None,
+            dead_loop_detection: None,
+            protocol_auto_converted: None,
+            timeout_ms: None,
+        };
+        let entries = codec.convert_messages(&req.messages);
+        let parts = entries[0]["content"].as_array().expect("content array");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["type"], "input_text");
+        assert_eq!(parts[0]["text"], "describe");
+        assert_eq!(parts[1]["type"], "input_image");
+        assert_eq!(parts[1]["image_url"], "https://example.com/a.png");
+        assert_eq!(parts[1]["detail"], "auto");
     }
 
     #[test]
