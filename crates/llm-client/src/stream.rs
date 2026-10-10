@@ -28,6 +28,9 @@ pub struct SseMessageStream<S> {
     /// The codec emitted `End`; the accumulator built the `FinalMessage`
     /// and the `End` event itself is pending on the next `next()` call.
     pending_end: bool,
+    /// Raw events decoded from a chunk that have not yet been routed
+    /// through the accumulator (codecs may emit several events per chunk).
+    pending_raw: std::collections::VecDeque<MessageStreamEvent>,
     accumulator: MessageAccumulator,
 }
 
@@ -44,6 +47,7 @@ impl<S> SseMessageStream<S> {
             cancel,
             done: false,
             pending_end: false,
+            pending_raw: std::collections::VecDeque::new(),
             accumulator: MessageAccumulator::new(dead_loop_config),
         }
     }
@@ -79,49 +83,61 @@ where
         }
 
         loop {
-            match self.stream.next().await {
-                Some(Ok(event)) => {
-                    let data = event.data.trim().to_string();
+            // Take the next raw event either from a previous multi-event
+            // chunk or from the wire.
+            let raw_event = if let Some(ev) = self.pending_raw.pop_front() {
+                ev
+            } else {
+                match self.stream.next().await {
+                    Some(Ok(event)) => {
+                        let data = event.data.trim().to_string();
 
-                    if data.is_empty() {
-                        continue;
-                    }
-
-                    match self.codec.parse_stream_chunk(&data) {
-                        Ok(Some(raw_event)) => {
-                            // Always route `End` through the accumulator: it
-                            // assembles the `FinalMessage` (content, tool calls,
-                            // usage) before the stream terminates. The `End`
-                            // event itself is emitted on the next call.
-                            if let Some(emitted) = self.accumulator.push(raw_event) {
-                                match emitted {
-                                    MessageStreamEvent::Abort(_) => {
-                                        self.done = true;
-                                    }
-                                    MessageStreamEvent::End(_) => {
-                                        self.done = true;
-                                    }
-                                    MessageStreamEvent::FinalMessage(_) => {
-                                        self.pending_end = true;
-                                    }
-                                    _ => {}
-                                }
-                                return Some(Ok(emitted));
-                            }
+                        if data.is_empty() {
                             continue;
                         }
-                        Ok(None) => continue,
-                        Err(e) => return Some(Err(e)),
+
+                        match self.codec.parse_stream_chunk_events(&data) {
+                            Ok(events) => {
+                                if events.is_empty() {
+                                    continue;
+                                }
+                                let mut iter = events.into_iter();
+                                let first = iter.next().expect("non-empty checked above");
+                                self.pending_raw.extend(iter);
+                                first
+                            }
+                            Err(e) => return Some(Err(e)),
+                        }
+                    }
+                    Some(Err(e)) => {
+                        self.done = true;
+                        return Some(Err(LlmError::StreamError(e.to_string())));
+                    }
+                    None => {
+                        self.done = true;
+                        return None;
                     }
                 }
-                Some(Err(e)) => {
-                    self.done = true;
-                    return Some(Err(LlmError::StreamError(e.to_string())));
+            };
+
+            // Always route `End` through the accumulator: it
+            // assembles the `FinalMessage` (content, tool calls,
+            // usage) before the stream terminates. The `End`
+            // event itself is emitted on the next call.
+            if let Some(emitted) = self.accumulator.push(raw_event) {
+                match emitted {
+                    MessageStreamEvent::Abort(_) => {
+                        self.done = true;
+                    }
+                    MessageStreamEvent::End(_) => {
+                        self.done = true;
+                    }
+                    MessageStreamEvent::FinalMessage(_) => {
+                        self.pending_end = true;
+                    }
+                    _ => {}
                 }
-                None => {
-                    self.done = true;
-                    return None;
-                }
+                return Some(Ok(emitted));
             }
         }
     }

@@ -36,6 +36,20 @@ pub trait LlmCodec: Send + Sync {
     /// call protocol so the codec can route to text-mode parsing when needed.
     fn parse_response(&self, body: &str, request: &LlmRequest) -> LlmResult<LlmResponseType>;
     fn parse_stream_chunk(&self, data: &str) -> LlmResult<Option<MessageStreamEvent>>;
+    /// Multi-event stream chunk parsing. Some wire formats pack several
+    /// logical events into one SSE chunk (e.g. Gemini parts plus
+    /// `finishReason`, or trailing `usageMetadata`); codecs that need to
+    /// emit more than one event per chunk override this. The default
+    /// delegates to `parse_stream_chunk` so existing codecs keep working.
+    fn parse_stream_chunk_events(
+        &self,
+        data: &str,
+    ) -> LlmResult<Vec<MessageStreamEvent>> {
+        match self.parse_stream_chunk(data)? {
+            Some(event) => Ok(vec![event]),
+            None => Ok(Vec::new()),
+        }
+    }
     fn convert_tools(&self, tools: &[Tool]) -> LlmResult<Vec<serde_json::Value>>;
     fn parse_tool_calls(&self, result: &LlmResponseType) -> Vec<llm_types::message::LlmToolCall>;
 

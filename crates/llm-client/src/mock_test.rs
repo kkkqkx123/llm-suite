@@ -61,6 +61,7 @@ async fn scripted_error_is_returned() {
     client.script_error(LlmError::ProviderError {
         status: Some(500),
         message: "boom".to_string(),
+        retry_after_ms: None,
     });
     let err = client
         .generate(&request("mock", "hi"), None)
@@ -280,6 +281,7 @@ async fn generate_stream_returns_scripted_error() {
     client.script_error(LlmError::ProviderError {
         status: None,
         message: "stream boom".to_string(),
+        retry_after_ms: None,
     });
     let err = match client.generate_stream(&request("mock", "hi"), None).await {
         Err(e) => e,

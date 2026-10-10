@@ -240,13 +240,13 @@ mod tests {
                 base_delay_ms: 1,
                 exponential_backoff: false,
             });
-        let _ = resilience
+        let _: Result<(), TestError> = resilience
             .execute(|| TestError::BreakerOpen, || async { Err(TestError::Transient) })
             .await;
         // Two counted failures (window is fed once per execute call, but the
         // retry loop inside one call feeds nothing extra) — after the second
         // execute the breaker must be open.
-        let _ = resilience
+        let _: Result<(), TestError> = resilience
             .execute(|| TestError::BreakerOpen, || async { Err(TestError::Transient) })
             .await;
         assert!(
