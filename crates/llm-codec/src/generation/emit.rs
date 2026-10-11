@@ -233,11 +233,24 @@ pub fn apply_openai_responses(body: &mut serde_json::Value, gen: &LlmGenerationP
 pub fn apply_anthropic(body: &mut serde_json::Value, gen: &LlmGenerationParams) -> LlmResult<()> {
     let max_tokens = gen.max_tokens.unwrap_or(ANTHROPIC_DEFAULT_MAX_TOKENS);
     body["max_tokens"] = serde_json::json!(max_tokens);
+    // Anthropic only accepts `temperature` / `top_p` within [0, 1]; clamp
+    // instead of letting the API reject the whole request with a 400.
     if let Some(temperature) = gen.temperature {
-        body["temperature"] = serde_json::json!(temperature);
+        let clamped = temperature.clamp(0.0, 1.0);
+        if clamped != temperature {
+            tracing::warn!(
+                temperature,
+                "Anthropic temperature must be within [0, 1]; clamped"
+            );
+        }
+        body["temperature"] = serde_json::json!(clamped);
     }
     if let Some(top_p) = gen.top_p {
-        body["top_p"] = serde_json::json!(top_p);
+        let clamped = top_p.clamp(0.0, 1.0);
+        if clamped != top_p {
+            tracing::warn!(top_p, "Anthropic top_p must be within [0, 1]; clamped");
+        }
+        body["top_p"] = serde_json::json!(clamped);
     }
     if let Some(top_k) = gen.top_k {
         body["top_k"] = serde_json::json!(top_k);

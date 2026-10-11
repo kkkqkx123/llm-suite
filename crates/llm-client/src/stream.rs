@@ -277,11 +277,50 @@ impl MessageAccumulator {
                 Some(MessageStreamEvent::ToolCallDelta(delta))
             }
             MessageStreamEvent::Usage(usage_event) => {
-                // Merge usage (later values win for non-zero fields)
+                // Field-wise merge: providers deliver usage across several
+                // events (Anthropic's `message_start` carries input tokens,
+                // `message_delta` carries cumulative output and may omit
+                // input tokens). Later non-zero / `Some` values win; zero /
+                // `None` values never erase earlier data. `total_tokens` is
+                // recomputed from prompt + completion when the wire only
+                // carries partial counters.
                 let u = &usage_event.usage;
-                if u.prompt_tokens > 0 || u.completion_tokens > 0 || u.total_tokens > 0 {
-                    self.usage = Some(u.clone());
-                }
+                let merged = match self.usage.take() {
+                    Some(prev) => {
+                        let prompt_tokens = if u.prompt_tokens > 0 {
+                            u.prompt_tokens
+                        } else {
+                            prev.prompt_tokens
+                        };
+                        let completion_tokens = if u.completion_tokens > 0 {
+                            u.completion_tokens
+                        } else {
+                            prev.completion_tokens
+                        };
+                        let total_tokens = if u.total_tokens > 0 {
+                            u.total_tokens
+                        } else if u.prompt_tokens > 0 || u.completion_tokens > 0 {
+                            prompt_tokens + completion_tokens
+                        } else {
+                            prev.total_tokens
+                        };
+                        TokenUsageStats {
+                            prompt_tokens,
+                            completion_tokens,
+                            total_tokens,
+                            reasoning_tokens: u.reasoning_tokens.or(prev.reasoning_tokens),
+                            cache_read_tokens: u.cache_read_tokens.or(prev.cache_read_tokens),
+                            cache_write_tokens: u.cache_write_tokens.or(prev.cache_write_tokens),
+                            prompt_tokens_cost: u.prompt_tokens_cost.or(prev.prompt_tokens_cost),
+                            completion_tokens_cost: u
+                                .completion_tokens_cost
+                                .or(prev.completion_tokens_cost),
+                            total_cost: u.total_cost.or(prev.total_cost),
+                        }
+                    }
+                    None => u.clone(),
+                };
+                self.usage = Some(merged);
                 Some(MessageStreamEvent::Usage(usage_event))
             }
             MessageStreamEvent::End(_) => {
@@ -543,5 +582,50 @@ mod tests {
         );
         let usage = final_msg.usage.unwrap();
         assert_eq!(usage.total_tokens, 15);
+    }
+
+    #[test]
+    fn usage_merge_combines_split_anthropic_usage_events() {
+        let mut acc = MessageAccumulator::new(None);
+
+        // Anthropic `message_start`: input tokens (output not yet known).
+        acc.push(MessageStreamEvent::Usage(MessageStreamUsage {
+            usage: TokenUsageStats {
+                prompt_tokens: 25,
+                completion_tokens: 0,
+                total_tokens: 0,
+                reasoning_tokens: None,
+                cache_read_tokens: Some(3),
+                cache_write_tokens: None,
+                prompt_tokens_cost: None,
+                completion_tokens_cost: None,
+                total_cost: None,
+            },
+        }));
+        // Anthropic `message_delta`: cumulative output, input may be omitted.
+        acc.push(MessageStreamEvent::Usage(MessageStreamUsage {
+            usage: TokenUsageStats {
+                prompt_tokens: 0,
+                completion_tokens: 7,
+                total_tokens: 0,
+                reasoning_tokens: Some(2),
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                prompt_tokens_cost: None,
+                completion_tokens_cost: None,
+                total_cost: None,
+            },
+        }));
+
+        let final_event = acc.push(MessageStreamEvent::End(llm_types::llm::MessageStreamEnd {}));
+        let MessageStreamEvent::FinalMessage(final_msg) = final_event.unwrap() else {
+            panic!("expected FinalMessage");
+        };
+        let usage = final_msg.usage.expect("usage must be merged");
+        assert_eq!(usage.prompt_tokens, 25, "input from message_start must survive");
+        assert_eq!(usage.completion_tokens, 7);
+        assert_eq!(usage.total_tokens, 32, "total recomputed from prompt + completion");
+        assert_eq!(usage.cache_read_tokens, Some(3));
+        assert_eq!(usage.reasoning_tokens, Some(2));
     }
 }
