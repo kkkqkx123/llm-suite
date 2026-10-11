@@ -57,9 +57,7 @@ impl ProviderError {
                 false
             }
             Self::Timeout | Self::Transport(_) => true,
-            Self::Provider { status, .. } => {
-                *status == 429 || (500..=599).contains(status)
-            }
+            Self::Provider { status, .. } => *status == 429 || (500..=599).contains(status),
         }
     }
 

@@ -70,9 +70,8 @@ pub fn build_http_client(
     proxy: Option<&str>,
     no_proxy: &[String],
 ) -> Result<reqwest::Client, ProxyError> {
-    let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(
-        timeout_secs.max(1),
-    ));
+    let mut builder =
+        reqwest::Client::builder().timeout(std::time::Duration::from_secs(timeout_secs.max(1)));
     if let Some(proxy_url) = proxy {
         builder = builder.proxy(build_proxy(proxy_url, no_proxy)?);
     }
