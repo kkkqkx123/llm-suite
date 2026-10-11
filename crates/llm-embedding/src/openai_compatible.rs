@@ -318,8 +318,7 @@ mod tests {
 
     #[test]
     fn build_multimodal_request_encodes_image_inputs() {
-        let config =
-            EmbeddingConfig::new("http://example.com", "bge-m3").with_dimension(1024);
+        let config = EmbeddingConfig::new("http://example.com", "bge-m3").with_dimension(1024);
         let provider = OpenAICompatibleProvider::new(config).expect("valid config");
 
         let request = provider.build_multimodal_request(&[
