@@ -3,7 +3,6 @@ use llm_types::llm::generation::LlmGenerationParams;
 use llm_types::llm::LlmFormat;
 
 pub const ANTHROPIC_DEFAULT_MAX_TOKENS: u32 = 4096;
-pub const GEMINI_DEFAULT_MAX_OUTPUT_TOKENS: u32 = 4096;
 
 pub fn validate_generation(params: &LlmGenerationParams, format: &LlmFormat) -> LlmResult<()> {
     if let Some(ref thinking) = params.thinking {

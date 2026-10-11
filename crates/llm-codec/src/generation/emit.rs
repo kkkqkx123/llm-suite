@@ -44,30 +44,19 @@ fn emit_tool_choice_anthropic(
     obj
 }
 
-/// Whether the given model is an OpenAI reasoning model that *requires*
-/// `max_completion_tokens` instead of the legacy `max_tokens`. Reasoning
-/// models (o1/o3/o4/gpt-5 families) reject `max_tokens`; most other OpenAI
-/// models and the majority of OpenAI-compatible servers (Ollama, LM Studio,
-/// older vLLM, and many Chinese gateways) only accept `max_tokens`. The
-/// default emission is therefore `max_tokens`, switched to
-/// `max_completion_tokens` only for known reasoning models.
-pub fn is_openai_reasoning_model(model: &str) -> bool {
-    let m = model.to_ascii_lowercase();
-    m.starts_with("o1")
-        || m.starts_with("o3")
-        || m.starts_with("o4")
-        || m.contains("gpt-5")
-        || m.contains("-reasoning")
-        || m.contains("reasoning-")
-}
-
-pub fn apply_openai_chat(body: &mut serde_json::Value, model: &str, gen: &LlmGenerationParams) {
+/// Emit the OpenAI Chat generation parameters.
+///
+/// The `max_tokens` value is emitted as `max_tokens` or
+/// `max_completion_tokens` according to the explicit `max_token_field`
+/// configuration (defaulting to `max_tokens`). The model name is never
+/// inspected: which field a backend accepts is a deployment decision that
+/// belongs to profile configuration.
+pub fn apply_openai_chat(body: &mut serde_json::Value, gen: &LlmGenerationParams) {
     if let Some(max_tokens) = gen.max_tokens {
-        let key = if is_openai_reasoning_model(model) {
-            "max_completion_tokens"
-        } else {
-            "max_tokens"
-        };
+        let key = gen
+            .max_token_field
+            .unwrap_or_default()
+            .as_str();
         body[key] = serde_json::json!(max_tokens);
     }
     if let Some(temperature) = gen.temperature {

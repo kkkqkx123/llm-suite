@@ -193,6 +193,32 @@ impl LlmServiceTier {
     }
 }
 
+/// Which wire field `max_tokens` is emitted as on the OpenAI Chat API.
+///
+/// This is an explicit per-profile configuration decision, not a heuristic:
+/// OpenAI reasoning models require `max_completion_tokens` while most other
+/// OpenAI-compatible servers (Ollama, LM Studio, older vLLM, many gateways)
+/// only accept `max_tokens`. The caller decides; the codec never inspects the
+/// model name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmMaxTokenField {
+    /// Emit `max_tokens` (legacy field, widest OpenAI-compatible support).
+    #[default]
+    MaxTokens,
+    /// Emit `max_completion_tokens` (required by OpenAI reasoning models).
+    MaxCompletionTokens,
+}
+
+impl LlmMaxTokenField {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LlmMaxTokenField::MaxTokens => "max_tokens",
+            LlmMaxTokenField::MaxCompletionTokens => "max_completion_tokens",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct LlmGenerationParams {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -219,6 +245,11 @@ pub struct LlmGenerationParams {
         alias = "max_output_tokens"
     )]
     pub max_tokens: Option<u32>,
+    /// Explicit wire-field selection for the OpenAI Chat `max_tokens`
+    /// parameter. Defaults to `max_tokens`; set to `max_completion_tokens`
+    /// for OpenAI reasoning models. Never inferred from the model name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_token_field: Option<LlmMaxTokenField>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -279,6 +310,7 @@ impl LlmGenerationParams {
             && self.top_p.is_none()
             && self.top_k.is_none()
             && self.max_tokens.is_none()
+            && self.max_token_field.is_none()
             && self.stop.is_none()
             && self.thinking.is_none()
             && self.verbosity.is_none()
@@ -305,6 +337,9 @@ impl LlmGenerationParams {
         }
         if over.max_tokens.is_some() {
             self.max_tokens = over.max_tokens;
+        }
+        if over.max_token_field.is_some() {
+            self.max_token_field = over.max_token_field;
         }
         if over.stop.is_some() {
             self.stop = over.stop.clone();

@@ -11,7 +11,7 @@ pub use emit::{
 };
 pub use parse::{is_typed_param_key, parse_legacy_generation};
 pub use validate::{
-    validate_generation, ANTHROPIC_DEFAULT_MAX_TOKENS, GEMINI_DEFAULT_MAX_OUTPUT_TOKENS,
+    validate_generation, ANTHROPIC_DEFAULT_MAX_TOKENS,
 };
 
 pub fn resolve_generation(
@@ -38,7 +38,9 @@ pub fn resolve_generation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use llm_types::llm::generation::{LlmThinkingConfig, ThinkingLevel, Verbosity};
+    use llm_types::llm::generation::{
+        LlmMaxTokenField, LlmThinkingConfig, ThinkingLevel, Verbosity,
+    };
     use llm_types::llm::LlmFormat;
 
     fn profile_with(
@@ -158,13 +160,13 @@ mod tests {
     }
 
     #[test]
-    fn openai_chat_maps_max_tokens_to_completion_tokens() {
+    fn openai_chat_max_token_field_is_explicit_not_inferred() {
         let mut body = serde_json::json!({"model": "gpt-5"});
         apply_openai_chat(
             &mut body,
-            "gpt-5",
             &LlmGenerationParams {
                 max_tokens: Some(512),
+                max_token_field: Some(LlmMaxTokenField::MaxCompletionTokens),
                 thinking: Some(LlmThinkingConfig {
                     level: Some(ThinkingLevel::Xhigh),
                     ..Default::default()
@@ -180,11 +182,27 @@ mod tests {
     }
 
     #[test]
+    fn openai_chat_reasoning_model_name_does_not_change_field() {
+        // The model name must never drive emission: without an explicit
+        // `max_token_field`, even a reasoning-style model name emits the
+        // default `max_tokens` field.
+        let mut body = serde_json::json!({"model": "gpt-5"});
+        apply_openai_chat(
+            &mut body,
+            &LlmGenerationParams {
+                max_tokens: Some(512),
+                ..Default::default()
+            },
+        );
+        assert_eq!(body["max_tokens"], serde_json::json!(512));
+        assert!(body.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
     fn openai_chat_non_reasoning_uses_max_tokens() {
         let mut body = serde_json::json!({"model": "gpt-4o"});
         apply_openai_chat(
             &mut body,
-            "gpt-4o",
             &LlmGenerationParams {
                 max_tokens: Some(512),
                 ..Default::default()
@@ -222,7 +240,6 @@ mod tests {
         let mut body = serde_json::json!({"model": "gpt-4o"});
         apply_openai_chat(
             &mut body,
-            "gpt-4o",
             &LlmGenerationParams {
                 response_format: Some(LlmResponseFormat {
                     kind: Some(ResponseFormatKind::JsonSchema),

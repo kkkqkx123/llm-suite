@@ -61,7 +61,7 @@ impl OpenaiChatCodec {
         });
 
         let generation = shared::resolve_generation(request, profile)?;
-        crate::generation::apply_openai_chat(&mut body, &profile.model, &generation);
+        crate::generation::apply_openai_chat(&mut body, &generation);
         shared::merge_and_apply_params(&mut body, profile, &request.parameters);
 
         if !use_text_mode {
