@@ -162,6 +162,7 @@ mod tests {
         let mut body = serde_json::json!({"model": "gpt-5"});
         apply_openai_chat(
             &mut body,
+            "gpt-5",
             &LlmGenerationParams {
                 max_tokens: Some(512),
                 thinking: Some(LlmThinkingConfig {
@@ -176,6 +177,21 @@ mod tests {
         assert_eq!(body["reasoning_effort"], serde_json::json!("xhigh"));
         assert_eq!(body["verbosity"], serde_json::json!("low"));
         assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn openai_chat_non_reasoning_uses_max_tokens() {
+        let mut body = serde_json::json!({"model": "gpt-4o"});
+        apply_openai_chat(
+            &mut body,
+            "gpt-4o",
+            &LlmGenerationParams {
+                max_tokens: Some(512),
+                ..Default::default()
+            },
+        );
+        assert_eq!(body["max_tokens"], serde_json::json!(512));
+        assert!(body.get("max_completion_tokens").is_none());
     }
 
     #[test]
@@ -197,5 +213,27 @@ mod tests {
         assert_eq!(body["thinking"]["type"], serde_json::json!("adaptive"));
         assert_eq!(body["output_config"]["effort"], serde_json::json!("high"));
         assert_eq!(body["max_tokens"], serde_json::json!(16000));
+    }
+
+    #[test]
+    fn openai_chat_json_schema_response_format_defaults_strict_false() {
+        use llm_types::llm::generation::LlmResponseFormat;
+        use llm_types::llm::generation::ResponseFormatKind;
+        let mut body = serde_json::json!({"model": "gpt-4o"});
+        apply_openai_chat(
+            &mut body,
+            "gpt-4o",
+            &LlmGenerationParams {
+                response_format: Some(LlmResponseFormat {
+                    kind: Some(ResponseFormatKind::JsonSchema),
+                    name: Some("resp".to_string()),
+                    schema: Some(serde_json::json!({"type": "object"})),
+                    strict: None,
+                }),
+                ..Default::default()
+            },
+        );
+        let rf = body["response_format"]["json_schema"].as_object().expect("json_schema present");
+        assert_eq!(rf.get("strict"), Some(&serde_json::json!(false)));
     }
 }

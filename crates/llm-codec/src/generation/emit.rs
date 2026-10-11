@@ -44,9 +44,31 @@ fn emit_tool_choice_anthropic(
     obj
 }
 
-pub fn apply_openai_chat(body: &mut serde_json::Value, gen: &LlmGenerationParams) {
+/// Whether the given model is an OpenAI reasoning model that *requires*
+/// `max_completion_tokens` instead of the legacy `max_tokens`. Reasoning
+/// models (o1/o3/o4/gpt-5 families) reject `max_tokens`; most other OpenAI
+/// models and the majority of OpenAI-compatible servers (Ollama, LM Studio,
+/// older vLLM, and many Chinese gateways) only accept `max_tokens`. The
+/// default emission is therefore `max_tokens`, switched to
+/// `max_completion_tokens` only for known reasoning models.
+pub fn is_openai_reasoning_model(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    m.starts_with("o1")
+        || m.starts_with("o3")
+        || m.starts_with("o4")
+        || m.contains("gpt-5")
+        || m.contains("-reasoning")
+        || m.contains("reasoning-")
+}
+
+pub fn apply_openai_chat(body: &mut serde_json::Value, model: &str, gen: &LlmGenerationParams) {
     if let Some(max_tokens) = gen.max_tokens {
-        body["max_completion_tokens"] = serde_json::json!(max_tokens);
+        let key = if is_openai_reasoning_model(model) {
+            "max_completion_tokens"
+        } else {
+            "max_tokens"
+        };
+        body[key] = serde_json::json!(max_tokens);
     }
     if let Some(temperature) = gen.temperature {
         body["temperature"] = serde_json::json!(temperature);
@@ -106,7 +128,7 @@ pub fn apply_openai_chat(body: &mut serde_json::Value, gen: &LlmGenerationParams
                         serde_json::json!({
                             "name": format.name.clone().unwrap_or_else(|| "response".to_string()),
                             "schema": schema,
-                            "strict": format.strict.unwrap_or(true),
+                            "strict": format.strict.unwrap_or(false),
                         }),
                     );
                 } else if let Some(ref name) = format.name {
@@ -189,7 +211,7 @@ pub fn apply_openai_responses(body: &mut serde_json::Value, gen: &LlmGenerationP
                             "type": "json_schema",
                             "name": format.name.clone().unwrap_or_else(|| "response".to_string()),
                             "schema": schema,
-                            "strict": format.strict.unwrap_or(true),
+                            "strict": format.strict.unwrap_or(false),
                         }),
                     );
                     has_text = true;

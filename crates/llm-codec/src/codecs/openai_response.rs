@@ -8,6 +8,9 @@ use std::sync::Mutex;
 
 pub struct OpenaiResponseCodec {
     base_url: String,
+    /// Reused across requests; constructing a `reqwest::Client` per call would
+    /// discard the connection pool and TLS session cache every time.
+    client: reqwest::Client,
     /// Maps streaming `item_id` to the accumulated tool call index so
     /// `function_call_arguments.delta` fragments land on the same call as the
     /// final `function_call.done` snapshot.
@@ -25,6 +28,7 @@ impl OpenaiResponseCodec {
     pub fn new() -> Self {
         Self {
             base_url: "https://api.openai.com/v1".to_string(),
+            client: reqwest::Client::new(),
             call_indices: Mutex::new(HashMap::new()),
             next_index: Mutex::new(0),
         }
@@ -33,6 +37,7 @@ impl OpenaiResponseCodec {
     pub fn with_base_url(base_url: String) -> Self {
         Self {
             base_url,
+            client: reqwest::Client::new(),
             call_indices: Mutex::new(HashMap::new()),
             next_index: Mutex::new(0),
         }
@@ -209,6 +214,11 @@ impl OpenaiResponseCodec {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
+                let name = item
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let arguments = item
                     .get("arguments")
                     .and_then(|v| v.as_str())
@@ -217,10 +227,7 @@ impl OpenaiResponseCodec {
                 Some(llm_types::message::LlmToolCall {
                     id,
                     r#type: "function".to_string(),
-                    function: llm_types::message::LlmFunctionCall {
-                        name: String::new(),
-                        arguments,
-                    },
+                    function: llm_types::message::LlmFunctionCall { name, arguments },
                 })
             })
             .collect()
@@ -274,7 +281,8 @@ impl LlmCodec for OpenaiResponseCodec {
 
         super::shared::apply_custom_body(&mut body, profile);
 
-        let mut req_builder = reqwest::Client::new()
+        let mut req_builder = self
+            .client
             .request(Method::POST, &url)
             .header("Content-Type", "application/json")
             .json(&body);
@@ -298,7 +306,8 @@ impl LlmCodec for OpenaiResponseCodec {
 
         let body = self.build_count_tokens_body(request, profile)?;
 
-        let mut req_builder = reqwest::Client::new()
+        let mut req_builder = self
+            .client
             .request(Method::POST, &url)
             .header("Content-Type", "application/json")
             .json(&body);
@@ -467,15 +476,25 @@ impl OpenaiResponseCodec {
             .map(String::from);
 
         let output = json.get("output").and_then(|v| v.as_array());
-        let last_output = output.and_then(|o| o.last());
 
-        let content = last_output
-            .and_then(|o| o.get("content"))
-            .and_then(|c| c.as_array())
-            .and_then(|arr| arr.first())
-            .and_then(|block| block.get("text"))
-            .and_then(|t| t.as_str())
-            .map(String::from);
+        // Take the visible text from the last `message` output item. A
+        // `function_call` output item carries no text, so simply using
+        // `output.last()` would drop the assistant's text whenever a tool call
+        // follows it.
+        let content = output
+            .and_then(|o| {
+                o.iter()
+                    .rev()
+                    .find(|item| {
+                        item.get("type").and_then(|t| t.as_str()) == Some("message")
+                    })
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_array())
+                    .and_then(|arr| arr.first())
+                    .and_then(|block| block.get("text"))
+                    .and_then(|t| t.as_str())
+                    .map(String::from)
+            });
 
         let mut tool_calls: Option<Vec<llm_types::message::LlmToolCall>> = None;
         if let Some(output_arr) = output {
@@ -726,7 +745,45 @@ mod tests {
         let calls = result.tool_calls.as_ref().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].id, "fc_7");
+        assert_eq!(calls[0].function.name, "get_weather");
         assert_eq!(calls[0].function.arguments, r#"{"city":"Beijing"}"#);
+    }
+
+    #[test]
+    fn parse_response_keeps_message_text_when_function_call_follows() {
+        let codec = OpenaiResponseCodec::new();
+        let body = r#"{
+            "id": "resp_4",
+            "object": "response",
+            "model": "gpt-4o",
+            "status": "completed",
+            "output": [
+                {"type": "message", "content": [{"type": "output_text", "text": "thinking aloud"}]},
+                {"type": "function_call", "id": "fc_9", "call_id": "call_9", "name": "get_weather", "arguments": "{\"city\":\"Beijing\"}"}
+            ]
+        }"#;
+        let result = codec
+            .parse_response(
+                body,
+                &LlmRequest {
+                    profile_id: "p".to_string(),
+                    messages: Vec::new(),
+                    parameters: None,
+                    generation: None,
+                    tools: None,
+                    tool_call_protocol: None,
+                    locked_tool_call_protocol: None,
+                    violation_policy: None,
+                    execution_id: None,
+                    stream: None,
+                    dead_loop_detection: None,
+                    protocol_auto_converted: None,
+                    timeout_ms: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(result.content.as_deref(), Some("thinking aloud"));
+        assert_eq!(result.tool_calls.as_ref().unwrap()[0].function.name, "get_weather");
     }
 
     #[test]

@@ -94,6 +94,16 @@ impl OpenAICompatibleProvider {
         &self.preprocessor
     }
 
+    /// Whether the model rejects the `dimensions` request parameter. Only the
+    /// legacy OpenAI `text-embedding-ada-*` family rejects it (notably
+    /// `text-embedding-ada-002`); the `text-embedding-3-*` family and most
+    /// third-party OpenAI-compatible embeddings accept it.
+    fn model_rejects_dimensions(model: &str) -> bool {
+        model
+            .to_ascii_lowercase()
+            .contains("text-embedding-ada")
+    }
+
     /// Builds the request body, applying preprocessing first.
     fn build_request(&self, texts: &[String]) -> EmbeddingRequest {
         let borrowed: Vec<&str> = texts.iter().map(String::as_str).collect();
@@ -106,7 +116,11 @@ impl OpenAICompatibleProvider {
                 .map(serde_json::Value::String)
                 .collect(),
             encoding_format: Some("float".into()),
-            dimensions: self.config.request_dimensions,
+            dimensions: if Self::model_rejects_dimensions(&self.config.model) {
+                None
+            } else {
+                self.config.request_dimensions
+            },
         }
     }
 
@@ -127,7 +141,11 @@ impl OpenAICompatibleProvider {
                 })
                 .collect(),
             encoding_format: Some("float".into()),
-            dimensions: self.config.request_dimensions,
+            dimensions: if Self::model_rejects_dimensions(&self.config.model) {
+                None
+            } else {
+                self.config.request_dimensions
+            },
         }
     }
 
@@ -345,6 +363,28 @@ mod tests {
         let provider = OpenAICompatibleProvider::new(config).expect("valid config");
         let request = provider.build_request(&["rust".to_string()]);
         assert_eq!(request.dimensions, None);
+    }
+
+    #[test]
+    fn ada_002_rejects_dimensions_and_omits_field() {
+        // `text-embedding-ada-002` rejects the `dimensions` parameter; even
+        // when `request_dimensions` is configured it must be omitted.
+        let config = EmbeddingConfig::new("http://example.com", "text-embedding-ada-002")
+            .with_dimension(1536)
+            .with_request_dimensions(512);
+        let provider = OpenAICompatibleProvider::new(config).expect("valid config");
+        let request = provider.build_request(&["rust".to_string()]);
+        assert_eq!(request.dimensions, None);
+    }
+
+    #[test]
+    fn text_embedding_3_keeps_request_dimensions() {
+        let config = EmbeddingConfig::new("http://example.com", "text-embedding-3-small")
+            .with_dimension(1536)
+            .with_request_dimensions(512);
+        let provider = OpenAICompatibleProvider::new(config).expect("valid config");
+        let request = provider.build_request(&["rust".to_string()]);
+        assert_eq!(request.dimensions, Some(512));
     }
 
     #[test]

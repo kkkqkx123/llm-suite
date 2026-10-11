@@ -7,6 +7,9 @@ use reqwest::Method;
 
 pub struct OpenaiChatCodec {
     base_url: String,
+    // Reused across requests; constructing a `reqwest::Client` per call would
+    // discard the connection pool and TLS session cache every time.
+    client: reqwest::Client,
 }
 
 impl Default for OpenaiChatCodec {
@@ -19,11 +22,15 @@ impl OpenaiChatCodec {
     pub fn new() -> Self {
         Self {
             base_url: "https://api.openai.com/v1".to_string(),
+            client: reqwest::Client::new(),
         }
     }
 
     pub fn with_base_url(base_url: String) -> Self {
-        Self { base_url }
+        Self {
+            base_url,
+            client: reqwest::Client::new(),
+        }
     }
 
     /// Build the request body (separated from the HTTP layer for testability).
@@ -54,10 +61,12 @@ impl OpenaiChatCodec {
         });
 
         let generation = shared::resolve_generation(request, profile)?;
-        crate::generation::apply_openai_chat(&mut body, &generation);
+        crate::generation::apply_openai_chat(&mut body, &profile.model, &generation);
         shared::merge_and_apply_params(&mut body, profile, &request.parameters);
 
         if !use_text_mode {
+            // `tool` role messages must carry `tool_call_id` for OpenAI Chat.
+            shared::validate_openai_chat_messages(request)?;
             if let Some(tools) = &request.tools {
                 body["tools"] = serde_json::json!(shared::convert_openai_tools(tools)?);
             }
@@ -88,8 +97,14 @@ impl LlmCodec for OpenaiChatCodec {
         // The profile may carry a full endpoint URL (custom path or query
         // string such as Azure `.../chat/completions?api-version=...`); in
         // that case it is used as-is, otherwise the built-in path applies.
-        let profile_url = profile.base_url.as_deref().unwrap_or(&self.base_url);
-        let url = if profile_url.contains("/chat/completions") {
+        // `trim_end_matches('/')` avoids a double slash when the configured
+        // base URL already ends with a slash.
+        let profile_url = profile
+            .base_url
+            .as_deref()
+            .unwrap_or(&self.base_url)
+            .trim_end_matches('/');
+        let url = if profile_url.ends_with("/chat/completions") {
             profile_url.to_string()
         } else {
             format!("{profile_url}/chat/completions")
@@ -97,7 +112,8 @@ impl LlmCodec for OpenaiChatCodec {
 
         let body = self.build_body(request, profile)?;
 
-        let mut req_builder = reqwest::Client::new()
+        let mut req_builder = self
+            .client
             .request(Method::POST, &url)
             .header("Content-Type", "application/json")
             .json(&body);
@@ -136,6 +152,10 @@ impl LlmCodec for OpenaiChatCodec {
     }
 
     fn parse_stream_chunk(&self, data: &str) -> LlmResult<Option<MessageStreamEvent>> {
+        Ok(shared::parse_openai_stream_chunk(data)?.into_iter().next())
+    }
+
+    fn parse_stream_chunk_events(&self, data: &str) -> LlmResult<Vec<MessageStreamEvent>> {
         shared::parse_openai_stream_chunk(data)
     }
 
@@ -346,6 +366,21 @@ mod tests {
         assert!(
             result_msg.get("tool_call_id").is_none(),
             "tool_call_id must be dropped after conversion"
+        );
+    }
+
+    #[test]
+    fn native_mode_rejects_tool_message_without_tool_call_id() {
+        let codec = OpenaiChatCodec::new();
+        let mut req = request_with_format(ToolCallProtocol::Native);
+        // A `tool` role message without `tool_call_id` is invalid for OpenAI Chat.
+        req.messages.push(text_msg(MessageRole::Tool, "sunny"));
+        let err = codec
+            .build_body(&req, &profile())
+            .expect_err("missing tool_call_id must fail fast");
+        assert!(
+            format!("{err}").contains("tool_call_id"),
+            "error must mention tool_call_id: {err}"
         );
     }
 }

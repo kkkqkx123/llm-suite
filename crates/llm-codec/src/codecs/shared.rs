@@ -67,87 +67,136 @@ pub fn parse_text_tool_calls(
     parse_from_text(content, &options)
 }
 
+/// Convert internal messages into OpenAI Chat Completions `messages`.
+///
+/// OpenAI Chat has no `tool_use` / `tool_result` content-part types (those are
+/// Anthropic's). Tool calls therefore flow through the message-level
+/// `tool_calls` field, and tool results must be standalone `tool` role
+/// messages. This converter folds `ToolUse` rich blocks into `tool_calls` and
+/// emits `ToolResult` rich blocks as separate `tool` messages appended right
+/// after their source message (the canonical OpenAI ordering).
 pub fn convert_openai_messages(messages: &[Message]) -> Vec<serde_json::Value> {
-    messages
-        .iter()
-        .map(|msg| {
-            let role = match msg.role {
-                MessageRole::System => "system",
-                MessageRole::User => "user",
-                MessageRole::Assistant => "assistant",
-                MessageRole::Tool => "tool",
-            };
+    let mut out: Vec<serde_json::Value> = Vec::new();
 
-            let mut entry = match &msg.content {
-                MessageContentValue::Text(text) => {
-                    serde_json::json!({"role": role, "content": text})
-                }
-                MessageContentValue::Rich(blocks) => {
-                    let content: Vec<serde_json::Value> = blocks
-                        .iter()
-                        .map(|block| match block {
-                            MessageContent::Text { text } => {
-                                serde_json::json!({"type": "text", "text": text})
+    for msg in messages {
+        let role = match msg.role {
+            MessageRole::System => "system",
+            MessageRole::User => "user",
+            MessageRole::Assistant => "assistant",
+            MessageRole::Tool => "tool",
+        };
+
+        // Native tool calls already carried on the message (canonical form).
+        let mut tool_calls: Vec<serde_json::Value> = Vec::new();
+        if let Some(ref tcs) = msg.tool_calls {
+            for tc in tcs {
+                tool_calls.push(serde_json::json!({
+                    "id": tc.id,
+                    "type": tc.r#type,
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    }
+                }));
+            }
+        }
+
+        // `ToolResult` rich blocks cannot be content parts; they become
+        // standalone `tool` role messages emitted after this entry.
+        let mut tool_result_entries: Vec<serde_json::Value> = Vec::new();
+        // Tracks whether the source message carries any non-tool-result content.
+        let mut has_content = false;
+
+        let mut entry = match &msg.content {
+            MessageContentValue::Text(text) => {
+                has_content = true;
+                serde_json::json!({"role": role, "content": text})
+            }
+            MessageContentValue::Rich(blocks) => {
+                let mut content: Vec<serde_json::Value> = Vec::new();
+                for block in blocks {
+                    match block {
+                        MessageContent::Text { text } => {
+                            has_content = true;
+                            content.push(serde_json::json!({"type": "text", "text": text}));
+                        }
+                        MessageContent::ImageUrl { image_url } => {
+                            has_content = true;
+                            let mut img = serde_json::json!({
+                                "type": "image_url",
+                                "image_url": {"url": image_url.url}
+                            });
+                            if let Some(ref detail) = image_url.detail {
+                                img["image_url"]["detail"] = serde_json::json!(detail);
                             }
-                            MessageContent::ImageUrl { image_url } => {
-                                let mut img = serde_json::json!({
-                                    "type": "image_url",
-                                    "image_url": {"url": image_url.url}
-                                });
-                                if let Some(ref detail) = image_url.detail {
-                                    img["image_url"]["detail"] = serde_json::json!(detail);
-                                }
-                                img
-                            }
-                            MessageContent::ToolUse { tool_use } => {
-                                serde_json::json!({
-                                    "type": "tool_use",
-                                    "id": tool_use.id,
+                            content.push(img);
+                        }
+                        // Fold ToolUse blocks into the message's `tool_calls`.
+                        MessageContent::ToolUse { tool_use } => {
+                            tool_calls.push(serde_json::json!({
+                                "id": tool_use.id,
+                                "type": "function",
+                                "function": {
                                     "name": tool_use.name,
                                     "input": tool_use.input,
-                                })
+                                }
+                            }));
+                        }
+                        // Emit ToolResult blocks as standalone `tool` messages.
+                        MessageContent::ToolResult { tool_result } => {
+                            let mut tmsg = serde_json::json!({
+                                "role": "tool",
+                                "content": tool_result.content,
+                                "tool_call_id": tool_result.tool_use_id,
+                            });
+                            if let Some(is_err) = tool_result.is_error {
+                                tmsg["is_error"] = serde_json::json!(is_err);
                             }
-                            MessageContent::ToolResult { tool_result } => {
-                                serde_json::json!({
-                                    "type": "tool_result",
-                                    "tool_use_id": tool_result.tool_use_id,
-                                    "content": tool_result.content,
-                                    "is_error": tool_result.is_error.unwrap_or(false),
-                                })
-                            }
-                            MessageContent::Thinking { thinking, .. } => {
-                                serde_json::json!({"type": "text", "text": thinking})
-                            }
-                        })
-                        .collect();
-                    serde_json::json!({"role": role, "content": content})
+                            tool_result_entries.push(tmsg);
+                        }
+                        MessageContent::Thinking { thinking, .. } => {
+                            has_content = true;
+                            content.push(serde_json::json!({"type": "text", "text": thinking}));
+                        }
+                    }
                 }
-            };
-
-            if let Some(ref tool_calls) = msg.tool_calls {
-                let calls: Vec<serde_json::Value> = tool_calls
-                    .iter()
-                    .map(|tc| {
-                        serde_json::json!({
-                            "id": tc.id,
-                            "type": tc.r#type,
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments,
-                            }
-                        })
-                    })
-                    .collect();
-                entry["tool_calls"] = serde_json::json!(calls);
+                serde_json::json!({"role": role, "content": content})
             }
+        };
 
-            if let Some(ref tool_call_id) = msg.tool_call_id {
-                entry["tool_call_id"] = serde_json::json!(tool_call_id);
-            }
+        if !tool_calls.is_empty() {
+            entry["tool_calls"] = serde_json::json!(tool_calls);
+        }
+        if let Some(ref tool_call_id) = msg.tool_call_id {
+            entry["tool_call_id"] = serde_json::json!(tool_call_id);
+        }
 
-            entry
-        })
-        .collect()
+        // A `tool` role message whose only content was a ToolResult block has
+        // no valid standalone body of its own; skip it and rely on the derived
+        // `tool` messages above.
+        if !(msg.role == MessageRole::Tool && !has_content && !tool_result_entries.is_empty()) {
+            out.push(entry);
+        }
+        out.extend(tool_result_entries);
+    }
+
+    out
+}
+
+/// OpenAI Chat requires every `tool` role message to carry `tool_call_id` (and
+/// to follow the assistant message that produced the matching `tool_calls`).
+/// Validate the former so an invalid request fails fast locally instead of
+/// round-tripping a `400` from the server. Text mode re-renders tool results as
+/// inline blocks, so this only applies to native (non-text) requests.
+pub fn validate_openai_chat_messages(request: &LlmRequest) -> LlmResult<()> {
+    for msg in &request.messages {
+        if msg.role == llm_types::message::MessageRole::Tool && msg.tool_call_id.is_none() {
+            return Err(crate::error::LlmError::ConfigError(
+                "OpenAI Chat requires every `tool` role message to carry `tool_call_id`".to_string(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Merge profile-level and request-level parameters into the body.
@@ -237,6 +286,12 @@ pub fn parse_openai_chat_response(body: &str) -> LlmResult<LlmResponseType> {
         .and_then(|r| r.as_str())
         .map(String::from);
 
+    // NOTE: `reasoning_content` is NOT part of the official OpenAI Chat
+    // Completions schema (it is absent from `openai-python`). It is a
+    // non-standard extension used by DeepSeek and several Chinese
+    // OpenAI-compatible gateways to surface intermediate reasoning. Official
+    // OpenAI reasoning models do not expose it here, so strict OpenAI
+    // responses will leave this empty.
     let reasoning_content = message
         .and_then(|m| m.get("reasoning_content"))
         .and_then(|r| r.as_str())
@@ -306,11 +361,17 @@ pub fn parse_openai_chat_response(body: &str) -> LlmResult<LlmResponseType> {
     })
 }
 
-pub fn parse_openai_stream_chunk(data: &str) -> LlmResult<Option<MessageStreamEvent>> {
+/// Parse one OpenAI Chat streaming SSE chunk into zero or more logical events.
+///
+/// Returns a `Vec` (not a single `Option`) because a chunk's
+/// `choices[].delta.tool_calls` array may carry several tool calls at once
+/// (parallel tool calls). Each entry yields its own `ToolCallDelta` so none
+/// are dropped; the accumulator keys them by `index`.
+pub fn parse_openai_stream_chunk(data: &str) -> LlmResult<Vec<MessageStreamEvent>> {
     if data == "[DONE]" {
-        return Ok(Some(MessageStreamEvent::End(
+        return Ok(vec![MessageStreamEvent::End(
             llm_types::llm::MessageStreamEnd {},
-        )));
+        )]);
     }
 
     let json: serde_json::Value = serde_json::from_str(data)?;
@@ -324,35 +385,40 @@ pub fn parse_openai_stream_chunk(data: &str) -> LlmResult<Option<MessageStreamEv
     // A chunk without choices carries only usage (stream_options.include_usage).
     if choices.is_empty() {
         if let Some(usage) = json.get("usage") {
-            return Ok(Some(MessageStreamEvent::Usage(
+            return Ok(vec![MessageStreamEvent::Usage(
                 llm_types::llm::MessageStreamUsage {
                     usage: parse_openai_usage(usage),
                 },
-            )));
+            )]);
         }
-        return Ok(None);
+        return Ok(Vec::new());
     }
 
+    let mut events = Vec::new();
     if let Some(choice) = choices.first() {
         if let Some(delta) = choice.get("delta") {
             if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
-                return Ok(Some(MessageStreamEvent::Text(
-                    llm_types::llm::MessageStreamText {
-                        snapshot: String::new(),
-                        text: content.to_string(),
-                    },
-                )));
+                events.push(MessageStreamEvent::Text(llm_types::llm::MessageStreamText {
+                    snapshot: String::new(),
+                    text: content.to_string(),
+                }));
             }
+            // `reasoning_content` is a non-standard extension (DeepSeek /
+            // Chinese gateways), not an official OpenAI Chat field; see the
+            // note in `parse_openai_chat_response`.
             if let Some(reasoning) = delta.get("reasoning_content").and_then(|r| r.as_str()) {
-                return Ok(Some(MessageStreamEvent::ReasoningText(
+                events.push(MessageStreamEvent::ReasoningText(
                     llm_types::llm::MessageStreamReasoning {
                         snapshot: String::new(),
                         reasoning: reasoning.to_string(),
                     },
-                )));
+                ));
             }
-            if let Some(tool_calls) = delta.get("tool_calls").and_then(|t| t.as_array()) {
-                if let Some(call) = tool_calls.first() {
+            // Emit one ToolCallDelta per tool call so parallel calls packed
+            // into a single delta array are all forwarded (previously only the
+            // first was kept).
+            if let Some(trait_tool_calls) = delta.get("tool_calls").and_then(|t| t.as_array()) {
+                for call in trait_tool_calls {
                     let index = call.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                     let id = call.get("id").and_then(|v| v.as_str()).map(String::from);
                     let function = call.get("function");
@@ -364,7 +430,7 @@ pub fn parse_openai_stream_chunk(data: &str) -> LlmResult<Option<MessageStreamEv
                         .and_then(|f| f.get("arguments"))
                         .and_then(|v| v.as_str())
                         .map(String::from);
-                    return Ok(Some(MessageStreamEvent::ToolCallDelta(
+                    events.push(MessageStreamEvent::ToolCallDelta(
                         llm_types::llm::MessageStreamToolCallDelta {
                             index,
                             id,
@@ -372,7 +438,7 @@ pub fn parse_openai_stream_chunk(data: &str) -> LlmResult<Option<MessageStreamEv
                             arguments,
                             is_snapshot: false,
                         },
-                    )));
+                    ));
                 }
             }
         }
@@ -382,14 +448,14 @@ pub fn parse_openai_stream_chunk(data: &str) -> LlmResult<Option<MessageStreamEv
                 "stop" | "tool_calls" | "length" | "content_filter"
             );
             if is_done {
-                return Ok(Some(MessageStreamEvent::End(
+                events.push(MessageStreamEvent::End(
                     llm_types::llm::MessageStreamEnd {},
-                )));
+                ));
             }
         }
     }
 
-    Ok(None)
+    Ok(events)
 }
 
 pub fn convert_openai_tools(tools: &[llm_types::tool::Tool]) -> LlmResult<Vec<serde_json::Value>> {
@@ -487,8 +553,8 @@ mod tests {
     #[test]
     fn stream_usage_chunk_is_extracted() {
         let chunk = r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#;
-        let event = parse_openai_stream_chunk(chunk).expect("chunk must parse");
-        match event {
+        let events = parse_openai_stream_chunk(chunk).expect("chunk must parse");
+        match events.into_iter().next() {
             Some(MessageStreamEvent::Usage(usage)) => {
                 assert_eq!(usage.usage.prompt_tokens, 10);
                 assert_eq!(usage.usage.completion_tokens, 5);
@@ -503,13 +569,13 @@ mod tests {
         let chunk = r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[]}"#;
         assert!(parse_openai_stream_chunk(chunk)
             .expect("chunk must parse")
-            .is_none());
+            .is_empty());
     }
 
     #[test]
     fn stream_tool_call_delta_is_extracted() {
         let chunk = r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Bei"}}]}}]}"#;
-        match parse_openai_stream_chunk(chunk).expect("chunk must parse") {
+        match parse_openai_stream_chunk(chunk).expect("chunk must parse").into_iter().next() {
             Some(MessageStreamEvent::ToolCallDelta(delta)) => {
                 assert_eq!(delta.index, 0);
                 assert_eq!(delta.id.as_deref(), Some("call_1"));
@@ -519,6 +585,97 @@ mod tests {
             }
             other => panic!("expected ToolCallDelta, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn stream_chunk_with_parallel_tool_calls_yields_all_deltas() {
+        // A single SSE chunk carrying two tool calls must produce two
+        // ToolCallDelta events (previously only the first was kept).
+        let chunk = r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":"}},{"index":1,"id":"call_2","type":"function","function":{"name":"get_time","arguments":"{}"}}]}}]}"#;
+        let events = parse_openai_stream_chunk(chunk).expect("chunk must parse");
+        let deltas: Vec<_> = events
+            .into_iter()
+            .filter_map(|e| match e {
+                MessageStreamEvent::ToolCallDelta(d) => Some(d),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deltas.len(), 2, "both parallel tool calls must be emitted");
+        assert_eq!(deltas[0].index, 0);
+        assert_eq!(deltas[0].id.as_deref(), Some("call_1"));
+        assert_eq!(deltas[1].index, 1);
+        assert_eq!(deltas[1].id.as_deref(), Some("call_2"));
+    }
+
+    #[test]
+    fn openai_chat_tool_use_blocks_become_tool_calls_and_tool_results_become_tool_messages() {
+        use llm_types::message::MessageContent;
+        use llm_types::message::{MessageContentValue, MessageRole};
+
+        let assistant = Message {
+            id: llm_types::Id::new(),
+            role: MessageRole::Assistant,
+            content: MessageContentValue::Rich(vec![
+                MessageContent::Text {
+                    text: "let me check".to_string(),
+                },
+                MessageContent::ToolUse {
+                    tool_use: llm_types::message::ToolUseContent {
+                        id: "call_1".to_string(),
+                        name: "get_weather".to_string(),
+                        input: serde_json::json!({"city": "Beijing"}),
+                    },
+                },
+            ]),
+            timestamp: 0,
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+            thinking: None,
+            metadata: None,
+        };
+
+        // A `tool` role message whose content is a ToolResult rich block.
+        let tool = Message {
+            id: llm_types::Id::new(),
+            role: MessageRole::Tool,
+            content: MessageContentValue::Rich(vec![MessageContent::ToolResult {
+                tool_result: llm_types::message::ToolResultContent {
+                    tool_use_id: "call_1".to_string(),
+                    content: "sunny".to_string(),
+                    is_error: None,
+                },
+            }]),
+            timestamp: 0,
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+            thinking: None,
+            metadata: None,
+        };
+
+        let out = convert_openai_messages(&[assistant, tool]);
+
+        // Assistant message must carry tool_calls and must NOT contain any
+        // illegal `tool_use` / `tool_result` content part.
+        let asst = &out[0];
+        assert_eq!(asst["role"], "assistant");
+        assert_eq!(asst["tool_calls"][0]["id"], "call_1");
+        assert_eq!(asst["tool_calls"][0]["function"]["name"], "get_weather");
+        if let Some(arr) = asst["content"].as_array() {
+            for part in arr {
+                assert_ne!(part["type"], "tool_use");
+                assert_ne!(part["type"], "tool_result");
+            }
+        }
+
+        // The tool result must surface as a standalone `tool` role message.
+        let tool_msg = out
+            .iter()
+            .find(|m| m["role"] == "tool")
+            .expect("tool message present");
+        assert_eq!(tool_msg["tool_call_id"], "call_1");
+        assert_eq!(tool_msg["content"], "sunny");
     }
 }
 
