@@ -41,10 +41,7 @@ pub trait LlmCodec: Send + Sync {
     /// `finishReason`, or trailing `usageMetadata`); codecs that need to
     /// emit more than one event per chunk override this. The default
     /// delegates to `parse_stream_chunk` so existing codecs keep working.
-    fn parse_stream_chunk_events(
-        &self,
-        data: &str,
-    ) -> LlmResult<Vec<MessageStreamEvent>> {
+    fn parse_stream_chunk_events(&self, data: &str) -> LlmResult<Vec<MessageStreamEvent>> {
         match self.parse_stream_chunk(data)? {
             Some(event) => Ok(vec![event]),
             None => Ok(Vec::new()),

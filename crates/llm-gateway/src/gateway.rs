@@ -173,7 +173,12 @@ impl LlmGateway {
     ) -> Arc<llm_common::ratelimit::RateLimiter> {
         self.rate_limiters
             .entry(key.to_string())
-            .or_insert_with(|| Arc::new(llm_common::ratelimit::RateLimiter::new(requests_per_second, burst)))
+            .or_insert_with(|| {
+                Arc::new(llm_common::ratelimit::RateLimiter::new(
+                    requests_per_second,
+                    burst,
+                ))
+            })
             .clone()
     }
 

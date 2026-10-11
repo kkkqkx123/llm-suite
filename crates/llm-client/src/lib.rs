@@ -15,9 +15,9 @@ pub mod mock;
 pub use circuit::{CircuitBreaker, CircuitBreakerConfig};
 pub use client::LlmClient;
 pub use dead_loop_detector::{DeadLoopDetectionResult, DeadLoopDetector, DeadLoopDetectorConfig};
-pub use resilience::{RateLimiter, Resilience};
 #[cfg(feature = "mock")]
 pub use mock::{LlmResponseSpec, MockLlmClient, MockMessageStream};
+pub use resilience::{RateLimiter, Resilience};
 pub use stream::MessageStream;
 pub use token_stream::{
     LlmMetricsSink, SharedLlmMetricsSink, SharedTokenUsageSink, TokenRecordingStream,

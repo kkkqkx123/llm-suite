@@ -61,9 +61,7 @@ impl GeminiNativeCodec {
 
         let builder = super::shared::apply_auth_and_headers(builder, profile, "native");
 
-        builder
-            .build()
-            .map_err(crate::error::LlmError::HttpError)
+        builder.build().map_err(crate::error::LlmError::HttpError)
     }
 
     fn convert_messages(&self, messages: &[llm_types::message::Message]) -> Vec<serde_json::Value> {
@@ -241,7 +239,12 @@ impl LlmCodec for GeminiNativeCodec {
         } else {
             "generateContent"
         };
-        let url = format!("{}/models/{}:{}", self.endpoint_base(profile), profile.model, action);
+        let url = format!(
+            "{}/models/{}:{}",
+            self.endpoint_base(profile),
+            profile.model,
+            action
+        );
 
         let body = self.build_body(request, profile)?;
 
@@ -296,10 +299,7 @@ impl LlmCodec for GeminiNativeCodec {
         Ok(self.parse_stream_chunk_events(data)?.into_iter().next())
     }
 
-    fn parse_stream_chunk_events(
-        &self,
-        data: &str,
-    ) -> LlmResult<Vec<MessageStreamEvent>> {
+    fn parse_stream_chunk_events(&self, data: &str) -> LlmResult<Vec<MessageStreamEvent>> {
         if data.is_empty() {
             return Ok(Vec::new());
         }
@@ -320,8 +320,10 @@ impl LlmCodec for GeminiNativeCodec {
                         // `thought` is a boolean flag on the part (official
                         // schema: Part.thought: bool); a part like
                         // {"text": "...", "thought": true} is reasoning.
-                        let is_thought =
-                            part.get("thought").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let is_thought = part
+                            .get("thought")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
                         if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
                             if is_thought {
                                 events.push(MessageStreamEvent::ReasoningText(
@@ -378,18 +380,18 @@ impl LlmCodec for GeminiNativeCodec {
                 // with content parts; it must not be swallowed by the part
                 // handling above.
                 if candidate.get("finishReason").is_some() {
-                    events.push(MessageStreamEvent::End(
-                        llm_types::llm::MessageStreamEnd {},
-                    ));
+                    events.push(MessageStreamEvent::End(llm_types::llm::MessageStreamEnd {}));
                 }
             }
         }
 
         // Streaming usage arrives in the final chunk's `usageMetadata`.
         if let Some(u) = json.get("usageMetadata") {
-            events.push(MessageStreamEvent::Usage(llm_types::llm::MessageStreamUsage {
-                usage: Self::parse_usage_metadata(u),
-            }));
+            events.push(MessageStreamEvent::Usage(
+                llm_types::llm::MessageStreamUsage {
+                    usage: Self::parse_usage_metadata(u),
+                },
+            ));
         }
 
         Ok(events)
@@ -491,8 +493,10 @@ impl GeminiNativeCodec {
                         // `thought` is a boolean flag on the part (official
                         // schema: Part.thought: bool); thinking-model parts
                         // look like {"text": "...", "thought": true}.
-                        let is_thought =
-                            part.get("thought").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let is_thought = part
+                            .get("thought")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
                         if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
                             if is_thought {
                                 reasoning_content
@@ -533,9 +537,7 @@ impl GeminiNativeCodec {
             }
         }
 
-        let usage = json
-            .get("usageMetadata")
-            .map(Self::parse_usage_metadata);
+        let usage = json.get("usageMetadata").map(Self::parse_usage_metadata);
 
         let message = llm_types::message::Message {
             id: llm_types::Id::new(),
@@ -649,11 +651,13 @@ mod tests {
         let codec = GeminiNativeCodec::new();
         let chunk = r#"{"candidates":[{"content":{"parts":[{"text":"secret plan","thought":true},{"text":"answer"}]}}]}"#;
         let events = codec.parse_stream_chunk_events(chunk).expect("must parse");
-        assert_eq!(events.len(), 2, "both parts must be emitted, got {:?}", events);
-        assert!(matches!(
-            &events[0],
-            MessageStreamEvent::ReasoningText(_)
-        ));
+        assert_eq!(
+            events.len(),
+            2,
+            "both parts must be emitted, got {:?}",
+            events
+        );
+        assert!(matches!(&events[0], MessageStreamEvent::ReasoningText(_)));
         assert!(matches!(&events[1], MessageStreamEvent::Text(_)));
     }
 
@@ -775,7 +779,10 @@ mod tests {
         assert_eq!(parts[0]["text"], "what is this");
         assert_eq!(parts[1]["inline_data"]["mime_type"], "image/png");
         assert_eq!(parts[1]["inline_data"]["data"], "AAAA");
-        assert_eq!(parts[2]["file_data"]["file_uri"], "https://example.com/a.jpg");
+        assert_eq!(
+            parts[2]["file_data"]["file_uri"],
+            "https://example.com/a.jpg"
+        );
         assert_eq!(parts[2]["file_data"]["mime_type"], "image/jpeg");
     }
 
@@ -826,11 +833,17 @@ mod tests {
             thinking: None,
             metadata: None,
         };
-        let req = request(vec![tool_msg, msg(llm_types::message::MessageRole::User, "next")], None);
+        let req = request(
+            vec![tool_msg, msg(llm_types::message::MessageRole::User, "next")],
+            None,
+        );
         let body = codec.build_body(&req, &profile()).expect("must build");
         let contents = body["contents"].as_array().unwrap();
-        assert_eq!(contents[0]["role"], serde_json::json!("user"),
-            "Gemini only accepts user/model roles");
+        assert_eq!(
+            contents[0]["role"],
+            serde_json::json!("user"),
+            "Gemini only accepts user/model roles"
+        );
         assert_eq!(
             contents[0]["parts"][0]["function_response"]["name"],
             serde_json::json!("get_weather"),
@@ -878,7 +891,10 @@ mod tests {
             .expect("must build");
 
         let config = &body["generationConfig"];
-        assert!(config.get("temperature").is_none(), "unset fields must not be forced");
+        assert!(
+            config.get("temperature").is_none(),
+            "unset fields must not be forced"
+        );
         assert!(config.get("topP").is_none());
         assert!(config.get("topK").is_none());
         assert!(config.get("maxOutputTokens").is_none());
@@ -965,7 +981,10 @@ mod tests {
     fn non_stream_request_targets_generate_content() {
         let codec = GeminiNativeCodec::new();
         let req = codec
-            .build_request(&request(vec![msg(llm_types::message::MessageRole::User, "Hi")], None), &profile())
+            .build_request(
+                &request(vec![msg(llm_types::message::MessageRole::User, "Hi")], None),
+                &profile(),
+            )
             .expect("must build");
         assert_eq!(
             req.url().as_str(),

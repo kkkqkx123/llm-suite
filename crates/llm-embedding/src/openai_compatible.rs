@@ -99,9 +99,7 @@ impl OpenAICompatibleProvider {
     /// `text-embedding-ada-002`); the `text-embedding-3-*` family and most
     /// third-party OpenAI-compatible embeddings accept it.
     fn model_rejects_dimensions(model: &str) -> bool {
-        model
-            .to_ascii_lowercase()
-            .contains("text-embedding-ada")
+        model.to_ascii_lowercase().contains("text-embedding-ada")
     }
 
     /// Builds the request body, applying preprocessing first.

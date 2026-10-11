@@ -233,7 +233,9 @@ mod tests {
                 ..Default::default()
             },
         );
-        let rf = body["response_format"]["json_schema"].as_object().expect("json_schema present");
+        let rf = body["response_format"]["json_schema"]
+            .as_object()
+            .expect("json_schema present");
         assert_eq!(rf.get("strict"), Some(&serde_json::json!(false)));
     }
 }

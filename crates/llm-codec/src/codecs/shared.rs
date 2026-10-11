@@ -192,7 +192,8 @@ pub fn validate_openai_chat_messages(request: &LlmRequest) -> LlmResult<()> {
     for msg in &request.messages {
         if msg.role == llm_types::message::MessageRole::Tool && msg.tool_call_id.is_none() {
             return Err(crate::error::LlmError::ConfigError(
-                "OpenAI Chat requires every `tool` role message to carry `tool_call_id`".to_string(),
+                "OpenAI Chat requires every `tool` role message to carry `tool_call_id`"
+                    .to_string(),
             ));
         }
     }
@@ -398,10 +399,12 @@ pub fn parse_openai_stream_chunk(data: &str) -> LlmResult<Vec<MessageStreamEvent
     if let Some(choice) = choices.first() {
         if let Some(delta) = choice.get("delta") {
             if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
-                events.push(MessageStreamEvent::Text(llm_types::llm::MessageStreamText {
-                    snapshot: String::new(),
-                    text: content.to_string(),
-                }));
+                events.push(MessageStreamEvent::Text(
+                    llm_types::llm::MessageStreamText {
+                        snapshot: String::new(),
+                        text: content.to_string(),
+                    },
+                ));
             }
             // `reasoning_content` is a non-standard extension (DeepSeek /
             // Chinese gateways), not an official OpenAI Chat field; see the
@@ -448,9 +451,7 @@ pub fn parse_openai_stream_chunk(data: &str) -> LlmResult<Vec<MessageStreamEvent
                 "stop" | "tool_calls" | "length" | "content_filter"
             );
             if is_done {
-                events.push(MessageStreamEvent::End(
-                    llm_types::llm::MessageStreamEnd {},
-                ));
+                events.push(MessageStreamEvent::End(llm_types::llm::MessageStreamEnd {}));
             }
         }
     }
@@ -575,7 +576,11 @@ mod tests {
     #[test]
     fn stream_tool_call_delta_is_extracted() {
         let chunk = r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Bei"}}]}}]}"#;
-        match parse_openai_stream_chunk(chunk).expect("chunk must parse").into_iter().next() {
+        match parse_openai_stream_chunk(chunk)
+            .expect("chunk must parse")
+            .into_iter()
+            .next()
+        {
             Some(MessageStreamEvent::ToolCallDelta(delta)) => {
                 assert_eq!(delta.index, 0);
                 assert_eq!(delta.id.as_deref(), Some("call_1"));

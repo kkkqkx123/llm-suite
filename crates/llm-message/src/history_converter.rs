@@ -257,15 +257,14 @@ mod tests {
     #[test]
     fn image_blocks_become_placeholders_in_text_mode() {
         for format in [ToolCallProtocol::Xml, ToolCallProtocol::JsonWrapped] {
-            let converted = convert_to_text_mode(
-                &[make_rich_image_message()],
-                &format,
-                None,
-            );
+            let converted = convert_to_text_mode(&[make_rich_image_message()], &format, None);
             match &converted[0].content {
                 MessageContentValue::Text(text) => {
                     assert!(text.contains("look at this"), "text kept: {text}");
-                    assert!(text.contains("[image: https://e.com/a.png]"), "placeholder kept: {text}");
+                    assert!(
+                        text.contains("[image: https://e.com/a.png]"),
+                        "placeholder kept: {text}"
+                    );
                 }
                 other => panic!("expected Text content, got {:?}", other),
             }

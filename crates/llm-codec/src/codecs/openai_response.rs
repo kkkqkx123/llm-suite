@@ -94,7 +94,9 @@ impl OpenaiResponseCodec {
                                     llm_types::message::MessageContent::Thinking {
                                         thinking,
                                         ..
-                                    } => serde_json::json!({"type": "input_text", "text": thinking}),
+                                    } => {
+                                        serde_json::json!({"type": "input_text", "text": thinking})
+                                    }
                                     // Tool blocks are not valid user content in
                                     // the Responses API; render them as text so
                                     // history is not silently dropped.
@@ -481,20 +483,17 @@ impl OpenaiResponseCodec {
         // `function_call` output item carries no text, so simply using
         // `output.last()` would drop the assistant's text whenever a tool call
         // follows it.
-        let content = output
-            .and_then(|o| {
-                o.iter()
-                    .rev()
-                    .find(|item| {
-                        item.get("type").and_then(|t| t.as_str()) == Some("message")
-                    })
-                    .and_then(|m| m.get("content"))
-                    .and_then(|c| c.as_array())
-                    .and_then(|arr| arr.first())
-                    .and_then(|block| block.get("text"))
-                    .and_then(|t| t.as_str())
-                    .map(String::from)
-            });
+        let content = output.and_then(|o| {
+            o.iter()
+                .rev()
+                .find(|item| item.get("type").and_then(|t| t.as_str()) == Some("message"))
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|block| block.get("text"))
+                .and_then(|t| t.as_str())
+                .map(String::from)
+        });
 
         let mut tool_calls: Option<Vec<llm_types::message::LlmToolCall>> = None;
         if let Some(output_arr) = output {
@@ -783,7 +782,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(result.content.as_deref(), Some("thinking aloud"));
-        assert_eq!(result.tool_calls.as_ref().unwrap()[0].function.name, "get_weather");
+        assert_eq!(
+            result.tool_calls.as_ref().unwrap()[0].function.name,
+            "get_weather"
+        );
     }
 
     #[test]

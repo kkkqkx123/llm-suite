@@ -39,7 +39,12 @@ pub fn user_text_with_images(
     if !images.is_empty() {
         let text = match msg.content {
             MessageContentValue::Text(text) => text,
-            other => return Message { content: other, ..msg },
+            other => {
+                return Message {
+                    content: other,
+                    ..msg
+                }
+            }
         };
         let mut blocks = Vec::with_capacity(images.len() + 1);
         if !text.is_empty() {
@@ -95,7 +100,10 @@ mod tests {
     fn assistant_text_builds_assistant_role_message() {
         let msg = assistant_text("hi there");
         assert_eq!(msg.role, MessageRole::Assistant);
-        assert_eq!(msg.content, MessageContentValue::Text("hi there".to_string()));
+        assert_eq!(
+            msg.content,
+            MessageContentValue::Text("hi there".to_string())
+        );
     }
 
     #[test]
@@ -115,8 +123,14 @@ mod tests {
         let msg = user_text_with_images(
             "look",
             [
-                ImageUrlContent { url: "data:image/png;base64,AA".to_string(), detail: None },
-                ImageUrlContent { url: "https://e.com/b.jpg".to_string(), detail: Some("low".to_string()) },
+                ImageUrlContent {
+                    url: "data:image/png;base64,AA".to_string(),
+                    detail: None,
+                },
+                ImageUrlContent {
+                    url: "https://e.com/b.jpg".to_string(),
+                    detail: Some("low".to_string()),
+                },
             ],
         );
         assert_eq!(msg.role, MessageRole::User);

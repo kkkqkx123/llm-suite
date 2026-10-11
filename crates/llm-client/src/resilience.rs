@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use llm_common::provider_error::ResilienceError;
-use llm_common::retry::{RetryPolicy, execute_with_retry_floor};
+use llm_common::retry::{execute_with_retry_floor, RetryPolicy};
 use tokio_util::sync::CancellationToken;
 
 use crate::CircuitBreaker;
@@ -71,7 +71,11 @@ impl Resilience {
     /// request before it reaches the wire. A rate-limit error raises the
     /// retry delay to at least the provider's `Retry-After` window. Breaker
     /// accounting counts successes and network-level failures only.
-    pub async fn execute<E, F, Fut, T>(&self, open_error: impl Fn() -> E, operation: F) -> Result<T, E>
+    pub async fn execute<E, F, Fut, T>(
+        &self,
+        open_error: impl Fn() -> E,
+        operation: F,
+    ) -> Result<T, E>
     where
         E: ResilienceError,
         F: Fn() -> Fut,
@@ -241,13 +245,19 @@ mod tests {
                 exponential_backoff: false,
             });
         let _: Result<(), TestError> = resilience
-            .execute(|| TestError::BreakerOpen, || async { Err(TestError::Transient) })
+            .execute(
+                || TestError::BreakerOpen,
+                || async { Err(TestError::Transient) },
+            )
             .await;
         // Two counted failures (window is fed once per execute call, but the
         // retry loop inside one call feeds nothing extra) — after the second
         // execute the breaker must be open.
         let _: Result<(), TestError> = resilience
-            .execute(|| TestError::BreakerOpen, || async { Err(TestError::Transient) })
+            .execute(
+                || TestError::BreakerOpen,
+                || async { Err(TestError::Transient) },
+            )
             .await;
         assert!(
             !breaker.check_allowed(),

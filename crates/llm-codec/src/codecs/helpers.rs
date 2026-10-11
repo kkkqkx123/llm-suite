@@ -1,6 +1,6 @@
-use std::collections::HashMap;
 use crate::error::{LlmError, LlmResult};
 use llm_types::llm::LlmProfile;
+use std::collections::HashMap;
 
 /// An image reference resolved into a form a provider can carry on the wire.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -303,7 +303,10 @@ mod tests {
 
     #[test]
     fn guess_media_type_prefers_data_uri_then_extension() {
-        assert_eq!(guess_image_media_type("data:image/webp;base64,AA"), "image/webp");
+        assert_eq!(
+            guess_image_media_type("data:image/webp;base64,AA"),
+            "image/webp"
+        );
         assert_eq!(
             guess_image_media_type("https://e.com/x.jpg?a=1"),
             "image/jpeg"
