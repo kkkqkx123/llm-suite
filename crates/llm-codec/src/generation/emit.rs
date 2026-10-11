@@ -53,10 +53,7 @@ fn emit_tool_choice_anthropic(
 /// belongs to profile configuration.
 pub fn apply_openai_chat(body: &mut serde_json::Value, gen: &LlmGenerationParams) {
     if let Some(max_tokens) = gen.max_tokens {
-        let key = gen
-            .max_token_field
-            .unwrap_or_default()
-            .as_str();
+        let key = gen.max_token_field.unwrap_or_default().as_str();
         body[key] = serde_json::json!(max_tokens);
     }
     if let Some(temperature) = gen.temperature {

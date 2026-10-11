@@ -10,9 +10,7 @@ pub use emit::{
     apply_anthropic, apply_gemini_generation_config, apply_openai_chat, apply_openai_responses,
 };
 pub use parse::{is_typed_param_key, parse_legacy_generation};
-pub use validate::{
-    validate_generation, ANTHROPIC_DEFAULT_MAX_TOKENS,
-};
+pub use validate::{validate_generation, ANTHROPIC_DEFAULT_MAX_TOKENS};
 
 pub fn resolve_generation(
     profile: &LlmProfile,
