@@ -595,6 +595,7 @@ mod tests {
             tool_name: None,
             tool_calls: None,
             thinking: None,
+            thinking_signature: None,
             metadata: None,
         };
         let user = Message {
@@ -606,6 +607,7 @@ mod tests {
             tool_name: None,
             tool_calls: None,
             thinking: None,
+            thinking_signature: None,
             metadata: None,
         };
         let sys2 = Message {
@@ -617,6 +619,7 @@ mod tests {
             tool_name: None,
             tool_calls: None,
             thinking: None,
+            thinking_signature: None,
             metadata: None,
         };
         let (system, filtered) = extract_system_message(&[sys1.clone(), user.clone(), sys2]);

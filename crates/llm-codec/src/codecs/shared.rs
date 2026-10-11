@@ -282,6 +282,8 @@ pub fn parse_openai_chat_response(body: &str) -> LlmResult<LlmResponseType> {
         .and_then(|c| c.as_str())
         .map(String::from);
 
+    // Provider-native value passed through untouched (`stop` / `tool_calls`
+    // / `length` / `content_filter`); never normalized here.
     let finish_reason = first_choice
         .and_then(|c| c.get("finish_reason"))
         .and_then(|r| r.as_str())
@@ -330,6 +332,7 @@ pub fn parse_openai_chat_response(body: &str) -> LlmResult<LlmResponseType> {
         tool_name: None,
         tool_calls: tool_calls.clone(),
         thinking: reasoning_content.clone(),
+        thinking_signature: None,
         metadata: None,
     };
 
@@ -356,6 +359,7 @@ pub fn parse_openai_chat_response(body: &str) -> LlmResult<LlmResponseType> {
         finish_reason,
         duration: 0,
         reasoning_content,
+        reasoning_signature: None,
         reasoning_tokens,
         metadata,
         stream_stats: None,
@@ -377,6 +381,21 @@ pub fn parse_openai_stream_chunk(data: &str) -> LlmResult<Vec<MessageStreamEvent
 
     let json: serde_json::Value = serde_json::from_str(data)?;
 
+    let mut events = Vec::new();
+
+    // Provider stream identity rides on every chunk; surface it first so the
+    // accumulator records it before any terminal event in the same chunk.
+    let stream_id = json.get("id").and_then(|v| v.as_str()).map(String::from);
+    let stream_model = json.get("model").and_then(|v| v.as_str()).map(String::from);
+    if stream_id.is_some() || stream_model.is_some() {
+        events.push(MessageStreamEvent::Start(
+            llm_types::llm::MessageStreamStart {
+                id: stream_id,
+                model: stream_model,
+            },
+        ));
+    }
+
     let empty_choices = vec![];
     let choices = json
         .get("choices")
@@ -386,16 +405,15 @@ pub fn parse_openai_stream_chunk(data: &str) -> LlmResult<Vec<MessageStreamEvent
     // A chunk without choices carries only usage (stream_options.include_usage).
     if choices.is_empty() {
         if let Some(usage) = json.get("usage") {
-            return Ok(vec![MessageStreamEvent::Usage(
+            events.push(MessageStreamEvent::Usage(
                 llm_types::llm::MessageStreamUsage {
                     usage: parse_openai_usage(usage),
                 },
-            )]);
+            ));
         }
-        return Ok(Vec::new());
+        return Ok(events);
     }
 
-    let mut events = Vec::new();
     if let Some(choice) = choices.first() {
         if let Some(delta) = choice.get("delta") {
             if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
@@ -414,6 +432,8 @@ pub fn parse_openai_stream_chunk(data: &str) -> LlmResult<Vec<MessageStreamEvent
                     llm_types::llm::MessageStreamReasoning {
                         snapshot: String::new(),
                         reasoning: reasoning.to_string(),
+                        signature: None,
+                        signature_snapshot: None,
                     },
                 ));
             }
@@ -445,6 +465,8 @@ pub fn parse_openai_stream_chunk(data: &str) -> LlmResult<Vec<MessageStreamEvent
                 }
             }
         }
+        // Provider-native terminal values passed through untouched; any other
+        // value (including a missing one) leaves the stream open.
         if let Some(finish_reason) = choice.get("finish_reason").and_then(|r| r.as_str()) {
             let is_done = matches!(
                 finish_reason,
@@ -555,7 +577,10 @@ mod tests {
     fn stream_usage_chunk_is_extracted() {
         let chunk = r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#;
         let events = parse_openai_stream_chunk(chunk).expect("chunk must parse");
-        match events.into_iter().next() {
+        match events
+            .into_iter()
+            .find(|e| matches!(e, MessageStreamEvent::Usage(_)))
+        {
             Some(MessageStreamEvent::Usage(usage)) => {
                 assert_eq!(usage.usage.prompt_tokens, 10);
                 assert_eq!(usage.usage.completion_tokens, 5);
@@ -566,8 +591,29 @@ mod tests {
     }
 
     #[test]
-    fn empty_choices_without_usage_is_ignored() {
+    fn stream_start_carries_provider_identity() {
+        let chunk = r#"{"id":"chatcmpl-1","model":"gpt-4o","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hi"}}]}"#;
+        let events = parse_openai_stream_chunk(chunk).expect("chunk must parse");
+        match events.into_iter().next() {
+            Some(MessageStreamEvent::Start(start)) => {
+                assert_eq!(start.id.as_deref(), Some("chatcmpl-1"));
+                assert_eq!(start.model.as_deref(), Some("gpt-4o"));
+            }
+            other => panic!("expected Start first, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn empty_choices_without_usage_yields_only_start() {
         let chunk = r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[]}"#;
+        let events = parse_openai_stream_chunk(chunk).expect("chunk must parse");
+        assert_eq!(events.len(), 1, "only the Start identity event is emitted");
+        assert!(matches!(events[0], MessageStreamEvent::Start(_)));
+    }
+
+    #[test]
+    fn chunk_without_identity_and_content_is_ignored() {
+        let chunk = r#"{"object":"chat.completion.chunk","choices":[]}"#;
         assert!(parse_openai_stream_chunk(chunk)
             .expect("chunk must parse")
             .is_empty());
@@ -579,7 +625,7 @@ mod tests {
         match parse_openai_stream_chunk(chunk)
             .expect("chunk must parse")
             .into_iter()
-            .next()
+            .find(|e| matches!(e, MessageStreamEvent::ToolCallDelta(_)))
         {
             Some(MessageStreamEvent::ToolCallDelta(delta)) => {
                 assert_eq!(delta.index, 0);
@@ -637,6 +683,7 @@ mod tests {
             tool_name: None,
             tool_calls: None,
             thinking: None,
+            thinking_signature: None,
             metadata: None,
         };
 
@@ -656,6 +703,7 @@ mod tests {
             tool_name: None,
             tool_calls: None,
             thinking: None,
+            thinking_signature: None,
             metadata: None,
         };
 

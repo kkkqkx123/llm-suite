@@ -176,6 +176,7 @@ mod tests {
             tool_name: None,
             tool_calls: None,
             thinking: None,
+            thinking_signature: None,
             metadata: None,
         };
         let inner = FakeStream {
@@ -186,6 +187,8 @@ mod tests {
                     message,
                     usage: None,
                     stream_stats: None,
+                    id: None,
+                    model: None,
                 }),
             ],
         };

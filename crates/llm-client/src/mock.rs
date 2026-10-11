@@ -33,6 +33,7 @@ pub struct LlmResponseSpec {
     model: Option<String>,
     delay_ms: Option<u64>,
     reasoning: Option<String>,
+    reasoning_signature: Option<String>,
 }
 
 impl LlmResponseSpec {
@@ -45,6 +46,7 @@ impl LlmResponseSpec {
             model: None,
             delay_ms: None,
             reasoning: None,
+            reasoning_signature: None,
         }
     }
 
@@ -57,6 +59,7 @@ impl LlmResponseSpec {
             model: None,
             delay_ms: None,
             reasoning: None,
+            reasoning_signature: None,
         }
     }
 
@@ -95,6 +98,11 @@ impl LlmResponseSpec {
         self
     }
 
+    pub fn with_reasoning_signature(mut self, signature: impl Into<String>) -> Self {
+        self.reasoning_signature = Some(signature.into());
+        self
+    }
+
     pub fn delay_ms(&self) -> Option<u64> {
         self.delay_ms
     }
@@ -114,6 +122,7 @@ impl LlmResponseSpec {
             tool_name: None,
             tool_calls: self.tool_calls.clone(),
             thinking: self.reasoning.clone(),
+            thinking_signature: self.reasoning_signature.clone(),
             metadata: None,
         };
         LlmResponseType {
@@ -126,17 +135,24 @@ impl LlmResponseSpec {
             finish_reason: self.finish_reason.clone(),
             duration: 0,
             reasoning_content: self.reasoning.clone(),
+            reasoning_signature: self.reasoning_signature.clone(),
             reasoning_tokens: None,
             metadata: None,
             stream_stats: None,
         }
     }
 
-    /// Emit this spec as a stream sequence: text chunk (when present), final
-    /// message, end.
+    /// Emit this spec as a stream sequence: start identity, text chunk (when
+    /// present), final message, end.
     fn to_stream_events(&self, request: &LlmRequest) -> Vec<MessageStreamEvent> {
         let result = self.build(request);
         let mut events = Vec::new();
+        events.push(MessageStreamEvent::Start(
+            llm_types::llm::MessageStreamStart {
+                id: result.id.clone(),
+                model: Some(result.model.clone()),
+            },
+        ));
         if let Some(content) = &result.content {
             if !content.is_empty() {
                 events.push(MessageStreamEvent::Text(MessageStreamText {
@@ -149,6 +165,8 @@ impl LlmResponseSpec {
             message: result.message.clone(),
             usage: result.usage.clone(),
             stream_stats: None,
+            id: result.id.clone(),
+            model: Some(result.model.clone()),
         }));
         events.push(MessageStreamEvent::End(MessageStreamEnd {}));
         events
@@ -281,6 +299,22 @@ impl MockLlmClient {
         request: &LlmRequest,
         events: &[MessageStreamEvent],
     ) -> LlmResponseType {
+        let stream_id = events.iter().find_map(|e| match e {
+            MessageStreamEvent::FinalMessage(f) => f.id.clone(),
+            _ => None,
+        });
+        let stream_model = events
+            .iter()
+            .find_map(|e| match e {
+                MessageStreamEvent::Start(s) => s.model.clone(),
+                _ => None,
+            })
+            .or_else(|| {
+                events.iter().find_map(|e| match e {
+                    MessageStreamEvent::FinalMessage(f) => f.model.clone(),
+                    _ => None,
+                })
+            });
         for event in events.iter().rev() {
             let (message, usage) = match event {
                 MessageStreamEvent::FinalMessage(final_msg) => {
@@ -290,8 +324,8 @@ impl MockLlmClient {
                 _ => continue,
             };
             return LlmResponseType {
-                id: None,
-                model: request.profile_id.clone(),
+                id: stream_id,
+                model: stream_model.unwrap_or_else(|| request.profile_id.clone()),
                 content: Some(extract_text_content(&message)),
                 tool_calls: message.tool_calls.clone(),
                 message,
@@ -299,6 +333,7 @@ impl MockLlmClient {
                 finish_reason: Some("stop".to_string()),
                 duration: 0,
                 reasoning_content: None,
+                reasoning_signature: None,
                 reasoning_tokens: None,
                 metadata: None,
                 stream_stats: None,

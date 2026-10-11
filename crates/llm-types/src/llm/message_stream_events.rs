@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum MessageStreamEventType {
     Connect,
+    Start,
     Stream,
     Text,
     InputJson,
@@ -21,6 +22,7 @@ pub enum MessageStreamEventType {
 #[serde(tag = "event_type", rename_all = "snake_case")]
 pub enum MessageStreamEvent {
     Connect(MessageStreamConnect),
+    Start(MessageStreamStart),
     Stream(MessageStreamChunk),
     Text(MessageStreamText),
     InputJson(MessageStreamInputJson),
@@ -37,6 +39,20 @@ pub enum MessageStreamEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MessageStreamConnect {
     pub session_id: String,
+}
+
+/// Provider stream identity observed on the first chunk carrying it.
+///
+/// OpenAI Chat repeats `id`/`model` on every chunk, Anthropic sends them
+/// once in `message_start`, Responses sends them in `response.created`.
+/// Either field may be absent depending on the provider; the accumulator
+/// keeps the first non-empty values and forwards only the first event.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MessageStreamStart {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -76,6 +92,13 @@ pub struct MessageStreamFinal {
     pub usage: Option<super::TokenUsageStats>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_stats: Option<super::StreamStats>,
+    /// Provider message id observed mid-stream (`None` when the provider
+    /// never sent one). Mirrors the non-streaming result envelope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Provider model observed mid-stream (`None` when never sent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -92,11 +115,19 @@ pub struct MessageStreamAbort {
 pub struct MessageStreamEnd {}
 
 /// Reasoning increment with the accumulated snapshot.
+///
+/// `signature` carries an Anthropic `signature_delta` fragment for this
+/// event (`None` for pure text deltas and for providers without signed
+/// thinking); `signature_snapshot` is the accumulated signature.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MessageStreamReasoning {
     pub reasoning: String,
     #[serde(default)]
     pub snapshot: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature_snapshot: Option<String>,
 }
 
 /// Token usage reported mid-stream (e.g. OpenAI's `include_usage` chunk or

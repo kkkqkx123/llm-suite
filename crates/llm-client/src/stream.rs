@@ -6,7 +6,7 @@ use llm_codec::error::LlmError;
 use llm_codec::LlmCodec;
 use llm_types::llm::{
     MessageStreamEvent, MessageStreamFinal, MessageStreamInputJson, MessageStreamReasoning,
-    MessageStreamText, TokenUsageStats,
+    MessageStreamStart, MessageStreamText, TokenUsageStats,
 };
 use llm_types::message::{
     LlmFunctionCall, LlmToolCall, Message, MessageContent, MessageContentValue, MessageRole,
@@ -147,6 +147,10 @@ where
 pub struct MessageAccumulator {
     text_snapshot: String,
     reasoning_snapshot: String,
+    reasoning_signature_snapshot: String,
+    stream_id: Option<String>,
+    stream_model: Option<String>,
+    start_emitted: bool,
     tool_calls: BTreeMap<usize, PartialToolCall>,
     content_blocks: Vec<MessageContent>,
     usage: Option<TokenUsageStats>,
@@ -168,6 +172,10 @@ impl MessageAccumulator {
         Self {
             text_snapshot: String::new(),
             reasoning_snapshot: String::new(),
+            reasoning_signature_snapshot: String::new(),
+            stream_id: None,
+            stream_model: None,
+            start_emitted: false,
             tool_calls: BTreeMap::new(),
             content_blocks: Vec::new(),
             usage: None,
@@ -179,6 +187,22 @@ impl MessageAccumulator {
     /// Push a raw event and return the semantically-enriched event to emit.
     pub fn push(&mut self, event: MessageStreamEvent) -> Option<MessageStreamEvent> {
         match event {
+            MessageStreamEvent::Start(start) => {
+                if self.stream_id.is_none() {
+                    self.stream_id = start.id.clone();
+                }
+                if self.stream_model.is_none() {
+                    self.stream_model = start.model.clone();
+                }
+                if self.start_emitted {
+                    return None;
+                }
+                self.start_emitted = true;
+                Some(MessageStreamEvent::Start(MessageStreamStart {
+                    id: self.stream_id.clone(),
+                    model: self.stream_model.clone(),
+                }))
+            }
             MessageStreamEvent::Text(text_event) => {
                 self.text_snapshot.push_str(&text_event.text);
                 Some(MessageStreamEvent::Text(MessageStreamText {
@@ -188,6 +212,9 @@ impl MessageAccumulator {
             }
             MessageStreamEvent::ReasoningText(reasoning_event) => {
                 self.reasoning_snapshot.push_str(&reasoning_event.reasoning);
+                if let Some(signature) = reasoning_event.signature.as_deref() {
+                    self.reasoning_signature_snapshot.push_str(signature);
+                }
 
                 // Dead loop detection
                 if let Some(ref mut detector) = self.dead_loop_detector {
@@ -206,6 +233,12 @@ impl MessageAccumulator {
                 Some(MessageStreamEvent::ReasoningText(MessageStreamReasoning {
                     reasoning: reasoning_event.reasoning,
                     snapshot: self.reasoning_snapshot.clone(),
+                    signature: reasoning_event.signature,
+                    signature_snapshot: if self.reasoning_signature_snapshot.is_empty() {
+                        None
+                    } else {
+                        Some(self.reasoning_signature_snapshot.clone())
+                    },
                 }))
             }
             MessageStreamEvent::InputJson(input_json) => {
@@ -354,6 +387,11 @@ impl MessageAccumulator {
                     } else {
                         Some(self.reasoning_snapshot.clone())
                     },
+                    thinking_signature: if self.reasoning_signature_snapshot.is_empty() {
+                        None
+                    } else {
+                        Some(self.reasoning_signature_snapshot.clone())
+                    },
                     metadata: None,
                 };
 
@@ -361,6 +399,8 @@ impl MessageAccumulator {
                     message,
                     usage: self.usage.clone(),
                     stream_stats: None, // Filled by the gateway stream wrapper
+                    id: self.stream_id.clone(),
+                    model: self.stream_model.clone(),
                 }))
             }
             // Pass through other events unchanged
@@ -622,10 +662,94 @@ mod tests {
             panic!("expected FinalMessage");
         };
         let usage = final_msg.usage.expect("usage must be merged");
-        assert_eq!(usage.prompt_tokens, 25, "input from message_start must survive");
+        assert_eq!(
+            usage.prompt_tokens, 25,
+            "input from message_start must survive"
+        );
         assert_eq!(usage.completion_tokens, 7);
-        assert_eq!(usage.total_tokens, 32, "total recomputed from prompt + completion");
+        assert_eq!(
+            usage.total_tokens, 32,
+            "total recomputed from prompt + completion"
+        );
         assert_eq!(usage.cache_read_tokens, Some(3));
         assert_eq!(usage.reasoning_tokens, Some(2));
+    }
+
+    #[test]
+    fn start_event_is_forwarded_once_and_lands_on_final_message() {
+        use llm_types::llm::MessageStreamStart;
+
+        let mut acc = MessageAccumulator::new(None);
+
+        let first = acc.push(MessageStreamEvent::Start(MessageStreamStart {
+            id: Some("msg_1".to_string()),
+            model: Some("claude-sonnet".to_string()),
+        }));
+        match first.expect("first Start must be forwarded") {
+            MessageStreamEvent::Start(s) => {
+                assert_eq!(s.id.as_deref(), Some("msg_1"));
+                assert_eq!(s.model.as_deref(), Some("claude-sonnet"));
+            }
+            other => panic!("expected Start, got {other:?}"),
+        }
+
+        let second = acc.push(MessageStreamEvent::Start(MessageStreamStart {
+            id: Some("msg_2".to_string()),
+            model: None,
+        }));
+        assert!(second.is_none(), "repeat Start events must be swallowed");
+
+        acc.push(MessageStreamEvent::Text(MessageStreamText {
+            text: "hi".to_string(),
+            snapshot: String::new(),
+        }));
+        let final_event = acc.push(MessageStreamEvent::End(llm_types::llm::MessageStreamEnd {}));
+        let MessageStreamEvent::FinalMessage(final_msg) = final_event.unwrap() else {
+            panic!("expected FinalMessage");
+        };
+        assert_eq!(final_msg.id.as_deref(), Some("msg_1"), "first id wins");
+        assert_eq!(final_msg.model.as_deref(), Some("claude-sonnet"));
+    }
+
+    #[test]
+    fn reasoning_signature_accumulates_into_final_message() {
+        let mut acc = MessageAccumulator::new(None);
+
+        acc.push(MessageStreamEvent::ReasoningText(MessageStreamReasoning {
+            reasoning: "let me think".to_string(),
+            snapshot: String::new(),
+            signature: Some("sig-a".to_string()),
+            signature_snapshot: None,
+        }));
+        let emitted = acc.push(MessageStreamEvent::ReasoningText(MessageStreamReasoning {
+            reasoning: " further".to_string(),
+            snapshot: String::new(),
+            signature: Some("sig-b".to_string()),
+            signature_snapshot: None,
+        }));
+        match emitted.expect("reasoning must be forwarded") {
+            MessageStreamEvent::ReasoningText(r) => {
+                assert_eq!(r.snapshot, "let me think further");
+                assert_eq!(
+                    r.signature_snapshot.as_deref(),
+                    Some("sig-asig-b"),
+                    "signature fragments must accumulate"
+                );
+            }
+            other => panic!("expected ReasoningText, got {other:?}"),
+        }
+
+        let final_event = acc.push(MessageStreamEvent::End(llm_types::llm::MessageStreamEnd {}));
+        let MessageStreamEvent::FinalMessage(final_msg) = final_event.unwrap() else {
+            panic!("expected FinalMessage");
+        };
+        assert_eq!(
+            final_msg.message.thinking.as_deref(),
+            Some("let me think further")
+        );
+        assert_eq!(
+            final_msg.message.thinking_signature.as_deref(),
+            Some("sig-asig-b")
+        );
     }
 }

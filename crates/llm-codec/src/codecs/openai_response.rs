@@ -221,11 +221,17 @@ impl OpenaiResponseCodec {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let arguments = item
-                    .get("arguments")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("{}")
-                    .to_string();
+                let arguments = match item.get("arguments").and_then(|v| v.as_str()) {
+                    Some(s) => s.to_string(),
+                    None => {
+                        tracing::debug!(
+                            tool_id = id.as_str(),
+                            tool_name = name.as_str(),
+                            "function call arguments missing or not a string; falling back to empty object",
+                        );
+                        "{}".to_string()
+                    }
+                };
                 Some(llm_types::message::LlmToolCall {
                     id,
                     r#type: "function".to_string(),
@@ -345,6 +351,24 @@ impl LlmCodec for OpenaiResponseCodec {
 
         let event_type = json.get("type").and_then(|v| v.as_str());
         match event_type {
+            Some("response.created") => {
+                // Stream identity; the accumulator records it for the final
+                // message and forwards it once.
+                let response = json.get("response");
+                let id = response
+                    .and_then(|r| r.get("id"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let model = response
+                    .and_then(|r| r.get("model"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                if id.is_some() || model.is_some() {
+                    return Ok(Some(MessageStreamEvent::Start(
+                        llm_types::llm::MessageStreamStart { id, model },
+                    )));
+                }
+            }
             Some("response.output_text.delta") => {
                 if let Some(delta) = json.get("delta").and_then(|v| v.as_str()) {
                     return Ok(Some(MessageStreamEvent::Text(
@@ -538,9 +562,12 @@ impl OpenaiResponseCodec {
             tool_name: None,
             tool_calls: tool_calls.clone(),
             thinking: None,
+            thinking_signature: None,
             metadata: None,
         };
 
+        // Provider-native value passed through untouched (`completed` /
+        // `incomplete`); never normalized here.
         let finish_reason = json
             .get("status")
             .and_then(|s| s.as_str())
@@ -556,6 +583,7 @@ impl OpenaiResponseCodec {
             finish_reason,
             duration: 0,
             reasoning_content: None,
+            reasoning_signature: None,
             reasoning_tokens: None,
             metadata: None,
             stream_stats: None,
@@ -635,6 +663,23 @@ mod tests {
             .parse_stream_chunk(r#"{"type":"unknown"}"#)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn created_event_emits_stream_identity() {
+        let codec = OpenaiResponseCodec::new();
+        match codec
+            .parse_stream_chunk(
+                r#"{"type":"response.created","response":{"id":"resp_1","model":"gpt-4o"}}"#,
+            )
+            .expect("created chunk parses")
+        {
+            Some(MessageStreamEvent::Start(s)) => {
+                assert_eq!(s.id.as_deref(), Some("resp_1"));
+                assert_eq!(s.model.as_deref(), Some("gpt-4o"));
+            }
+            other => panic!("expected Start, got {other:?}"),
+        }
     }
 
     #[test]
@@ -859,6 +904,7 @@ mod tests {
                 tool_name: None,
                 tool_calls: None,
                 thinking: None,
+                thinking_signature: None,
                 metadata: None,
             }],
             parameters: None,
@@ -907,6 +953,7 @@ mod tests {
                 tool_name: None,
                 tool_calls: None,
                 thinking: None,
+                thinking_signature: None,
                 metadata: None,
             }],
             parameters: None,
@@ -992,6 +1039,7 @@ mod tests {
                 tool_name: None,
                 tool_calls: None,
                 thinking: None,
+                thinking_signature: None,
                 metadata: None,
             },
         );

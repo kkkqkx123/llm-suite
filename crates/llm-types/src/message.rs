@@ -80,6 +80,11 @@ pub struct Message {
     pub tool_calls: Option<Vec<LlmToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<String>,
+    /// Provider signature for the thinking block (Anthropic extended
+    /// thinking). Required to replay the thinking block in later turns;
+    /// unsigned thinking is never replayed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_signature: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<crate::Metadata>,
 }
@@ -104,6 +109,7 @@ impl Message {
             tool_name: None,
             tool_calls: None,
             thinking: None,
+            thinking_signature: None,
             metadata: None,
         }
     }
@@ -119,6 +125,7 @@ impl Message {
             tool_name: None,
             tool_calls: None,
             thinking: None,
+            thinking_signature: None,
             metadata: None,
         }
     }
@@ -146,6 +153,7 @@ impl Message {
             tool_name,
             tool_calls: None,
             thinking: None,
+            thinking_signature: None,
             metadata,
         }
     }
@@ -161,6 +169,7 @@ impl Message {
             tool_name: None,
             tool_calls: None,
             thinking: None,
+            thinking_signature: None,
             metadata: None,
         }
     }

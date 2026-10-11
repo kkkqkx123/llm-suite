@@ -3,8 +3,8 @@ use crate::codecs::helpers::{resolve_image_payload, ResolvedImage};
 use crate::error::{LlmError, LlmResult};
 use llm_types::llm::{
     LlmProfile, LlmRequest, LlmResult as LlmResponseType, MessageStreamEnd, MessageStreamError,
-    MessageStreamEvent, MessageStreamReasoning, MessageStreamText, MessageStreamToolCallDelta,
-    MessageStreamUsage, TokenUsageStats,
+    MessageStreamEvent, MessageStreamReasoning, MessageStreamStart, MessageStreamText,
+    MessageStreamToolCallDelta, MessageStreamUsage, TokenUsageStats,
 };
 use llm_types::message::{Message, MessageContent, MessageContentValue, MessageRole};
 use llm_types::tool::{Tool, ToolParameterSchema};
@@ -135,15 +135,12 @@ impl AnthropicCodec {
         tools
             .iter()
             .map(|t| {
-                let input_schema = t
-                    .parameters
-                    .clone()
-                    .unwrap_or(ToolParameterSchema {
-                        r#type: "object".to_string(),
-                        properties: Default::default(),
-                        required: Vec::new(),
-                        additional_properties: None,
-                    });
+                let input_schema = t.parameters.clone().unwrap_or(ToolParameterSchema {
+                    r#type: "object".to_string(),
+                    properties: Default::default(),
+                    required: Vec::new(),
+                    additional_properties: None,
+                });
                 serde_json::json!({
                     "name": t.name,
                     "description": t.description,
@@ -185,6 +182,7 @@ impl AnthropicCodec {
                     if parts.iter().any(|b| matches!(b, MessageContent::ToolResult { .. }))
             );
 
+            let mut replayed_thinking = false;
             match &msg.content {
                 MessageContentValue::Text(text) => {
                     // On a tool-result message the text IS the tool output; it
@@ -234,6 +232,7 @@ impl AnthropicCodec {
                                             "thinking": thinking,
                                             "signature": signature,
                                         }));
+                                        replayed_thinking = true;
                                     }
                                 }
                             }
@@ -242,11 +241,47 @@ impl AnthropicCodec {
                 }
             }
 
+            // Assistant thinking captured as plain text plus a provider
+            // signature (retained from a previous reply) is re-emitted as a
+            // signed thinking block so multi-turn extended thinking keeps
+            // working. Unsigned thinking is never synthesized: the API
+            // rejects it.
+            if role == "assistant" && !replayed_thinking {
+                if let Some(thinking) = msg.thinking.as_deref() {
+                    if !thinking.is_empty() {
+                        if let Some(signature) = msg.thinking_signature.as_deref() {
+                            if !signature.is_empty() {
+                                blocks.push(serde_json::json!({
+                                    "type": "thinking",
+                                    "thinking": thinking,
+                                    "signature": signature,
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+
             // OpenAI-style tool_calls carried on the message itself.
+            // Unparseable arguments fall back to `{}`: the API requires
+            // `input` to be an object, and dropping the whole call would lose
+            // more than a degraded empty input.
             if let Some(ref tool_calls) = msg.tool_calls {
                 for tc in tool_calls {
-                    let args: serde_json::Value = serde_json::from_str(&tc.function.arguments)
-                        .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                    let args: serde_json::Value = match serde_json::from_str(&tc.function.arguments)
+                    {
+                        Ok(value) => value,
+                        Err(_) => {
+                            tracing::debug!(
+                                tool_id = tc.id.as_str(),
+                                tool_name = tc.function.name.as_str(),
+                                arguments_preview =
+                                    tc.function.arguments.chars().take(200).collect::<String>(),
+                                "assistant tool call arguments are not valid JSON; falling back to empty object",
+                            );
+                            serde_json::Value::Object(serde_json::Map::new())
+                        }
+                    };
                     blocks.push(serde_json::json!({
                         "type": "tool_use",
                         "id": tc.id,
@@ -393,15 +428,32 @@ impl AnthropicCodec {
 
         match event_type {
             Some("message_start") => {
+                let mut events = Vec::new();
+                // Surface the provider message identity first so the
+                // accumulator records it before any terminal event.
+                let stream_id = json
+                    .pointer("/message/id")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let stream_model = json
+                    .pointer("/message/model")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                if stream_id.is_some() || stream_model.is_some() {
+                    events.push(MessageStreamEvent::Start(MessageStreamStart {
+                        id: stream_id,
+                        model: stream_model,
+                    }));
+                }
                 // Initial usage: `message_delta` may omit `input_tokens`
                 // (MessageDeltaUsage.input_tokens is optional), so it must be
                 // captured here or stream-side prompt tokens are lost.
                 if let Some(usage) = json.pointer("/message/usage") {
                     if let Some(event) = Self::stream_usage(usage) {
-                        return Ok(vec![MessageStreamEvent::Usage(event)]);
+                        events.push(MessageStreamEvent::Usage(event));
                     }
                 }
-                Ok(Vec::new())
+                Ok(events)
             }
             Some("content_block_start") => {
                 if let Some(b) = json.get("content_block") {
@@ -442,15 +494,28 @@ impl AnthropicCodec {
                                     MessageStreamReasoning {
                                         reasoning: reasoning.to_string(),
                                         snapshot: String::new(),
+                                        signature: None,
+                                        signature_snapshot: None,
+                                    },
+                                )]);
+                            }
+                        }
+                        Some("signature_delta") => {
+                            if let Some(signature) = d.get("signature").and_then(|v| v.as_str()) {
+                                return Ok(vec![MessageStreamEvent::ReasoningText(
+                                    MessageStreamReasoning {
+                                        reasoning: String::new(),
+                                        snapshot: String::new(),
+                                        signature: Some(signature.to_string()),
+                                        signature_snapshot: None,
                                     },
                                 )]);
                             }
                         }
                         Some("input_json_delta") => {
                             if let Some(partial) = d.get("partial_json").and_then(|v| v.as_str()) {
-                                let index =
-                                    json.get("index").and_then(|v| v.as_u64()).unwrap_or(0)
-                                        as usize;
+                                let index = json.get("index").and_then(|v| v.as_u64()).unwrap_or(0)
+                                    as usize;
                                 return Ok(vec![MessageStreamEvent::ToolCallDelta(
                                     MessageStreamToolCallDelta {
                                         index,
@@ -474,7 +539,8 @@ impl AnthropicCodec {
                         events.push(MessageStreamEvent::Usage(event));
                     }
                 }
-                if let Some(stop_reason) = json.pointer("/delta/stop_reason").and_then(|v| v.as_str())
+                if let Some(stop_reason) =
+                    json.pointer("/delta/stop_reason").and_then(|v| v.as_str())
                 {
                     // Everything except `pause_turn` terminates the turn
                     // (the official StopReason set also includes `refusal`
@@ -489,7 +555,10 @@ impl AnthropicCodec {
             Some("error") => {
                 // Mid-stream provider errors must be surfaced, not swallowed.
                 let err = &json["error"];
-                let err_type = err.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let err_type = err
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
                 let message = err
                     .get("message")
                     .and_then(|v| v.as_str())
@@ -506,9 +575,14 @@ impl AnthropicCodec {
     /// when the object carries no counters at all, so zero-usage events never
     /// clobber accumulated values.
     fn stream_usage(usage: &serde_json::Value) -> Option<MessageStreamUsage> {
-        let prompt_tokens = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-        let completion_tokens =
-            usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let prompt_tokens = usage
+            .get("input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+        let completion_tokens = usage
+            .get("output_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
         let reasoning_tokens = usage
             .get("output_tokens_details")
             .and_then(|d| d.get("thinking_tokens"))
@@ -645,7 +719,10 @@ impl AnthropicCodec {
         // empty message; surface the provider error instead.
         if json.get("type").and_then(|v| v.as_str()) == Some("error") {
             let err = &json["error"];
-            let err_type = err.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let err_type = err
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
             let message = err
                 .get("message")
                 .and_then(|v| v.as_str())
@@ -661,6 +738,9 @@ impl AnthropicCodec {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        // Provider-native value passed through untouched (`end_turn` /
+        // `tool_use` / `max_tokens` / `stop_sequence` / `pause_turn` /
+        // `refusal` / `model_context_window_exceeded`); never normalized here.
         let stop_reason = json
             .get("stop_reason")
             .and_then(|v| v.as_str())
@@ -669,6 +749,7 @@ impl AnthropicCodec {
         let content_arr = json.get("content").and_then(|v| v.as_array());
         let mut text_content = String::new();
         let mut thinking_content = String::new();
+        let mut thinking_signature: Option<String> = None;
         let mut tool_calls = Vec::new();
 
         if let Some(blocks) = content_arr {
@@ -682,9 +763,19 @@ impl AnthropicCodec {
                     }
                     Some("thinking") => {
                         // Extended thinking output; surfaced through
-                        // `reasoning_content` / `message.thinking`.
+                        // `reasoning_content` / `message.thinking`. The first
+                        // non-empty block signature is retained so the reply
+                        // can be replayed in later turns.
                         if let Some(text) = block.get("thinking").and_then(|v| v.as_str()) {
                             thinking_content.push_str(text);
+                        }
+                        if thinking_signature.is_none() {
+                            if let Some(signature) = block.get("signature").and_then(|v| v.as_str())
+                            {
+                                if !signature.is_empty() {
+                                    thinking_signature = Some(signature.to_string());
+                                }
+                            }
                         }
                     }
                     Some("tool_use") => {
@@ -759,6 +850,7 @@ impl AnthropicCodec {
             } else {
                 Some(thinking_content.clone())
             },
+            thinking_signature: thinking_signature.clone(),
             metadata: None,
         };
 
@@ -799,6 +891,7 @@ impl AnthropicCodec {
             } else {
                 Some(thinking_content)
             },
+            reasoning_signature: thinking_signature,
             reasoning_tokens,
             metadata,
             stream_stats: None,
@@ -883,6 +976,7 @@ mod tests {
             tool_name: None,
             tool_calls: None,
             thinking: None,
+            thinking_signature: None,
             metadata: None,
         }
     }
@@ -1006,6 +1100,7 @@ mod tests {
             tool_name: None,
             tool_calls: None,
             thinking: None,
+            thinking_signature: None,
             metadata: None,
         }
     }
@@ -1062,7 +1157,11 @@ mod tests {
 
         let messages = body["messages"].as_array().unwrap();
         let roles: Vec<&str> = messages.iter().filter_map(|m| m["role"].as_str()).collect();
-        assert_eq!(roles, vec!["user", "assistant", "user"], "roles must alternate");
+        assert_eq!(
+            roles,
+            vec!["user", "assistant", "user"],
+            "roles must alternate"
+        );
 
         let assistant_blocks = messages[1]["content"].as_array().unwrap();
         assert_eq!(assistant_blocks.len(), 3);
@@ -1071,7 +1170,11 @@ mod tests {
         assert_eq!(assistant_blocks[2]["id"], serde_json::json!("call_2"));
 
         let user_blocks = messages[2]["content"].as_array().unwrap();
-        assert_eq!(user_blocks.len(), 2, "both tool results live in one user message");
+        assert_eq!(
+            user_blocks.len(),
+            2,
+            "both tool results live in one user message"
+        );
         assert_eq!(user_blocks[0]["type"], serde_json::json!("tool_result"));
         assert_eq!(user_blocks[0]["tool_use_id"], serde_json::json!("call_1"));
         assert_eq!(user_blocks[0]["content"], serde_json::json!("sunny"));
@@ -1117,7 +1220,9 @@ mod tests {
                     thinking: "Let me verify".to_string(),
                     signature: Some("sig-abc".to_string()),
                 },
-                llm_types::message::MessageContent::Text { text: "42".to_string() },
+                llm_types::message::MessageContent::Text {
+                    text: "42".to_string(),
+                },
             ],
         );
         let body = codec
@@ -1145,7 +1250,9 @@ mod tests {
                     thinking: "unsigned".to_string(),
                     signature: None,
                 },
-                llm_types::message::MessageContent::Text { text: "42".to_string() },
+                llm_types::message::MessageContent::Text {
+                    text: "42".to_string(),
+                },
             ],
         );
         let body = codec
@@ -1161,7 +1268,11 @@ mod tests {
             )
             .expect("build must succeed");
         let content = body["messages"][1]["content"].as_array().unwrap();
-        assert_eq!(content.len(), 1, "unsigned thinking must be dropped, not sent");
+        assert_eq!(
+            content.len(),
+            1,
+            "unsigned thinking must be dropped, not sent"
+        );
         assert_eq!(content[0]["type"], serde_json::json!("text"));
     }
 
@@ -1206,7 +1317,10 @@ mod tests {
             .expect("build must succeed");
         let block = &body["messages"][0]["content"][0];
         assert_eq!(block["source"]["type"], serde_json::json!("base64"));
-        assert_eq!(block["source"]["media_type"], serde_json::json!("image/webp"));
+        assert_eq!(
+            block["source"]["media_type"],
+            serde_json::json!("image/webp")
+        );
         assert_eq!(block["source"]["data"], serde_json::json!("QUJD"));
     }
 
@@ -1252,8 +1366,12 @@ mod tests {
         let user = rich_msg(
             llm_types::message::MessageRole::User,
             vec![
-                llm_types::message::MessageContent::Text { text: String::new() },
-                llm_types::message::MessageContent::Text { text: "hi".to_string() },
+                llm_types::message::MessageContent::Text {
+                    text: String::new(),
+                },
+                llm_types::message::MessageContent::Text {
+                    text: "hi".to_string(),
+                },
             ],
         );
         let body = codec
@@ -1335,18 +1453,76 @@ mod tests {
     // ---------------- streaming ----------------
 
     #[test]
-    fn message_start_emits_initial_usage() {
+    fn message_start_emits_identity_and_initial_usage() {
         let codec = AnthropicCodec::new();
-        let chunk = r#"{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":25,"output_tokens":1}}}"#;
+        let chunk = r#"{"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet","usage":{"input_tokens":25,"output_tokens":1}}}"#;
         let events = codec.parse_stream_chunk_events(chunk).expect("must parse");
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), 2);
         match &events[0] {
+            MessageStreamEvent::Start(s) => {
+                assert_eq!(s.id.as_deref(), Some("msg_1"));
+                assert_eq!(s.model.as_deref(), Some("claude-sonnet"));
+            }
+            other => panic!("expected Start first, got {other:?}"),
+        }
+        match &events[1] {
             MessageStreamEvent::Usage(u) => {
                 assert_eq!(u.usage.prompt_tokens, 25);
                 assert_eq!(u.usage.completion_tokens, 1);
             }
             other => panic!("expected Usage, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn signature_delta_emits_reasoning_signature_fragment() {
+        let codec = AnthropicCodec::new();
+        let chunk = r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-part"}}"#;
+        let events = codec.parse_stream_chunk_events(chunk).expect("must parse");
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            MessageStreamEvent::ReasoningText(r) => {
+                assert!(r.reasoning.is_empty());
+                assert_eq!(r.signature.as_deref(), Some("sig-part"));
+            }
+            other => panic!("expected ReasoningText, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn response_signature_is_retained_and_replayed() {
+        let codec = AnthropicCodec::new();
+        let body = r#"{"id":"msg_2","model":"claude-sonnet","stop_reason":"end_turn","content":[{"type":"thinking","thinking":"Let me verify","signature":"sig-abc"},{"type":"text","text":"done"}],"usage":{"input_tokens":3,"output_tokens":5}}"#;
+        let request = request(vec![msg(MessageRole::User, "hi")], None);
+        let out = codec.parse_response(body, &request).expect("must parse");
+        assert_eq!(out.message.thinking.as_deref(), Some("Let me verify"));
+        assert_eq!(out.message.thinking_signature.as_deref(), Some("sig-abc"));
+        assert_eq!(out.reasoning_signature.as_deref(), Some("sig-abc"));
+
+        let wire = codec
+            .convert_messages(std::slice::from_ref(&out.message))
+            .expect("must convert");
+        let thinking = wire[0]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["type"] == "thinking")
+            .expect("signed thinking must be replayed");
+        assert_eq!(thinking["signature"], "sig-abc");
+
+        let mut unsigned = out.message.clone();
+        unsigned.thinking_signature = None;
+        let wire = codec
+            .convert_messages(std::slice::from_ref(&unsigned))
+            .expect("must convert");
+        assert!(
+            !wire[0]["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b["type"] == "thinking"),
+            "unsigned thinking must not be replayed"
+        );
     }
 
     #[test]
@@ -1386,9 +1562,8 @@ mod tests {
     fn refusal_and_context_window_stop_reasons_are_terminal() {
         let codec = AnthropicCodec::new();
         for reason in ["refusal", "model_context_window_exceeded", "tool_use"] {
-            let chunk = format!(
-                r#"{{"type":"message_delta","delta":{{"stop_reason":"{reason}"}}}}"#
-            );
+            let chunk =
+                format!(r#"{{"type":"message_delta","delta":{{"stop_reason":"{reason}"}}}}"#);
             let events = codec.parse_stream_chunk_events(&chunk).expect("must parse");
             assert!(
                 matches!(events.last(), Some(MessageStreamEvent::End(_))),
@@ -1400,7 +1575,8 @@ mod tests {
     #[test]
     fn error_event_is_surfaced() {
         let codec = AnthropicCodec::new();
-        let chunk = r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
+        let chunk =
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
         let events = codec.parse_stream_chunk_events(chunk).expect("must parse");
         match &events[0] {
             MessageStreamEvent::Error(e) => {

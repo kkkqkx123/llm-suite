@@ -330,6 +330,8 @@ impl LlmCodec for GeminiNativeCodec {
                                     llm_types::llm::MessageStreamReasoning {
                                         snapshot: String::new(),
                                         reasoning: text.to_string(),
+                                        signature: None,
+                                        signature_snapshot: None,
                                     },
                                 ));
                             } else {
@@ -348,6 +350,8 @@ impl LlmCodec for GeminiNativeCodec {
                                 llm_types::llm::MessageStreamReasoning {
                                     snapshot: String::new(),
                                     reasoning: thought.to_string(),
+                                    signature: None,
+                                    signature_snapshot: None,
                                 },
                             ));
                             continue;
@@ -552,9 +556,13 @@ impl GeminiNativeCodec {
                 Some(tool_calls.clone())
             },
             thinking: None,
+            thinking_signature: None,
             metadata: None,
         };
 
+        // Provider-native value normalized only for the envelope; the raw
+        // `finishReason` is preserved in metadata and never unified across
+        // codecs here.
         let finish_reason = first_candidate
             .and_then(|c| c.get("finishReason"))
             .and_then(|v| v.as_str())
@@ -608,6 +616,7 @@ impl GeminiNativeCodec {
             finish_reason,
             duration: 0,
             reasoning_content: reasoning_content.clone(),
+            reasoning_signature: None,
             reasoning_tokens,
             metadata,
             stream_stats: None,
@@ -716,6 +725,7 @@ mod tests {
             tool_name: None,
             tool_calls: None,
             thinking: None,
+            thinking_signature: None,
             metadata: None,
         }
     }
@@ -769,6 +779,7 @@ mod tests {
             tool_name: None,
             tool_calls: None,
             thinking: None,
+            thinking_signature: None,
             metadata: None,
         };
         let entries = codec.convert_messages(&[image_msg]);
@@ -831,6 +842,7 @@ mod tests {
             tool_name: Some("get_weather".to_string()),
             tool_calls: None,
             thinking: None,
+            thinking_signature: None,
             metadata: None,
         };
         let req = request(

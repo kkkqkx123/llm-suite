@@ -14,6 +14,7 @@ fn request(profile_id: &str, text: &str) -> LlmRequest {
             tool_name: None,
             tool_calls: None,
             thinking: None,
+            thinking_signature: None,
             metadata: None,
         }],
         parameters: None,
@@ -119,6 +120,7 @@ async fn stream_events_are_replayed_in_order() {
         tool_name: None,
         tool_calls: None,
         thinking: None,
+        thinking_signature: None,
         metadata: None,
     };
     client.script_stream(vec![
@@ -132,6 +134,8 @@ async fn stream_events_are_replayed_in_order() {
             message: assistant,
             usage: None,
             stream_stats: None,
+            id: None,
+            model: None,
         }),
         MessageStreamEvent::End(MessageStreamEnd {}),
     ]);
@@ -161,6 +165,7 @@ async fn generate_on_stream_script_synthesizes_final_result() {
         tool_name: None,
         tool_calls: None,
         thinking: None,
+        thinking_signature: None,
         metadata: None,
     };
     client.script_stream(vec![
@@ -168,6 +173,8 @@ async fn generate_on_stream_script_synthesizes_final_result() {
             message: assistant,
             usage: None,
             stream_stats: None,
+            id: None,
+            model: None,
         }),
         MessageStreamEvent::End(MessageStreamEnd {}),
     ]);
@@ -246,16 +253,22 @@ async fn generate_stream_converts_spec_into_events() {
     while let Some(event) = stream.next().await {
         events.push(event.unwrap());
     }
-    assert_eq!(events.len(), 3, "text spec -> Text + FinalMessage + End");
-    assert!(matches!(events[0], MessageStreamEvent::Text(_)));
-    let MessageStreamEvent::FinalMessage(final_msg) = &events[1] else {
-        panic!("second event must be FinalMessage");
+    assert_eq!(
+        events.len(),
+        4,
+        "text spec -> Start + Text + FinalMessage + End"
+    );
+    assert!(matches!(events[0], MessageStreamEvent::Start(_)));
+    assert!(matches!(events[1], MessageStreamEvent::Text(_)));
+    let MessageStreamEvent::FinalMessage(final_msg) = &events[2] else {
+        panic!("third event must be FinalMessage");
     };
     assert_eq!(
         final_msg.message.content,
         MessageContentValue::Text("hello stream".to_string())
     );
-    assert!(matches!(events[2], MessageStreamEvent::End(_)));
+    assert_eq!(final_msg.model.as_deref(), Some("mock"));
+    assert!(matches!(events[3], MessageStreamEvent::End(_)));
 }
 
 #[tokio::test]
@@ -270,9 +283,14 @@ async fn generate_stream_skips_text_chunk_for_empty_content() {
     while let Some(event) = stream.next().await {
         events.push(event.unwrap());
     }
-    assert_eq!(events.len(), 2, "empty spec -> FinalMessage + End only");
-    assert!(matches!(events[0], MessageStreamEvent::FinalMessage(_)));
-    assert!(matches!(events[1], MessageStreamEvent::End(_)));
+    assert_eq!(
+        events.len(),
+        3,
+        "empty spec -> Start + FinalMessage + End only"
+    );
+    assert!(matches!(events[0], MessageStreamEvent::Start(_)));
+    assert!(matches!(events[1], MessageStreamEvent::FinalMessage(_)));
+    assert!(matches!(events[2], MessageStreamEvent::End(_)));
 }
 
 #[tokio::test]
@@ -303,8 +321,9 @@ async fn generate_stream_falls_back_to_default() {
     while let Some(event) = stream.next().await {
         events.push(event.unwrap());
     }
-    assert_eq!(events.len(), 3);
-    let MessageStreamEvent::FinalMessage(final_msg) = &events[1] else {
+    assert_eq!(events.len(), 4);
+    assert!(matches!(events[0], MessageStreamEvent::Start(_)));
+    let MessageStreamEvent::FinalMessage(final_msg) = &events[2] else {
         panic!("expected FinalMessage");
     };
     assert_eq!(
@@ -325,6 +344,7 @@ async fn generate_synthesizes_from_message_variant() {
         tool_name: None,
         tool_calls: None,
         thinking: None,
+        thinking_signature: None,
         metadata: None,
     };
     client.script_stream(vec![
@@ -367,6 +387,7 @@ async fn synthesize_preserves_tool_calls_from_final_message() {
             },
         }]),
         thinking: None,
+        thinking_signature: None,
         metadata: None,
     };
     client.script_stream(vec![
@@ -374,6 +395,8 @@ async fn synthesize_preserves_tool_calls_from_final_message() {
             message,
             usage: None,
             stream_stats: None,
+            id: None,
+            model: None,
         }),
         MessageStreamEvent::End(MessageStreamEnd {}),
     ]);
