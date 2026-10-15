@@ -6,17 +6,12 @@ use crate::stream::MessageStream;
 use llm_codec::error::LlmError;
 
 /// Generic token-usage sink decoupled from any concrete metrics collector.
-/// Implementations receive prompt/completion token counts, cost and model
-/// name; the facade layer wires a project-specific adapter (e.g. the
-/// metrics crate collector) into this trait.
+/// Implementations receive the full provider usage breakdown (including
+/// reasoning and cache hit/write tokens), cost and model name; the facade
+/// layer wires a project-specific adapter (e.g. the metrics crate collector)
+/// into this trait.
 pub trait TokenUsageSink: Send + Sync {
-    fn record_token_usage(
-        &self,
-        prompt_tokens: u64,
-        completion_tokens: u64,
-        total_cost: Option<f64>,
-        model: Option<&str>,
-    );
+    fn record_token_usage(&self, usage: &TokenUsageStats, model: Option<&str>);
 }
 
 /// Observation points for gateway request metrics, decoupled from any
@@ -81,12 +76,7 @@ impl TokenRecordingStream {
             return;
         };
         self.recorded = true;
-        sink.record_token_usage(
-            usage.prompt_tokens as u64,
-            usage.completion_tokens as u64,
-            usage.total_cost,
-            Some(&self.model),
-        );
+        sink.record_token_usage(usage, Some(&self.model));
     }
 
     fn build_stats(&self, end_time: i64) -> StreamStats {
@@ -209,5 +199,93 @@ mod tests {
             stats.time_to_first_chunk
         );
         assert!(stats.total_duration >= 0);
+    }
+
+    /// Captures the full payload forwarded to `TokenUsageSink` so tests can
+    /// assert that cache/reasoning breakdowns reach the metrics boundary.
+    struct RecordingSink {
+        calls: std::sync::Mutex<Vec<(TokenUsageStats, Option<String>)>>,
+    }
+
+    impl RecordingSink {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn last(&self) -> (TokenUsageStats, Option<String>) {
+            self.calls
+                .lock()
+                .unwrap()
+                .last()
+                .cloned()
+                .expect("sink must have been called")
+        }
+    }
+
+    impl TokenUsageSink for RecordingSink {
+        fn record_token_usage(&self, usage: &TokenUsageStats, model: Option<&str>) {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((usage.clone(), model.map(String::from)));
+        }
+    }
+
+    #[tokio::test]
+    async fn sink_receives_full_usage_breakdown() {
+        let message = Message {
+            id: llm_types::Id::new(),
+            role: MessageRole::Assistant,
+            content: MessageContentValue::Text("done".to_string()),
+            timestamp: 0,
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+            thinking: None,
+            thinking_signature: None,
+            metadata: None,
+        };
+        let inner = FakeStream {
+            events: vec![
+                text_event("done"),
+                MessageStreamEvent::Usage(llm_types::llm::MessageStreamUsage {
+                    usage: TokenUsageStats {
+                        prompt_tokens: 100,
+                        completion_tokens: 20,
+                        total_tokens: 120,
+                        reasoning_tokens: Some(6),
+                        cache_read_tokens: Some(80),
+                        cache_write_tokens: Some(15),
+                        prompt_tokens_cost: None,
+                        completion_tokens_cost: None,
+                        total_cost: None,
+                    },
+                }),
+                MessageStreamEvent::FinalMessage(llm_types::llm::MessageStreamFinal {
+                    message,
+                    usage: None,
+                    stream_stats: None,
+                    id: None,
+                    model: None,
+                }),
+            ],
+        };
+        let sink = std::sync::Arc::new(RecordingSink::new());
+        let mut stream = TokenRecordingStream::new(
+            Box::new(inner),
+            Some(sink.clone()),
+            "claude-sonnet".to_string(),
+        );
+        while stream.next().await.is_some() {}
+
+        let (usage, model) = sink.last();
+        assert_eq!(model.as_deref(), Some("claude-sonnet"));
+        assert_eq!(usage.prompt_tokens, 100);
+        assert_eq!(usage.completion_tokens, 20);
+        assert_eq!(usage.reasoning_tokens, Some(6));
+        assert_eq!(usage.cache_read_tokens, Some(80));
+        assert_eq!(usage.cache_write_tokens, Some(15));
     }
 }

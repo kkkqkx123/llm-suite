@@ -459,7 +459,11 @@ impl LlmCodec for OpenaiResponseCodec {
                                     .and_then(|d| d.get("cached_tokens"))
                                     .and_then(|v| v.as_u64())
                                     .map(|r| r as u32),
-                                cache_write_tokens: None,
+                                cache_write_tokens: usage
+                                    .get("input_tokens_details")
+                                    .and_then(|d| d.get("cache_write_tokens"))
+                                    .and_then(|v| v.as_u64())
+                                    .map(|r| r as u32),
                                 prompt_tokens_cost: None,
                                 completion_tokens_cost: None,
                                 total_cost: None,
@@ -544,7 +548,11 @@ impl OpenaiResponseCodec {
                     .and_then(|d| d.get("cached_tokens"))
                     .and_then(|v| v.as_u64())
                     .map(|r| r as u32),
-                cache_write_tokens: None,
+                cache_write_tokens: u
+                    .get("input_tokens_details")
+                    .and_then(|d| d.get("cache_write_tokens"))
+                    .and_then(|v| v.as_u64())
+                    .map(|r| r as u32),
                 prompt_tokens_cost: None,
                 completion_tokens_cost: None,
                 total_cost: None,
@@ -636,7 +644,7 @@ mod tests {
 
         match codec
             .parse_stream_chunk(
-                r#"{"type":"response.completed","response":{"status":"completed"},"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15,"output_tokens_details":{"reasoning_tokens":2},"input_tokens_details":{"cached_tokens":3}}}"#,
+                r#"{"type":"response.completed","response":{"status":"completed"},"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15,"output_tokens_details":{"reasoning_tokens":2},"input_tokens_details":{"cached_tokens":3,"cache_write_tokens":4}}}"#,
             )
             .expect("completed chunk parses")
         {
@@ -646,6 +654,7 @@ mod tests {
                 assert_eq!(u.usage.total_tokens, 15);
                 assert_eq!(u.usage.reasoning_tokens, Some(2));
                 assert_eq!(u.usage.cache_read_tokens, Some(3));
+                assert_eq!(u.usage.cache_write_tokens, Some(4));
             }
             other => panic!("expected Usage, got {other:?}"),
         }
@@ -723,7 +732,7 @@ mod tests {
                 "input_tokens": 12,
                 "output_tokens": 8,
                 "total_tokens": 20,
-                "input_tokens_details": {"cached_tokens": 5}
+                "input_tokens_details": {"cached_tokens": 5, "cache_write_tokens": 2}
             }
         }"#;
         let result = codec
@@ -750,6 +759,7 @@ mod tests {
         assert_eq!(result.finish_reason.as_deref(), Some("completed"));
         assert_eq!(result.usage.as_ref().unwrap().total_tokens, 20);
         assert_eq!(result.usage.as_ref().unwrap().cache_read_tokens, Some(5));
+        assert_eq!(result.usage.as_ref().unwrap().cache_write_tokens, Some(2));
         assert_eq!(result.model, "gpt-4o");
     }
 
@@ -885,6 +895,7 @@ mod tests {
             custom_body_enabled: None,
             query_params: None,
             stream_options: None,
+            prompt_caching: None,
             context_window_size: None,
             proxy: None,
             no_proxy: None,

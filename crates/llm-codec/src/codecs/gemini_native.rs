@@ -195,6 +195,25 @@ impl GeminiNativeCodec {
 
     /// Parse the top-level `usageMetadata` object into token stats.
     fn parse_usage_metadata(u: &serde_json::Value) -> llm_types::llm::TokenUsageStats {
+        // Cached content tokens: primary source `cachedContentTokenCount`;
+        // when absent, fall back to summing the per-modality breakdown in
+        // `cacheTokensDetails` (`[{modality, tokenCount}, ...]`).
+        let cache_read_tokens = u
+            .get("cachedContentTokenCount")
+            .and_then(|v| v.as_u64())
+            .map(|r| r as u32)
+            .or_else(|| {
+                let sum: u64 = u
+                    .get("cacheTokensDetails")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|m| m.get("tokenCount").and_then(|t| t.as_u64()))
+                            .sum()
+                    })
+                    .unwrap_or(0);
+                (sum > 0).then_some(sum as u32)
+            });
         llm_types::llm::TokenUsageStats {
             prompt_tokens: u
                 .get("promptTokenCount")
@@ -212,10 +231,7 @@ impl GeminiNativeCodec {
                 .get("thoughtsTokenCount")
                 .and_then(|v| v.as_u64())
                 .map(|r| r as u32),
-            cache_read_tokens: u
-                .get("cachedContentTokenCount")
-                .and_then(|v| v.as_u64())
-                .map(|r| r as u32),
+            cache_read_tokens,
             cache_write_tokens: None,
             prompt_tokens_cost: None,
             completion_tokens_cost: None,
@@ -685,6 +701,44 @@ mod tests {
         }
     }
 
+    #[test]
+    fn usage_metadata_parses_cached_content_tokens() {
+        let codec = GeminiNativeCodec::new();
+        // Primary source: `cachedContentTokenCount` (python-genai
+        // `GenerateContentResponseUsageMetadata.cached_content_token_count`).
+        let chunk = r#"{"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":5,"totalTokenCount":105,"thoughtsTokenCount":3,"cachedContentTokenCount":40}}"#;
+        let events = codec.parse_stream_chunk_events(chunk).expect("must parse");
+        match events.as_slice() {
+            [MessageStreamEvent::Usage(u)] => {
+                assert_eq!(u.usage.reasoning_tokens, Some(3));
+                assert_eq!(u.usage.cache_read_tokens, Some(40));
+                assert_eq!(u.usage.cache_write_tokens, None);
+            }
+            other => panic!("expected Usage event, got {:?}", other),
+        }
+
+        // Fallback: `cacheTokensDetails` per-modality breakdown when the
+        // primary count is absent.
+        let chunk = r#"{"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":5,"totalTokenCount":105,"cacheTokensDetails":[{"modality":"TEXT","tokenCount":20},{"modality":"IMAGE","tokenCount":8}]}}"#;
+        let events = codec.parse_stream_chunk_events(chunk).expect("must parse");
+        match events.as_slice() {
+            [MessageStreamEvent::Usage(u)] => {
+                assert_eq!(u.usage.cache_read_tokens, Some(28));
+            }
+            other => panic!("expected Usage event, got {:?}", other),
+        }
+
+        // Neither present → `None`.
+        let chunk = r#"{"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}"#;
+        let events = codec.parse_stream_chunk_events(chunk).expect("must parse");
+        match events.as_slice() {
+            [MessageStreamEvent::Usage(u)] => {
+                assert_eq!(u.usage.cache_read_tokens, None);
+            }
+            other => panic!("expected Usage event, got {:?}", other),
+        }
+    }
+
     fn profile() -> LlmProfile {
         LlmProfile {
             id: "p1".to_string(),
@@ -708,6 +762,7 @@ mod tests {
             custom_body_enabled: None,
             query_params: None,
             stream_options: None,
+            prompt_caching: None,
             context_window_size: None,
             proxy: None,
             no_proxy: None,

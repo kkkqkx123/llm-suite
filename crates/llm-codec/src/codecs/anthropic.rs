@@ -2,9 +2,9 @@ use super::LlmCodec;
 use crate::codecs::helpers::{resolve_image_payload, ResolvedImage};
 use crate::error::{LlmError, LlmResult};
 use llm_types::llm::{
-    LlmProfile, LlmRequest, LlmResult as LlmResponseType, MessageStreamEnd, MessageStreamError,
-    MessageStreamEvent, MessageStreamReasoning, MessageStreamStart, MessageStreamText,
-    MessageStreamToolCallDelta, MessageStreamUsage, TokenUsageStats,
+    LlmProfile, LlmPromptCaching, LlmRequest, LlmResult as LlmResponseType, MessageStreamEnd,
+    MessageStreamError, MessageStreamEvent, MessageStreamReasoning, MessageStreamStart,
+    MessageStreamText, MessageStreamToolCallDelta, MessageStreamUsage, TokenUsageStats,
 };
 use llm_types::message::{Message, MessageContent, MessageContentValue, MessageRole};
 use llm_types::tool::{Tool, ToolParameterSchema};
@@ -96,6 +96,10 @@ impl AnthropicCodec {
 
         super::shared::apply_custom_body(&mut body, profile);
 
+        if let Some(caching) = &profile.prompt_caching {
+            Self::apply_prompt_caching(&mut body, caching);
+        }
+
         Ok(body)
     }
 
@@ -126,6 +130,68 @@ impl AnthropicCodec {
         }
 
         Ok(body)
+    }
+
+    /// Apply prompt-caching breakpoints (official `CacheControlEphemeralParam`
+    /// shape: `{"type": "ephemeral", "ttl": "5m" | "1h"}`) on the last tool
+    /// declaration, the system block and the last message content block —
+    /// at most 3 of the 4 API-allowed breakpoints.
+    fn apply_prompt_caching(body: &mut serde_json::Value, caching: &LlmPromptCaching) {
+        let mut control = serde_json::json!({"type": "ephemeral"});
+        if let Some(ttl) = &caching.ttl {
+            control["ttl"] = serde_json::json!(ttl);
+        }
+
+        // Last tool declaration.
+        if let Some(tools) = body.get_mut("tools").and_then(|v| v.as_array_mut()) {
+            if let Some(last) = tools.last_mut() {
+                last["cache_control"] = control.clone();
+            }
+        }
+
+        // System block: sent as a plain string elsewhere; the block-array form
+        // is required to carry `cache_control`.
+        if let Some(system) = body.get("system").and_then(|v| v.as_str()) {
+            body["system"] = serde_json::json!([{
+                "type": "text",
+                "text": system,
+                "cache_control": control.clone(),
+            }]);
+        }
+
+        // Last content block of the last message.
+        if let Some(last_msg) = body
+            .get_mut("messages")
+            .and_then(|v| v.as_array_mut())
+            .and_then(|m| m.last_mut())
+        {
+            if let Some(last_block) = last_msg
+                .get_mut("content")
+                .and_then(|v| v.as_array_mut())
+                .and_then(|b| b.last_mut())
+            {
+                last_block["cache_control"] = control;
+            }
+        }
+    }
+
+    /// Cache-write input tokens: prefer the explicit total
+    /// (`cache_creation_input_tokens`), fall back to the sum of the TTL
+    /// breakdown `cache_creation.{ephemeral_5m_input_tokens,
+    /// ephemeral_1h_input_tokens}`. Returns `None` when neither is present.
+    fn cache_write_tokens(usage: &serde_json::Value) -> Option<u32> {
+        if let Some(total) = usage
+            .get("cache_creation_input_tokens")
+            .and_then(|v| v.as_u64())
+        {
+            return Some(total as u32);
+        }
+        let creation = usage.get("cache_creation")?;
+        let sum: u64 = ["ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"]
+            .iter()
+            .filter_map(|k| creation.get(*k).and_then(|v| v.as_u64()))
+            .sum();
+        (sum > 0).then_some(sum as u32)
     }
 
     /// Wire tool declarations. `input_schema` is mandatory for Anthropic and
@@ -592,10 +658,7 @@ impl AnthropicCodec {
             .get("cache_read_input_tokens")
             .and_then(|v| v.as_u64())
             .map(|r| r as u32);
-        let cache_write_tokens = usage
-            .get("cache_creation_input_tokens")
-            .and_then(|v| v.as_u64())
-            .map(|r| r as u32);
+        let cache_write_tokens = Self::cache_write_tokens(usage);
 
         if prompt_tokens == 0
             && completion_tokens == 0
@@ -823,10 +886,7 @@ impl AnthropicCodec {
                     .get("cache_read_input_tokens")
                     .and_then(|v| v.as_u64())
                     .map(|r| r as u32),
-                cache_write_tokens: u
-                    .get("cache_creation_input_tokens")
-                    .and_then(|v| v.as_u64())
-                    .map(|r| r as u32),
+                cache_write_tokens: Self::cache_write_tokens(u),
                 prompt_tokens_cost: None,
                 completion_tokens_cost: None,
                 total_cost: None,
@@ -959,6 +1019,7 @@ mod tests {
             custom_body_enabled: None,
             query_params: None,
             stream_options: None,
+            prompt_caching: None,
             context_window_size: None,
             proxy: None,
             no_proxy: None,
@@ -1570,6 +1631,149 @@ mod tests {
                 "{reason} must terminate the stream"
             );
         }
+    }
+
+    // ---------------- usage / prompt caching ----------------
+
+    #[test]
+    fn cache_creation_ttl_breakdown_is_summed() {
+        // Official `Usage.cache_creation` object without the legacy total.
+        let codec = AnthropicCodec::new();
+        let body = r#"{"id":"m","model":"claude-sonnet","stop_reason":"end_turn","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":4,"cache_creation":{"ephemeral_5m_input_tokens":2,"ephemeral_1h_input_tokens":3}}}"#;
+        let out = codec
+            .parse_response(body, &request(vec![], None))
+            .expect("must parse");
+        let usage = out.usage.expect("usage present");
+        assert_eq!(usage.cache_read_tokens, Some(4));
+        assert_eq!(
+            usage.cache_write_tokens,
+            Some(5),
+            "5m + 1h breakdown summed"
+        );
+
+        // The explicit legacy total wins when both shapes are present.
+        let body = r#"{"id":"m","model":"claude-sonnet","stop_reason":"end_turn","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":7,"cache_creation":{"ephemeral_5m_input_tokens":2,"ephemeral_1h_input_tokens":3}}}"#;
+        let out = codec
+            .parse_response(body, &request(vec![], None))
+            .expect("must parse");
+        assert_eq!(
+            out.usage.unwrap().cache_write_tokens,
+            Some(7),
+            "explicit cache_creation_input_tokens takes precedence"
+        );
+
+        // Neither shape present → `None`.
+        let body = r#"{"id":"m","model":"claude-sonnet","stop_reason":"end_turn","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":10,"output_tokens":5}}"#;
+        let out = codec
+            .parse_response(body, &request(vec![], None))
+            .expect("must parse");
+        assert_eq!(out.usage.unwrap().cache_write_tokens, None);
+    }
+
+    #[test]
+    fn stream_message_delta_summarizes_ttl_breakdown() {
+        let codec = AnthropicCodec::new();
+        let chunk = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7,"cache_creation":{"ephemeral_5m_input_tokens":11}}}"#;
+        let events = codec.parse_stream_chunk_events(chunk).expect("must parse");
+        match &events[0] {
+            MessageStreamEvent::Usage(u) => {
+                assert_eq!(u.usage.completion_tokens, 7);
+                assert_eq!(u.usage.cache_write_tokens, Some(11));
+            }
+            other => panic!("expected Usage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prompt_caching_breakpoints_are_applied() {
+        let codec = AnthropicCodec::new();
+        let mut req = request(
+            vec![
+                msg(llm_types::message::MessageRole::System, "You are a helper"),
+                msg(llm_types::message::MessageRole::User, "Hello"),
+                msg(llm_types::message::MessageRole::Assistant, "Hi there"),
+                msg(llm_types::message::MessageRole::User, "Bye"),
+            ],
+            None,
+        );
+        req.tools = Some(vec![llm_types::tool::Tool {
+            name: "get_weather".to_string(),
+            description: "weather lookup".to_string(),
+            parameters: None,
+        }]);
+
+        let mut caching_profile = profile();
+        caching_profile.prompt_caching = Some(LlmPromptCaching { ttl: None });
+        let body = codec
+            .build_body(&req, &caching_profile)
+            .expect("must build");
+
+        // Default TTL shape is the bare ephemeral marker (provider default 5m).
+        let control = serde_json::json!({"type": "ephemeral"});
+
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["cache_control"], control);
+
+        // System is upgraded to the block-array form carrying the marker.
+        assert_eq!(
+            body["system"],
+            serde_json::json!([{
+                "type": "text",
+                "text": "You are a helper",
+                "cache_control": control,
+            }])
+        );
+
+        // Only the last content block of the last message is marked.
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 3);
+        let last_blocks = messages.last().unwrap()["content"].as_array().unwrap();
+        assert_eq!(last_blocks.last().unwrap()["cache_control"], control);
+        assert_eq!(messages[0]["content"][0].get("cache_control"), None);
+        assert_eq!(messages[1]["content"][0].get("cache_control"), None);
+    }
+
+    #[test]
+    fn prompt_caching_ttl_is_forwarded() {
+        let codec = AnthropicCodec::new();
+        let mut caching_profile = profile();
+        caching_profile.prompt_caching = Some(LlmPromptCaching {
+            ttl: Some("1h".to_string()),
+        });
+        let body = codec
+            .build_body(
+                &request(
+                    vec![
+                        msg(llm_types::message::MessageRole::System, "You are a helper"),
+                        msg(llm_types::message::MessageRole::User, "Hi"),
+                    ],
+                    None,
+                ),
+                &caching_profile,
+            )
+            .expect("must build");
+        let control = serde_json::json!({"type": "ephemeral", "ttl": "1h"});
+        assert_eq!(
+            body["messages"].as_array().unwrap().last().unwrap()["content"][0]["cache_control"],
+            control
+        );
+        assert_eq!(body["system"][0]["cache_control"], control);
+    }
+
+    #[test]
+    fn without_prompt_caching_no_cache_control_is_emitted() {
+        let codec = AnthropicCodec::new();
+        let body = codec
+            .build_body(
+                &request(vec![msg(llm_types::message::MessageRole::User, "Hi")], None),
+                &profile(),
+            )
+            .expect("must build");
+        assert_eq!(body["system"], serde_json::json!(null));
+        assert!(body["messages"][0]["content"][0]
+            .get("cache_control")
+            .is_none());
     }
 
     #[test]

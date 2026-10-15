@@ -7,6 +7,19 @@ pub struct LlmStreamOptions {
     pub include_usage: Option<bool>,
 }
 
+/// Prompt caching configuration for providers with explicit cache breakpoints
+/// (Anthropic `cache_control`).
+///
+/// Presence of this field enables caching. Breakpoints are placed on the last
+/// tool declaration, the system block and the last message content block
+/// (at most 3 of the 4 API-allowed breakpoints).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LlmPromptCaching {
+    /// Cache entry time-to-live: `"5m"` (provider default) or `"1h"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LlmProfile {
     pub id: String,
@@ -58,6 +71,10 @@ pub struct LlmProfile {
     /// Streaming options (e.g. include_usage for OpenAI).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_options: Option<LlmStreamOptions>,
+    /// Prompt caching configuration (enables Anthropic `cache_control`
+    /// breakpoints when present).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_caching: Option<LlmPromptCaching>,
     /// Model's maximum input context window size in tokens.
     ///
     /// This is a **model capability** property, distinct from the per-request

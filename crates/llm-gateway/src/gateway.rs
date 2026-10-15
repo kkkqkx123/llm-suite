@@ -511,12 +511,7 @@ impl LlmGateway {
         let Some(usage) = result.usage.as_ref() else {
             return;
         };
-        metrics.record_token_usage(
-            usage.prompt_tokens as u64,
-            usage.completion_tokens as u64,
-            usage.total_cost,
-            Some(&profile.model),
-        );
+        metrics.record_token_usage(usage, Some(&profile.model));
     }
 
     fn record_request(
@@ -648,6 +643,7 @@ mod tests {
             custom_body_enabled: None,
             query_params: None,
             stream_options: None,
+            prompt_caching: None,
             context_window_size: None,
             proxy: None,
             no_proxy: None,

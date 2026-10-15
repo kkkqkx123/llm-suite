@@ -40,6 +40,7 @@ fn profile_with_retries(id: &str, max_retries: Option<u32>) -> LlmProfile {
         custom_body_enabled: None,
         query_params: None,
         stream_options: None,
+        prompt_caching: None,
         context_window_size: None,
         proxy: None,
         no_proxy: None,

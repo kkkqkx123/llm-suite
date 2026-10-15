@@ -149,6 +149,7 @@ mod tests {
             custom_body_enabled: None,
             query_params: None,
             stream_options: None,
+            prompt_caching: None,
             context_window_size: None,
             proxy: None,
             no_proxy: None,

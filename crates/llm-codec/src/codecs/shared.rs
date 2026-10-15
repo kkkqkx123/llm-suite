@@ -243,6 +243,11 @@ pub fn parse_openai_usage(u: &serde_json::Value) -> llm_types::llm::TokenUsageSt
         .and_then(|d| d.get("cached_tokens"))
         .and_then(|r| r.as_u64())
         .map(|r| r as u32);
+    let cache_write_tokens = u
+        .get("prompt_tokens_details")
+        .and_then(|d| d.get("cache_write_tokens"))
+        .and_then(|r| r.as_u64())
+        .map(|r| r as u32);
     llm_types::llm::TokenUsageStats {
         prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
         completion_tokens: u
@@ -252,7 +257,7 @@ pub fn parse_openai_usage(u: &serde_json::Value) -> llm_types::llm::TokenUsageSt
         total_tokens: u.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
         reasoning_tokens,
         cache_read_tokens,
-        cache_write_tokens: None,
+        cache_write_tokens,
         prompt_tokens_cost: None,
         completion_tokens_cost: None,
         total_cost: None,
@@ -591,6 +596,31 @@ mod tests {
     }
 
     #[test]
+    fn usage_parses_official_cache_details() {
+        // Official `CompletionUsage` shape: `prompt_tokens_details` carries
+        // both `cached_tokens` and `cache_write_tokens`.
+        let usage = parse_openai_usage(&serde_json::json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+            "prompt_tokens_details": {"cached_tokens": 80, "cache_write_tokens": 15},
+            "completion_tokens_details": {"reasoning_tokens": 6}
+        }));
+        assert_eq!(usage.prompt_tokens, 100);
+        assert_eq!(usage.total_tokens, 120);
+        assert_eq!(usage.reasoning_tokens, Some(6));
+        assert_eq!(usage.cache_read_tokens, Some(80));
+        assert_eq!(usage.cache_write_tokens, Some(15));
+
+        // Details objects absent → cache fields stay `None`.
+        let bare = parse_openai_usage(&serde_json::json!({
+            "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2
+        }));
+        assert_eq!(bare.cache_read_tokens, None);
+        assert_eq!(bare.cache_write_tokens, None);
+    }
+
+    #[test]
     fn stream_start_carries_provider_identity() {
         let chunk = r#"{"id":"chatcmpl-1","model":"gpt-4o","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hi"}}]}"#;
         let events = parse_openai_stream_chunk(chunk).expect("chunk must parse");
@@ -768,6 +798,7 @@ mod enhancement_tests {
                     .collect(),
             ),
             stream_options: None,
+            prompt_caching: None,
             context_window_size: None,
             proxy: None,
             no_proxy: None,
