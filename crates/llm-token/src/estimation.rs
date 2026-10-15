@@ -138,7 +138,8 @@ impl TokenEstimator {
 
     /// Find split point that fits within token limit
     ///
-    /// Returns the byte offset where to split.
+    /// Returns the byte offset where to split. The offset always advances by
+    /// whole chars, so the result is guaranteed to be a char boundary.
     pub fn find_split_point(&self, text: &str, max_tokens: usize) -> usize {
         let mut bytes = 0;
         let mut tokens = 0.0f32;
@@ -160,7 +161,9 @@ impl TokenEstimator {
 
             if tokens + ch_tokens > max_tokens as f32 {
                 // If we have a previous safe break, split there; otherwise split at current byte offset
-                return if last_break > 0 { last_break } else { bytes };
+                let split = if last_break > 0 { last_break } else { bytes };
+                debug_assert!(text.is_char_boundary(split));
+                return split;
             }
 
             tokens += ch_tokens;
@@ -172,6 +175,7 @@ impl TokenEstimator {
             }
         }
 
+        debug_assert!(text.is_char_boundary(text.len()));
         text.len()
     }
 }

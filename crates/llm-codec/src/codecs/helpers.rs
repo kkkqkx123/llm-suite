@@ -84,7 +84,13 @@ fn truncate(s: &str) -> String {
     if s.len() <= 64 {
         s.to_string()
     } else {
-        format!("{}...", &s[..64])
+        // llm-suite stays free of core dependencies; keep the same floor
+        // semantics as cce_utils::truncate_to_byte_len locally.
+        let mut end = 64.min(s.len());
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &s[..end])
     }
 }
 
