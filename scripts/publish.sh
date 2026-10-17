@@ -7,22 +7,25 @@ if [[ "${1:-}" == "--dry-run" ]]; then
 fi
 
 CRATES=(
-    "crates/llm-types"
-    "crates/llm-common"
-    "crates/llm-token"
-    "crates/llm-message"
-    "crates/llm-tool-call"
-    "crates/llm-codec"
-    "crates/llm-embedding"
-    "crates/llm-chat-basic"
-    "crates/llm-rerank"
-    "crates/llm-client"
-    "crates/llm-config"
-    "crates/llm-gateway"
+    "crates/llm-suite-types"
+    "crates/llm-suite-common"
+    "crates/llm-suite-proxy"
+    "crates/llm-suite-token"
+    "crates/llm-suite-message"
+    "crates/llm-suite-tool-call"
+    "crates/llm-suite-codec"
+    "crates/llm-suite-embedding"
+    "crates/llm-suite-chat-basic"
+    "crates/llm-suite-rerank"
+    "crates/llm-suite-client"
+    "crates/llm-suite-config"
+    "crates/llm-suite-gateway"
 )
 
 for crate in "${CRATES[@]}"; do
-    name=$(basename "$crate")
+    # Package name may differ from the directory name; read it from the
+    # crate's own Cargo.toml.
+    name=$(sed -n 's/^name *= *"\(.*\)".*/\1/p' "$crate/Cargo.toml" | head -1)
     # Extract the package version; fall back to the workspace version
     # for crates using `version.workspace = true`.
     version=$(sed -n 's/^version *= *"\(.*\)".*/\1/p' "$crate/Cargo.toml" | head -1)

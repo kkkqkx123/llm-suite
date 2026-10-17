@@ -1,0 +1,1085 @@
+use super::LlmCodec;
+use crate::error::LlmResult;
+use llm_suite_types::llm::{LlmProfile, LlmRequest, LlmResult as LlmResponseType, MessageStreamEvent};
+use llm_suite_types::tool::Tool;
+use reqwest::Method;
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+pub struct OpenaiResponseCodec {
+    base_url: String,
+    /// Reused across requests; constructing a `reqwest::Client` per call would
+    /// discard the connection pool and TLS session cache every time.
+    client: reqwest::Client,
+    /// Maps streaming `item_id` to the accumulated tool call index so
+    /// `function_call_arguments.delta` fragments land on the same call as the
+    /// final `function_call.done` snapshot.
+    call_indices: Mutex<HashMap<String, usize>>,
+    next_index: Mutex<usize>,
+}
+
+impl Default for OpenaiResponseCodec {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl OpenaiResponseCodec {
+    pub fn new() -> Self {
+        Self {
+            base_url: "https://api.openai.com/v1".to_string(),
+            client: reqwest::Client::new(),
+            call_indices: Mutex::new(HashMap::new()),
+            next_index: Mutex::new(0),
+        }
+    }
+
+    pub fn with_base_url(base_url: String) -> Self {
+        Self {
+            base_url,
+            client: reqwest::Client::new(),
+            call_indices: Mutex::new(HashMap::new()),
+            next_index: Mutex::new(0),
+        }
+    }
+
+    fn call_index_for(&self, item_id: &str) -> usize {
+        let mut indices = llm_suite_common::lock::lock_ok(self.call_indices.lock());
+        if let Some(idx) = indices.get(item_id) {
+            return *idx;
+        }
+        let mut next = llm_suite_common::lock::lock_ok(self.next_index.lock());
+        let idx = *next;
+        *next += 1;
+        indices.insert(item_id.to_string(), idx);
+        idx
+    }
+
+    fn convert_messages(&self, messages: &[llm_suite_types::message::Message]) -> Vec<serde_json::Value> {
+        messages
+            .iter()
+            .map(|msg| {
+                let role = match msg.role {
+                    llm_suite_types::message::MessageRole::System => "system",
+                    llm_suite_types::message::MessageRole::User => "user",
+                    llm_suite_types::message::MessageRole::Assistant => "assistant",
+                    llm_suite_types::message::MessageRole::Tool => "tool",
+                };
+
+                let content = match &msg.content {
+                    llm_suite_types::message::MessageContentValue::Text(text) => {
+                        serde_json::Value::String(text.clone())
+                    }
+                    // The Responses API uses `input_text` / `input_image`
+                    // content part types (not Chat's `text` / `image_url`),
+                    // so Rich blocks are mapped explicitly.
+                    llm_suite_types::message::MessageContentValue::Rich(blocks) => {
+                        serde_json::Value::Array(
+                            blocks
+                                .iter()
+                                .map(|block| match block {
+                                    llm_suite_types::message::MessageContent::Text { text } => {
+                                        serde_json::json!({"type": "input_text", "text": text})
+                                    }
+                                    llm_suite_types::message::MessageContent::ImageUrl { image_url } => {
+                                        let mut part = serde_json::json!({
+                                            "type": "input_image",
+                                            "image_url": image_url.url,
+                                        });
+                                        if let Some(ref detail) = image_url.detail {
+                                            part["detail"] = serde_json::json!(detail);
+                                        }
+                                        part
+                                    }
+                                    llm_suite_types::message::MessageContent::Thinking {
+                                        thinking,
+                                        ..
+                                    } => {
+                                        serde_json::json!({"type": "input_text", "text": thinking})
+                                    }
+                                    // Tool blocks are not valid user content in
+                                    // the Responses API; render them as text so
+                                    // history is not silently dropped.
+                                    llm_suite_types::message::MessageContent::ToolUse { tool_use } => {
+                                        serde_json::json!({
+                                            "type": "input_text",
+                                            "text": tool_use.input.to_string(),
+                                        })
+                                    }
+                                    llm_suite_types::message::MessageContent::ToolResult {
+                                        tool_result,
+                                    } => {
+                                        serde_json::json!({
+                                            "type": "input_text",
+                                            "text": tool_result.content,
+                                        })
+                                    }
+                                })
+                                .collect(),
+                        )
+                    }
+                };
+
+                let mut entry = serde_json::json!({
+                    "role": role,
+                    "content": content,
+                });
+
+                if let Some(ref tool_calls) = msg.tool_calls {
+                    let calls: Vec<serde_json::Value> = tool_calls
+                        .iter()
+                        .map(|tc| {
+                            serde_json::json!({
+                                "id": tc.id,
+                                "type": tc.r#type,
+                                "function": {
+                                    "name": tc.function.name,
+                                    "arguments": tc.function.arguments,
+                                }
+                            })
+                        })
+                        .collect();
+                    entry["tool_calls"] = serde_json::json!(calls);
+                }
+
+                if let Some(ref tool_call_id) = msg.tool_call_id {
+                    entry["tool_call_id"] = serde_json::json!(tool_call_id);
+                }
+
+                entry
+            })
+            .collect()
+    }
+
+    fn response_tool_defs(tools: &[Tool]) -> Vec<serde_json::Value> {
+        tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters,
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// Build the count-tokens body: the same `input` (plus native `tools`)
+    /// that `build_request` sends, without stream flags or generation
+    /// parameters (they do not affect the input count).
+    fn build_count_tokens_body(
+        &self,
+        request: &LlmRequest,
+        profile: &LlmProfile,
+    ) -> LlmResult<serde_json::Value> {
+        let use_text_mode = super::shared::is_text_mode(request);
+
+        let mut body = serde_json::json!({
+            "model": profile.model,
+            "input": self.convert_messages(&request.messages),
+        });
+
+        if use_text_mode {
+            let history = super::shared::convert_history_for_text_mode(&request.messages, request);
+            body["input"] = serde_json::json!(self.convert_messages(&history));
+            let system = super::shared::text_mode_system_content(request);
+            if !system.is_empty() {
+                let mut input = body["input"].take();
+                if let Some(arr) = input.as_array_mut() {
+                    arr.insert(0, serde_json::json!({"role": "system", "content": system}));
+                }
+                body["input"] = input;
+            }
+        } else if let Some(tools) = &request.tools {
+            body["tools"] = serde_json::json!(Self::response_tool_defs(tools));
+        }
+
+        Ok(body)
+    }
+
+    fn parse_tool_calls_from_output(
+        &self,
+        output: &[serde_json::Value],
+    ) -> Vec<llm_suite_types::message::LlmToolCall> {
+        output
+            .iter()
+            .filter_map(|item| {
+                let item_type = item.get("type").and_then(|v| v.as_str())?;
+                if item_type != "function_call" {
+                    return None;
+                }
+                let id = item
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let name = item
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let arguments = match item.get("arguments").and_then(|v| v.as_str()) {
+                    Some(s) => s.to_string(),
+                    None => {
+                        tracing::debug!(
+                            tool_id = id.as_str(),
+                            tool_name = name.as_str(),
+                            "function call arguments missing or not a string; falling back to empty object",
+                        );
+                        "{}".to_string()
+                    }
+                };
+                Some(llm_suite_types::message::LlmToolCall {
+                    id,
+                    r#type: "function".to_string(),
+                    function: llm_suite_types::message::LlmFunctionCall { name, arguments },
+                })
+            })
+            .collect()
+    }
+}
+
+impl LlmCodec for OpenaiResponseCodec {
+    fn build_request(
+        &self,
+        request: &LlmRequest,
+        profile: &LlmProfile,
+    ) -> LlmResult<reqwest::Request> {
+        let url = format!(
+            "{}/responses",
+            profile.base_url.as_deref().unwrap_or(&self.base_url)
+        );
+
+        let use_text_mode = super::shared::is_text_mode(request);
+
+        let mut body = serde_json::json!({
+            "model": profile.model,
+            "input": self.convert_messages(&request.messages),
+        });
+
+        if use_text_mode {
+            let history = super::shared::convert_history_for_text_mode(&request.messages, request);
+            body["input"] = serde_json::json!(self.convert_messages(&history));
+            let system = super::shared::text_mode_system_content(request);
+            if !system.is_empty() {
+                let mut input = body["input"].take();
+                if let Some(arr) = input.as_array_mut() {
+                    arr.insert(0, serde_json::json!({"role": "system", "content": system}));
+                }
+                body["input"] = input;
+            }
+        }
+
+        if request.stream == Some(true) {
+            body["stream"] = serde_json::json!(true);
+        }
+
+        let generation = super::shared::resolve_generation(request, profile)?;
+        crate::generation::apply_openai_responses(&mut body, &generation);
+        super::shared::merge_and_apply_params(&mut body, profile, &request.parameters);
+
+        if !use_text_mode {
+            if let Some(tools) = &request.tools {
+                body["tools"] = serde_json::json!(Self::response_tool_defs(tools));
+            }
+        }
+
+        super::shared::apply_custom_body(&mut body, profile);
+
+        let mut req_builder = self
+            .client
+            .request(Method::POST, &url)
+            .header("Content-Type", "application/json")
+            .json(&body);
+
+        req_builder = super::shared::apply_auth_and_headers(req_builder, profile, "bearer");
+
+        req_builder
+            .build()
+            .map_err(crate::error::LlmError::HttpError)
+    }
+
+    fn build_count_tokens_request(
+        &self,
+        request: &LlmRequest,
+        profile: &LlmProfile,
+    ) -> LlmResult<Option<reqwest::Request>> {
+        let url = format!(
+            "{}/responses/input_tokens",
+            profile.base_url.as_deref().unwrap_or(&self.base_url)
+        );
+
+        let body = self.build_count_tokens_body(request, profile)?;
+
+        let mut req_builder = self
+            .client
+            .request(Method::POST, &url)
+            .header("Content-Type", "application/json")
+            .json(&body);
+
+        req_builder = super::shared::apply_auth_and_headers(req_builder, profile, "bearer");
+
+        req_builder
+            .build()
+            .map(Some)
+            .map_err(crate::error::LlmError::HttpError)
+    }
+
+    fn parse_response(&self, body: &str, request: &LlmRequest) -> LlmResult<LlmResponseType> {
+        let mut result = self.parse_response_inner(body)?;
+        if super::shared::is_text_mode(request) {
+            if let Some(content) = result.content.clone() {
+                let calls = super::shared::parse_text_tool_calls(request, &content);
+                if !calls.is_empty() {
+                    result.tool_calls = Some(calls.clone());
+                    result.message.tool_calls = Some(calls);
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    fn parse_stream_chunk(&self, data: &str) -> LlmResult<Option<MessageStreamEvent>> {
+        if data.is_empty() {
+            return Ok(None);
+        }
+
+        let json: serde_json::Value = serde_json::from_str(data)?;
+
+        let event_type = json.get("type").and_then(|v| v.as_str());
+        match event_type {
+            Some("response.created") => {
+                // Stream identity; the accumulator records it for the final
+                // message and forwards it once.
+                let response = json.get("response");
+                let id = response
+                    .and_then(|r| r.get("id"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let model = response
+                    .and_then(|r| r.get("model"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                if id.is_some() || model.is_some() {
+                    return Ok(Some(MessageStreamEvent::Start(
+                        llm_suite_types::llm::MessageStreamStart { id, model },
+                    )));
+                }
+            }
+            Some("response.output_text.delta") => {
+                if let Some(delta) = json.get("delta").and_then(|v| v.as_str()) {
+                    return Ok(Some(MessageStreamEvent::Text(
+                        llm_suite_types::llm::MessageStreamText {
+                            snapshot: String::new(),
+                            text: delta.to_string(),
+                        },
+                    )));
+                }
+            }
+            Some("response.function_call_arguments.delta") => {
+                // Incremental arguments fragment; grouped by item_id onto a
+                // stable index (mirrors the toolCallsDelta accumulation).
+                let item_id = json
+                    .get("item_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if let Some(delta) = json.get("delta").and_then(|v| v.as_str()) {
+                    let index = self.call_index_for(&item_id);
+                    return Ok(Some(MessageStreamEvent::ToolCallDelta(
+                        llm_suite_types::llm::MessageStreamToolCallDelta {
+                            index,
+                            id: None,
+                            name: None,
+                            arguments: Some(delta.to_string()),
+                            is_snapshot: false,
+                        },
+                    )));
+                }
+            }
+            Some("response.function_call.done") => {
+                // Complete snapshot: name + full arguments, replacing the
+                // accumulated fragments on the same index.
+                let item = json.get("item");
+                let item_id = item
+                    .and_then(|i| i.get("id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let index = self.call_index_for(&item_id);
+                let name = item
+                    .and_then(|i| i.get("name"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let arguments = item
+                    .and_then(|i| i.get("arguments"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                return Ok(Some(MessageStreamEvent::ToolCallDelta(
+                    llm_suite_types::llm::MessageStreamToolCallDelta {
+                        index,
+                        id: Some(item_id),
+                        name,
+                        arguments,
+                        is_snapshot: true,
+                    },
+                )));
+            }
+            Some("response.completed") | Some("response.incomplete") => {
+                // The completed event carries the final usage summary.
+                if let Some(usage) = json.get("usage") {
+                    return Ok(Some(MessageStreamEvent::Usage(
+                        llm_suite_types::llm::MessageStreamUsage {
+                            usage: llm_suite_types::llm::TokenUsageStats {
+                                prompt_tokens: usage
+                                    .get("input_tokens")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0)
+                                    as u32,
+                                completion_tokens: usage
+                                    .get("output_tokens")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0)
+                                    as u32,
+                                total_tokens: usage
+                                    .get("total_tokens")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0)
+                                    as u32,
+                                reasoning_tokens: usage
+                                    .get("output_tokens_details")
+                                    .and_then(|d| d.get("reasoning_tokens"))
+                                    .and_then(|v| v.as_u64())
+                                    .map(|r| r as u32),
+                                cache_read_tokens: usage
+                                    .get("input_tokens_details")
+                                    .and_then(|d| d.get("cached_tokens"))
+                                    .and_then(|v| v.as_u64())
+                                    .map(|r| r as u32),
+                                cache_write_tokens: usage
+                                    .get("input_tokens_details")
+                                    .and_then(|d| d.get("cache_write_tokens"))
+                                    .and_then(|v| v.as_u64())
+                                    .map(|r| r as u32),
+                                prompt_tokens_cost: None,
+                                completion_tokens_cost: None,
+                                total_cost: None,
+                            },
+                        },
+                    )));
+                }
+                return Ok(Some(MessageStreamEvent::End(
+                    llm_suite_types::llm::MessageStreamEnd {},
+                )));
+            }
+            _ => {}
+        }
+
+        Ok(None)
+    }
+
+    fn convert_tools(&self, tools: &[Tool]) -> LlmResult<Vec<serde_json::Value>> {
+        Ok(Self::response_tool_defs(tools))
+    }
+
+    fn parse_tool_calls(&self, result: &LlmResponseType) -> Vec<llm_suite_types::message::LlmToolCall> {
+        result.tool_calls.clone().unwrap_or_default()
+    }
+}
+
+impl OpenaiResponseCodec {
+    fn parse_response_inner(&self, body: &str) -> LlmResult<LlmResponseType> {
+        let json: serde_json::Value = serde_json::from_str(body)?;
+
+        let id = json.get("id").and_then(|v| v.as_str()).map(String::from);
+        let model = json
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let _status = json
+            .get("status")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let output = json.get("output").and_then(|v| v.as_array());
+
+        // Take the visible text from the last `message` output item. A
+        // `function_call` output item carries no text, so simply using
+        // `output.last()` would drop the assistant's text whenever a tool call
+        // follows it.
+        let content = output.and_then(|o| {
+            o.iter()
+                .rev()
+                .find(|item| item.get("type").and_then(|t| t.as_str()) == Some("message"))
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|block| block.get("text"))
+                .and_then(|t| t.as_str())
+                .map(String::from)
+        });
+
+        let mut tool_calls: Option<Vec<llm_suite_types::message::LlmToolCall>> = None;
+        if let Some(output_arr) = output {
+            let calls = self.parse_tool_calls_from_output(output_arr);
+            if !calls.is_empty() {
+                tool_calls = Some(calls);
+            }
+        }
+
+        let usage = json.get("usage").map(|u| {
+            let input_tokens = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let output_tokens = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            llm_suite_types::llm::TokenUsageStats {
+                prompt_tokens: input_tokens,
+                completion_tokens: output_tokens,
+                total_tokens: input_tokens + output_tokens,
+                reasoning_tokens: u
+                    .get("output_tokens_details")
+                    .and_then(|d| d.get("reasoning_tokens"))
+                    .and_then(|v| v.as_u64())
+                    .map(|r| r as u32),
+                cache_read_tokens: u
+                    .get("input_tokens_details")
+                    .and_then(|d| d.get("cached_tokens"))
+                    .and_then(|v| v.as_u64())
+                    .map(|r| r as u32),
+                cache_write_tokens: u
+                    .get("input_tokens_details")
+                    .and_then(|d| d.get("cache_write_tokens"))
+                    .and_then(|v| v.as_u64())
+                    .map(|r| r as u32),
+                prompt_tokens_cost: None,
+                completion_tokens_cost: None,
+                total_cost: None,
+            }
+        });
+
+        let message = llm_suite_types::message::Message {
+            id: llm_suite_types::Id::new(),
+            role: llm_suite_types::message::MessageRole::Assistant,
+            content: llm_suite_types::message::MessageContentValue::Text(
+                content.clone().unwrap_or_default(),
+            ),
+            timestamp: llm_suite_common::time::now(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: tool_calls.clone(),
+            thinking: None,
+            thinking_signature: None,
+            metadata: None,
+        };
+
+        // Provider-native value passed through untouched (`completed` /
+        // `incomplete`); never normalized here.
+        let finish_reason = json
+            .get("status")
+            .and_then(|s| s.as_str())
+            .map(String::from);
+
+        Ok(LlmResponseType {
+            id,
+            model,
+            content,
+            message,
+            tool_calls,
+            usage,
+            finish_reason,
+            duration: 0,
+            reasoning_content: None,
+            reasoning_signature: None,
+            reasoning_tokens: None,
+            metadata: None,
+            stream_stats: None,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn function_call_arguments_delta_and_done_share_index() {
+        let codec = OpenaiResponseCodec::new();
+
+        let delta = r#"{"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"city\":"}"#;
+        match codec.parse_stream_chunk(delta).expect("chunk must parse") {
+            Some(MessageStreamEvent::ToolCallDelta(d)) => {
+                assert_eq!(d.index, 0);
+                assert_eq!(d.arguments.as_deref(), Some(r#"{"city":"#));
+                assert!(!d.is_snapshot);
+            }
+            other => panic!("expected ToolCallDelta, got {:?}", other),
+        }
+
+        let done = r#"{"type":"response.function_call.done","item":{"type":"function_call","id":"fc_1","name":"get_weather","arguments":"{\"city\":\"Beijing\"}"}}"#;
+        match codec.parse_stream_chunk(done).expect("chunk must parse") {
+            Some(MessageStreamEvent::ToolCallDelta(d)) => {
+                assert_eq!(d.index, 0, "fragments must land on the same call");
+                assert_eq!(d.id.as_deref(), Some("fc_1"));
+                assert_eq!(d.name.as_deref(), Some("get_weather"));
+                assert_eq!(d.arguments.as_deref(), Some(r#"{"city":"Beijing"}"#));
+                assert!(d.is_snapshot);
+            }
+            other => panic!("expected ToolCallDelta, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn stream_chunks_cover_text_completion_and_usage() {
+        let codec = OpenaiResponseCodec::new();
+
+        match codec
+            .parse_stream_chunk(r#"{"type":"response.output_text.delta","delta":"Hello "}"#)
+            .expect("text chunk parses")
+        {
+            Some(MessageStreamEvent::Text(t)) => assert_eq!(t.text, "Hello "),
+            other => panic!("expected Text, got {other:?}"),
+        }
+
+        match codec
+            .parse_stream_chunk(
+                r#"{"type":"response.completed","response":{"status":"completed"},"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15,"output_tokens_details":{"reasoning_tokens":2},"input_tokens_details":{"cached_tokens":3,"cache_write_tokens":4}}}"#,
+            )
+            .expect("completed chunk parses")
+        {
+            Some(MessageStreamEvent::Usage(u)) => {
+                assert_eq!(u.usage.prompt_tokens, 10);
+                assert_eq!(u.usage.completion_tokens, 5);
+                assert_eq!(u.usage.total_tokens, 15);
+                assert_eq!(u.usage.reasoning_tokens, Some(2));
+                assert_eq!(u.usage.cache_read_tokens, Some(3));
+                assert_eq!(u.usage.cache_write_tokens, Some(4));
+            }
+            other => panic!("expected Usage, got {other:?}"),
+        }
+
+        match codec
+            .parse_stream_chunk(r#"{"type":"response.completed"}"#)
+            .expect("completed without usage parses")
+        {
+            Some(MessageStreamEvent::End(_)) => {}
+            other => panic!("expected End, got {other:?}"),
+        }
+
+        assert!(codec.parse_stream_chunk("").unwrap().is_none());
+        assert!(codec
+            .parse_stream_chunk(r#"{"type":"unknown"}"#)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn created_event_emits_stream_identity() {
+        let codec = OpenaiResponseCodec::new();
+        match codec
+            .parse_stream_chunk(
+                r#"{"type":"response.created","response":{"id":"resp_1","model":"gpt-4o"}}"#,
+            )
+            .expect("created chunk parses")
+        {
+            Some(MessageStreamEvent::Start(s)) => {
+                assert_eq!(s.id.as_deref(), Some("resp_1"));
+                assert_eq!(s.model.as_deref(), Some("gpt-4o"));
+            }
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multiple_call_deltas_get_distinct_indices() {
+        let codec = OpenaiResponseCodec::new();
+        let chunk = |id: &str| {
+            format!(
+                r#"{{"type":"response.function_call_arguments.delta","item_id":"{id}","delta":"x"}}"#
+            )
+        };
+        let i1 = match codec.parse_stream_chunk(&chunk("fc_a")).unwrap().unwrap() {
+            MessageStreamEvent::ToolCallDelta(d) => d.index,
+            other => panic!("expected ToolCallDelta, got {other:?}"),
+        };
+        let i2 = match codec.parse_stream_chunk(&chunk("fc_b")).unwrap().unwrap() {
+            MessageStreamEvent::ToolCallDelta(d) => d.index,
+            other => panic!("expected ToolCallDelta, got {other:?}"),
+        };
+        assert_ne!(i1, i2);
+        // Repeating the same item_id keeps its index.
+        let again = match codec.parse_stream_chunk(&chunk("fc_a")).unwrap().unwrap() {
+            MessageStreamEvent::ToolCallDelta(d) => d.index,
+            other => panic!("expected ToolCallDelta, got {other:?}"),
+        };
+        assert_eq!(again, i1);
+    }
+
+    #[test]
+    fn parse_response_extracts_text_output_and_usage() {
+        let codec = OpenaiResponseCodec::new();
+        let body = r#"{
+            "id": "resp_1",
+            "object": "response",
+            "model": "gpt-4o",
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "content": [{"type": "output_text", "text": "the answer"}]
+            }],
+            "usage": {
+                "input_tokens": 12,
+                "output_tokens": 8,
+                "total_tokens": 20,
+                "input_tokens_details": {"cached_tokens": 5, "cache_write_tokens": 2}
+            }
+        }"#;
+        let result = codec
+            .parse_response(
+                body,
+                &LlmRequest {
+                    profile_id: "p".to_string(),
+                    messages: Vec::new(),
+                    parameters: None,
+                    generation: None,
+                    tools: None,
+                    tool_call_protocol: None,
+                    locked_tool_call_protocol: None,
+                    violation_policy: None,
+                    execution_id: None,
+                    stream: None,
+                    dead_loop_detection: None,
+                    protocol_auto_converted: None,
+                    timeout_ms: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(result.content.as_deref(), Some("the answer"));
+        assert_eq!(result.finish_reason.as_deref(), Some("completed"));
+        assert_eq!(result.usage.as_ref().unwrap().total_tokens, 20);
+        assert_eq!(result.usage.as_ref().unwrap().cache_read_tokens, Some(5));
+        assert_eq!(result.usage.as_ref().unwrap().cache_write_tokens, Some(2));
+        assert_eq!(result.model, "gpt-4o");
+    }
+
+    #[test]
+    fn parse_response_extracts_function_calls() {
+        let codec = OpenaiResponseCodec::new();
+        let body = r#"{
+            "id": "resp_2",
+            "object": "response",
+            "model": "gpt-4o",
+            "status": "completed",
+            "output": [
+                {"type": "message", "content": [{"type": "output_text", "text": ""}]},
+                {"type": "function_call", "id": "fc_7", "call_id": "call_7", "name": "get_weather", "arguments": "{\"city\":\"Beijing\"}"}
+            ]
+        }"#;
+        let result = codec
+            .parse_response(
+                body,
+                &LlmRequest {
+                    profile_id: "p".to_string(),
+                    messages: Vec::new(),
+                    parameters: None,
+                    generation: None,
+                    tools: None,
+                    tool_call_protocol: None,
+                    locked_tool_call_protocol: None,
+                    violation_policy: None,
+                    execution_id: None,
+                    stream: None,
+                    dead_loop_detection: None,
+                    protocol_auto_converted: None,
+                    timeout_ms: None,
+                },
+            )
+            .unwrap();
+        let calls = result.tool_calls.as_ref().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "fc_7");
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[0].function.arguments, r#"{"city":"Beijing"}"#);
+    }
+
+    #[test]
+    fn parse_response_keeps_message_text_when_function_call_follows() {
+        let codec = OpenaiResponseCodec::new();
+        let body = r#"{
+            "id": "resp_4",
+            "object": "response",
+            "model": "gpt-4o",
+            "status": "completed",
+            "output": [
+                {"type": "message", "content": [{"type": "output_text", "text": "thinking aloud"}]},
+                {"type": "function_call", "id": "fc_9", "call_id": "call_9", "name": "get_weather", "arguments": "{\"city\":\"Beijing\"}"}
+            ]
+        }"#;
+        let result = codec
+            .parse_response(
+                body,
+                &LlmRequest {
+                    profile_id: "p".to_string(),
+                    messages: Vec::new(),
+                    parameters: None,
+                    generation: None,
+                    tools: None,
+                    tool_call_protocol: None,
+                    locked_tool_call_protocol: None,
+                    violation_policy: None,
+                    execution_id: None,
+                    stream: None,
+                    dead_loop_detection: None,
+                    protocol_auto_converted: None,
+                    timeout_ms: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(result.content.as_deref(), Some("thinking aloud"));
+        assert_eq!(
+            result.tool_calls.as_ref().unwrap()[0].function.name,
+            "get_weather"
+        );
+    }
+
+    #[test]
+    fn parse_response_tolerates_empty_output() {
+        let codec = OpenaiResponseCodec::new();
+        let body = r#"{"id":"resp_3","object":"response","model":"gpt-4o","status":"incomplete"}"#;
+        let result = codec
+            .parse_response(
+                body,
+                &LlmRequest {
+                    profile_id: "p".to_string(),
+                    messages: Vec::new(),
+                    parameters: None,
+                    generation: None,
+                    tools: None,
+                    tool_call_protocol: None,
+                    locked_tool_call_protocol: None,
+                    violation_policy: None,
+                    execution_id: None,
+                    stream: None,
+                    dead_loop_detection: None,
+                    protocol_auto_converted: None,
+                    timeout_ms: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(result.content, None);
+        assert_eq!(result.tool_calls, None);
+        assert_eq!(result.usage, None);
+    }
+
+    fn count_profile() -> LlmProfile {
+        LlmProfile {
+            id: "p1".to_string(),
+            name: "test".to_string(),
+            format: llm_suite_types::llm::LlmFormat::OpenaiResponse,
+            provider_id: None,
+            model: "gpt-4o".to_string(),
+            api_key: Some("sk-test".to_string()),
+            base_url: None,
+            parameters: None,
+            generation: None,
+            timeout: None,
+            max_retries: None,
+            retry_delay: None,
+            headers: None,
+            metadata: None,
+            tool_call_protocol: None,
+            auth_type: None,
+            custom_headers: None,
+            custom_body: None,
+            custom_body_enabled: None,
+            query_params: None,
+            stream_options: None,
+            prompt_caching: None,
+            context_window_size: None,
+            proxy: None,
+            no_proxy: None,
+            circuit_breaker: None,
+        }
+    }
+
+    fn count_request() -> LlmRequest {
+        LlmRequest {
+            profile_id: "p1".to_string(),
+            messages: vec![llm_suite_types::message::Message {
+                id: llm_suite_types::Id::new(),
+                role: llm_suite_types::message::MessageRole::User,
+                content: llm_suite_types::message::MessageContentValue::Text("hello".to_string()),
+                timestamp: 0,
+                tool_call_id: None,
+                tool_name: None,
+                tool_calls: None,
+                thinking: None,
+                thinking_signature: None,
+                metadata: None,
+            }],
+            parameters: None,
+            generation: None,
+            tools: None,
+            tool_call_protocol: None,
+            locked_tool_call_protocol: None,
+            violation_policy: None,
+            execution_id: None,
+            stream: None,
+            dead_loop_detection: None,
+            protocol_auto_converted: None,
+            timeout_ms: None,
+        }
+    }
+
+    fn request_body(req: &reqwest::Request) -> serde_json::Value {
+        req.body()
+            .unwrap()
+            .as_bytes()
+            .map(|b| serde_json::from_slice(b).unwrap())
+            .unwrap()
+    }
+
+    #[test]
+    fn rich_image_blocks_map_to_input_image_parts() {
+        let codec = OpenaiResponseCodec::new();
+        let req = LlmRequest {
+            profile_id: "p1".to_string(),
+            messages: vec![llm_suite_types::message::Message {
+                id: llm_suite_types::Id::new(),
+                role: llm_suite_types::message::MessageRole::User,
+                content: llm_suite_types::message::MessageContentValue::Rich(vec![
+                    llm_suite_types::message::MessageContent::Text {
+                        text: "describe".to_string(),
+                    },
+                    llm_suite_types::message::MessageContent::ImageUrl {
+                        image_url: llm_suite_types::message::ImageUrlContent {
+                            url: "https://example.com/a.png".to_string(),
+                            detail: Some("auto".to_string()),
+                        },
+                    },
+                ]),
+                timestamp: 0,
+                tool_call_id: None,
+                tool_name: None,
+                tool_calls: None,
+                thinking: None,
+                thinking_signature: None,
+                metadata: None,
+            }],
+            parameters: None,
+            generation: None,
+            tools: None,
+            tool_call_protocol: None,
+            locked_tool_call_protocol: None,
+            violation_policy: None,
+            execution_id: None,
+            stream: None,
+            dead_loop_detection: None,
+            protocol_auto_converted: None,
+            timeout_ms: None,
+        };
+        let entries = codec.convert_messages(&req.messages);
+        let parts = entries[0]["content"].as_array().expect("content array");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["type"], "input_text");
+        assert_eq!(parts[0]["text"], "describe");
+        assert_eq!(parts[1]["type"], "input_image");
+        assert_eq!(parts[1]["image_url"], "https://example.com/a.png");
+        assert_eq!(parts[1]["detail"], "auto");
+    }
+
+    #[test]
+    fn count_tokens_request_targets_input_tokens_endpoint() {
+        let codec = OpenaiResponseCodec::new();
+        let req = codec
+            .build_count_tokens_request(&count_request(), &count_profile())
+            .expect("count request must build")
+            .expect("responses provider supports counting");
+        assert_eq!(
+            req.url().as_str(),
+            "https://api.openai.com/v1/responses/input_tokens"
+        );
+        assert_eq!(
+            req.headers().get("Authorization").unwrap(),
+            "Bearer sk-test"
+        );
+        let body = request_body(&req);
+        assert_eq!(body["model"], serde_json::json!("gpt-4o"));
+        assert_eq!(body["input"][0]["content"], serde_json::json!("hello"));
+        assert!(
+            body.get("stream").is_none(),
+            "count body must not carry stream flags"
+        );
+    }
+
+    #[test]
+    fn count_tokens_body_carries_native_tools() {
+        let codec = OpenaiResponseCodec::new();
+        let mut req = count_request();
+        req.tool_call_protocol = Some(llm_suite_types::llm::ToolCallProtocol::Native);
+        req.tools = Some(vec![serde_json::from_value(serde_json::json!({
+            "name": "get_weather",
+            "description": "Get weather",
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }))
+        .unwrap()]);
+        let body = codec
+            .build_count_tokens_body(&req, &count_profile())
+            .unwrap();
+        assert_eq!(
+            body["tools"][0]["function"]["name"],
+            serde_json::json!("get_weather")
+        );
+    }
+
+    #[test]
+    fn count_tokens_body_text_mode_inlines_tools_into_system() {
+        let codec = OpenaiResponseCodec::new();
+        let mut req = count_request();
+        req.messages.insert(
+            0,
+            llm_suite_types::message::Message {
+                id: llm_suite_types::Id::new(),
+                role: llm_suite_types::message::MessageRole::System,
+                content: llm_suite_types::message::MessageContentValue::Text(
+                    "You are a helper".to_string(),
+                ),
+                timestamp: 0,
+                tool_call_id: None,
+                tool_name: None,
+                tool_calls: None,
+                thinking: None,
+                thinking_signature: None,
+                metadata: None,
+            },
+        );
+        req.tool_call_protocol = Some(llm_suite_types::llm::ToolCallProtocol::Xml);
+        req.tools = Some(vec![serde_json::from_value(serde_json::json!({
+            "name": "get_weather",
+            "description": "Get weather",
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }))
+        .unwrap()]);
+        let body = codec
+            .build_count_tokens_body(&req, &count_profile())
+            .unwrap();
+        assert!(
+            body.get("tools").is_none(),
+            "text mode must not send native tools"
+        );
+        let system = body["input"][0]["content"].as_str().unwrap();
+        assert!(system.contains("get_weather"), "system must declare tools");
+    }
+
+    #[test]
+    fn count_tokens_response_parses_input_tokens() {
+        let codec = OpenaiResponseCodec::new();
+        let body: serde_json::Value =
+            serde_json::from_str(r#"{"object":"response.input_tokens","input_tokens":13}"#)
+                .unwrap();
+        assert_eq!(codec.parse_count_tokens_response(&body).unwrap(), 13);
+        let empty: serde_json::Value = serde_json::from_str("{}").unwrap();
+        assert_eq!(codec.parse_count_tokens_response(&empty).unwrap(), 0);
+    }
+}

@@ -1,0 +1,36 @@
+[package]
+name = "llm-suite-gateway"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Request routing gateway for LLM clients"
+
+[features]
+default = []
+# Mock-client routing for tests; forwards to llm-client's mock feature.
+mock = ["llm-suite-client/mock"]
+
+[dependencies]
+llm-suite-client = { version = "0.1.0", path = "../llm-suite-client" }
+llm-suite-codec = { version = "0.1.0", path = "../llm-suite-codec" }
+llm-suite-common = { version = "0.1.0", path = "../llm-suite-common" }
+llm-suite-config = { version = "0.1.0", path = "../llm-suite-config" }
+llm-suite-message = { version = "0.1.0", path = "../llm-suite-message" }
+llm-suite-proxy = { version = "0.1.0", path = "../llm-suite-proxy" }
+llm-suite-types = { version = "0.1.0", path = "../llm-suite-types" }
+dashmap = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+llm-suite-client = { version = "0.1.0", path = "../llm-suite-client", features = ["mock"] }
+
+# `mock_routing_integration` uses `LlmGateway::register_mock`, which only
+# exists under the `mock` feature; skip the test target otherwise.
+[[test]]
+name = "mock_routing_integration"
+required-features = ["mock"]

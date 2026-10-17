@@ -1,0 +1,285 @@
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum LlmError {
+    #[error("HTTP request failed: {0}")]
+    HttpError(#[from] reqwest::Error),
+
+    #[error("JSON serialization error: {0}")]
+    SerializationError(#[from] serde_json::Error),
+
+    #[error("Provider error: {message}")]
+    ProviderError {
+        status: Option<u16>,
+        message: String,
+        /// Parsed `Retry-After` for 429 responses; `None` when absent.
+        retry_after_ms: Option<u64>,
+    },
+
+    /// The provider rejected the request because the actual payload exceeds
+    /// its context window (anthropic `context_length_exceeded`, openai
+    /// `context_length_exceeded` / "maximum context length", ...). This is
+    /// the safety-net trigger for forced compression events when local
+    /// estimation undercounted.
+    #[error("Context length exceeded: {0}")]
+    ContextLengthExceeded(String),
+
+    #[error("Invalid configuration: {0}")]
+    ConfigError(String),
+
+    #[error("Stream error: {0}")]
+    StreamError(String),
+
+    #[error("Profile not found: {0}")]
+    ProfileNotFound(String),
+
+    #[error("Unsupported format: {0:?}")]
+    UnsupportedFormat(llm_suite_types::llm::LlmFormat),
+
+    #[error("Codec not registered for format: {0}")]
+    CodecNotFound(String),
+
+    #[error("Request timed out after {0}ms")]
+    Timeout(u64),
+
+    #[error("Authentication failed: {0}")]
+    AuthError(String),
+
+    #[error("Tool not found: {0}")]
+    ToolNotFound(String),
+
+    #[error("Invalid response format: {0}")]
+    InvalidResponse(String),
+
+    #[error("Request was cancelled")]
+    Cancelled,
+
+    /// The provider returned 429. `retry_after_ms` carries the parsed
+    /// `Retry-After` header when present.
+    #[error("Rate limited by provider (retry after {}ms)", retry_after_ms.unwrap_or(0))]
+    RateLimited { retry_after_ms: Option<u64> },
+
+    /// The circuit breaker for this endpoint is open; requests are rejected
+    /// until the breaker transitions to half-open.
+    #[error("Circuit breaker is open")]
+    CircuitOpen,
+
+    /// Establishing or using the configured proxy failed.
+    #[error("Proxy error: {0}")]
+    ProxyError(String),
+}
+
+impl LlmError {
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            LlmError::HttpError(e) => e.is_timeout() || e.is_connect() || e.is_request(),
+            // Retryability comes from the structured status, never from
+            // parsing the message text.
+            LlmError::ProviderError { status, .. } => matches!(status, Some(429) | Some(500..=599)),
+            LlmError::Timeout(_) | LlmError::StreamError(_) | LlmError::RateLimited { .. } => true,
+            LlmError::CircuitOpen | LlmError::ProxyError(_) => false,
+            LlmError::Cancelled
+            | LlmError::SerializationError(_)
+            | LlmError::ConfigError(_)
+            | LlmError::ProfileNotFound(_)
+            | LlmError::UnsupportedFormat(_)
+            | LlmError::CodecNotFound(_)
+            | LlmError::AuthError(_)
+            | LlmError::ToolNotFound(_)
+            | LlmError::InvalidResponse(_)
+            | LlmError::ContextLengthExceeded(_) => false,
+        }
+    }
+
+    /// Classify an error as a context-length-exceeded rejection of the
+    /// *actual* request payload. Matches the format error codes across the
+    /// supported formats (anthropic `context_length_exceeded`, openai
+    /// `context_length_exceeded` / "maximum context length").
+    pub fn is_context_length_exceeded(&self) -> bool {
+        fn matches(msg: &str) -> bool {
+            msg.contains("context_length_exceeded")
+                || msg.contains("maximum context length")
+                || msg.contains("context length exceeded")
+                || msg.contains("Context length exceeded")
+        }
+        match self {
+            LlmError::ContextLengthExceeded(_) => true,
+            LlmError::ProviderError { message, .. } | LlmError::StreamError(message) => {
+                matches(message)
+            }
+            _ => false,
+        }
+    }
+}
+
+pub type LlmResult<T> = Result<T, LlmError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use llm_suite_types::llm::LlmFormat;
+
+    async fn http_err() -> reqwest::Error {
+        // A real reqwest error from an impossible request (port 1, no HTTP).
+        // The client-level timeout bounds the call: on some environments a
+        // connect to a closed port hangs instead of being refused instantly.
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(1))
+            .build()
+            .expect("client must build");
+        let request = client
+            .request(reqwest::Method::GET, "http://127.0.0.1:1")
+            .build()
+            .expect("request must build");
+        client
+            .execute(request)
+            .await
+            .expect_err("connection must be refused")
+    }
+
+    #[test]
+    fn provider_5xx_is_retryable() {
+        for status in [500, 503, 429] {
+            assert!(
+                LlmError::ProviderError {
+                    status: Some(status),
+                    message: "boom".to_string(),
+                    retry_after_ms: None,
+                }
+                .is_retryable(),
+                "status {status} must be retryable"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_4xx_is_not_retryable() {
+        for status in [400, 401, 404] {
+            assert!(
+                !LlmError::ProviderError {
+                    status: Some(status),
+                    message: "bad".to_string(),
+                    retry_after_ms: None,
+                }
+                .is_retryable(),
+                "status {status} must not be retryable"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_error_without_status_is_not_retryable() {
+        assert!(!LlmError::ProviderError {
+            status: None,
+            message: "500 internal".to_string(),
+            retry_after_ms: None,
+        }
+        .is_retryable());
+    }
+
+    #[test]
+    fn timeout_and_stream_errors_are_retryable() {
+        assert!(LlmError::Timeout(5000).is_retryable());
+        assert!(LlmError::StreamError("stream reset".to_string()).is_retryable());
+    }
+
+    #[test]
+    fn non_retryable_variants() {
+        for err in [
+            LlmError::SerializationError(
+                serde_json::from_str::<serde_json::Value>("{").unwrap_err(),
+            ),
+            LlmError::ConfigError("bad".to_string()),
+            LlmError::ProfileNotFound("p".to_string()),
+            LlmError::UnsupportedFormat(LlmFormat::Custom("x".to_string())),
+            LlmError::CodecNotFound("x".to_string()),
+            LlmError::AuthError("denied".to_string()),
+            LlmError::ToolNotFound("t".to_string()),
+            LlmError::InvalidResponse("bad body".to_string()),
+            LlmError::ContextLengthExceeded("too long".to_string()),
+            LlmError::Cancelled,
+        ] {
+            assert!(!err.is_retryable(), "must not retry: {err:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn http_connect_errors_are_retryable() {
+        let err = LlmError::HttpError(http_err().await);
+        assert!(err.is_retryable(), "connect errors must be retryable");
+    }
+
+    #[test]
+    fn explicit_context_length_exceeded_is_detected() {
+        assert!(LlmError::ContextLengthExceeded("nope".to_string()).is_context_length_exceeded());
+    }
+
+    #[test]
+    fn rate_limited_is_retryable_and_carryes_retry_after() {
+        let err = LlmError::RateLimited {
+            retry_after_ms: Some(1500),
+        };
+        assert!(err.is_retryable(), "429 must be retryable");
+        assert!(matches!(
+            err,
+            LlmError::RateLimited {
+                retry_after_ms: Some(1500)
+            }
+        ));
+        let bare = LlmError::RateLimited {
+            retry_after_ms: None,
+        };
+        assert!(bare.is_retryable());
+    }
+
+    #[test]
+    fn circuit_open_is_not_retryable() {
+        assert!(!LlmError::CircuitOpen.is_retryable());
+    }
+
+    #[test]
+    fn proxy_error_is_not_retryable() {
+        assert!(!LlmError::ProxyError("connect refused".to_string()).is_retryable());
+    }
+
+    #[test]
+    fn new_variants_are_not_context_length() {
+        assert!(!LlmError::RateLimited {
+            retry_after_ms: None
+        }
+        .is_context_length_exceeded());
+        assert!(!LlmError::CircuitOpen.is_context_length_exceeded());
+        assert!(!LlmError::ProxyError("x".to_string()).is_context_length_exceeded());
+    }
+
+    #[test]
+    fn provider_messages_classify_as_context_length() {
+        for msg in [
+            "Error: context_length_exceeded",
+            "This model's maximum context length is 200000",
+            "context length exceeded while processing the request",
+            "Context length exceeded: the request exceeds the limit",
+        ] {
+            let err = LlmError::ProviderError {
+                status: Some(400),
+                message: msg.to_string(),
+                retry_after_ms: None,
+            };
+            assert!(err.is_context_length_exceeded(), "must classify: {msg}");
+        }
+        let err = LlmError::StreamError("stream failed with context_length_exceeded".to_string());
+        assert!(err.is_context_length_exceeded());
+    }
+
+    #[test]
+    fn unrelated_messages_are_not_context_length() {
+        let err = LlmError::ProviderError {
+            status: Some(429),
+            message: "rate limit".to_string(),
+            retry_after_ms: None,
+        };
+        assert!(!err.is_context_length_exceeded());
+        assert!(!LlmError::Timeout(100).is_context_length_exceeded());
+        assert!(!LlmError::AuthError("denied".to_string()).is_context_length_exceeded());
+    }
+}

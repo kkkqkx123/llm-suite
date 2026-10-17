@@ -1,0 +1,27 @@
+[package]
+name = "llm-suite-codec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Provider codec layer for llm-suite"
+
+[dependencies]
+llm-suite-tool-call = { version = "0.1.0", path = "../llm-suite-tool-call", features = ["json-partial", "xml"] }
+llm-suite-token = { version = "0.1.0", path = "../llm-suite-token" }
+llm-suite-message = { version = "0.1.0", path = "../llm-suite-message" }
+llm-suite-types = { version = "0.1.0", path = "../llm-suite-types" }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+dashmap = { workspace = true }
+regex = { workspace = true }
+llm-suite-common = { version = "0.1.0", path = "../llm-suite-common" }
+reqwest = { workspace = true }
+tracing = { workspace = true }
+
+tokio = { workspace = true }
+
+[dev-dependencies]

@@ -84,7 +84,7 @@
 
 ```toml
 [dependencies]
-llm-gateway = { path = "crates/llm-gateway" }
+llm-gateway = { path = "crates/llm-suite-gateway" }
 ```
 
 构建项目：

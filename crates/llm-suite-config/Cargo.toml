@@ -1,0 +1,19 @@
+[package]
+name = "llm-suite-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Configuration and provider registry for llm-suite"
+
+[dependencies]
+llm-suite-codec = { version = "0.1.0", path = "../llm-suite-codec" }
+llm-suite-types = { version = "0.1.0", path = "../llm-suite-types" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+dashmap = { workspace = true }
+llm-suite-common = { version = "0.1.0", path = "../llm-suite-common" }
+thiserror = { workspace = true }
+tracing = { workspace = true }

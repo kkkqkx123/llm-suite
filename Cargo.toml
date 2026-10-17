@@ -1,19 +1,19 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/llm-common",
-    "crates/llm-types",
-    "crates/llm-embedding",
-    "crates/llm-chat-basic",
-    "crates/llm-rerank",
-    "crates/llm-tool-call",
-    "crates/llm-token",
-    "crates/llm-message",
-    "crates/llm-codec",
-    "crates/llm-client",
-    "crates/llm-config",
-    "crates/llm-gateway",
-    "crates/llm-proxy",
+    "crates/llm-suite-common",
+    "crates/llm-suite-types",
+    "crates/llm-suite-embedding",
+    "crates/llm-suite-chat-basic",
+    "crates/llm-suite-rerank",
+    "crates/llm-suite-tool-call",
+    "crates/llm-suite-token",
+    "crates/llm-suite-message",
+    "crates/llm-suite-codec",
+    "crates/llm-suite-client",
+    "crates/llm-suite-config",
+    "crates/llm-suite-gateway",
+    "crates/llm-suite-proxy",
 ]
 
 [workspace.package]

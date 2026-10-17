@@ -1,0 +1,34 @@
+[package]
+name = "llm-suite-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Unified LLM client abstraction"
+
+[features]
+default = []
+# Scripted mock client and bare-TCP HTTP mock for tests.
+mock = []
+
+[dependencies]
+llm-suite-codec = { version = "0.1.0", path = "../llm-suite-codec" }
+llm-suite-token = { version = "0.1.0", path = "../llm-suite-token" }
+llm-suite-message = { version = "0.1.0", path = "../llm-suite-message" }
+llm-suite-tool-call = { version = "0.1.0", path = "../llm-suite-tool-call", features = ["json-partial"] }
+llm-suite-types = { version = "0.1.0", path = "../llm-suite-types" }
+llm-suite-common = { version = "0.1.0", path = "../llm-suite-common" }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+eventsource-stream = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+regex = { workspace = true }

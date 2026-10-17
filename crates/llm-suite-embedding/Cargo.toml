@@ -1,0 +1,30 @@
+[package]
+name = "llm-suite-embedding"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Embedding client for LLM providers"
+
+[features]
+default = []
+# Feature-gated mock provider for tests.
+mock = []
+
+[dependencies]
+llm-suite-common = { version = "0.1.0", path = "../llm-suite-common" }
+llm-suite-proxy = { version = "0.1.0", path = "../llm-suite-proxy" }
+llm-suite-types = { version = "0.1.0", path = "../llm-suite-types" }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+async-trait = { workspace = true }
