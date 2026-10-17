@@ -752,6 +752,8 @@ mod tests {
                     dead_loop_detection: None,
                     protocol_auto_converted: None,
                     timeout_ms: None,
+                    prompt_caching: None,
+                    cached_content: None,
                 },
             )
             .unwrap();
@@ -793,6 +795,8 @@ mod tests {
                     dead_loop_detection: None,
                     protocol_auto_converted: None,
                     timeout_ms: None,
+                    prompt_caching: None,
+                    cached_content: None,
                 },
             )
             .unwrap();
@@ -833,6 +837,8 @@ mod tests {
                     dead_loop_detection: None,
                     protocol_auto_converted: None,
                     timeout_ms: None,
+                    prompt_caching: None,
+                    cached_content: None,
                 },
             )
             .unwrap();
@@ -864,6 +870,8 @@ mod tests {
                     dead_loop_detection: None,
                     protocol_auto_converted: None,
                     timeout_ms: None,
+                    prompt_caching: None,
+                    cached_content: None,
                 },
             )
             .unwrap();
@@ -929,6 +937,8 @@ mod tests {
             dead_loop_detection: None,
             protocol_auto_converted: None,
             timeout_ms: None,
+            prompt_caching: None,
+            cached_content: None,
         }
     }
 
@@ -978,6 +988,8 @@ mod tests {
             dead_loop_detection: None,
             protocol_auto_converted: None,
             timeout_ms: None,
+            prompt_caching: None,
+            cached_content: None,
         };
         let entries = codec.convert_messages(&req.messages);
         let parts = entries[0]["content"].as_array().expect("content array");

@@ -63,4 +63,14 @@ pub struct LlmRequest {
     /// falls back to the profile-level per-attempt timeout only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    /// Per-request prompt-caching override (currently honored by the
+    /// Anthropic codec). When present it wins over `LlmProfile.prompt_caching`,
+    /// including explicitly disabling caching for a caching profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_caching: Option<super::profile::LlmRequestCaching>,
+    /// Gemini-native `cachedContent` resource name (e.g.
+    /// `"cachedContents/abc123"`) referencing a pre-built context cache.
+    /// Honored by the Gemini native codec; ignored by other codecs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_content: Option<String>,
 }

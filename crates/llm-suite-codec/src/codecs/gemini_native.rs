@@ -488,6 +488,12 @@ impl GeminiNativeCodec {
             }
         }
 
+        // Explicit context-cache reference (Gemini `cachedContent` resource
+        // created via the caches API). Sent as-is at the top level.
+        if let Some(cached_content) = &request.cached_content {
+            body["cachedContent"] = serde_json::json!(cached_content);
+        }
+
         super::shared::apply_custom_body(&mut body, profile);
 
         Ok(body)
@@ -803,7 +809,27 @@ mod tests {
             dead_loop_detection: None,
             protocol_auto_converted: None,
             timeout_ms: None,
+            prompt_caching: None,
+            cached_content: None,
         }
+    }
+
+    #[test]
+    fn cached_content_reference_is_forwarded() {
+        let codec = GeminiNativeCodec::new();
+        let mut req = request(
+            vec![msg(llm_suite_types::message::MessageRole::User, "Hi")],
+            None,
+        );
+        req.cached_content = Some("cachedContents/abc123".to_string());
+        let body = codec.build_body(&req, &profile()).expect("must build");
+        assert_eq!(body["cachedContent"], serde_json::json!("cachedContents/abc123"));
+
+        // Absent by default: no key is emitted.
+        let plain = codec
+            .build_body(&request(vec![], None), &profile())
+            .expect("must build");
+        assert!(plain.get("cachedContent").is_none());
     }
 
     #[test]

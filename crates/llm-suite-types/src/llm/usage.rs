@@ -11,6 +11,12 @@ pub struct TokenUsageStats {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_read_tokens: Option<u32>,
     /// Cache-write input tokens (provider `cache_creation_input_tokens`).
+    ///
+    /// Note: `cache_write_tokens` is **not** part of the official OpenAI API
+    /// (`PromptTokensDetails` only carries `cached_tokens`); the key is
+    /// honored as an extension for OpenAI-compatible gateways. Official
+    /// OpenAI endpoints never populate it, and the Gemini codec leaves it
+    /// `None` (Gemini does not report cache-write counts).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_write_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]

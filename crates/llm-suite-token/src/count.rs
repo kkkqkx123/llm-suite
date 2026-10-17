@@ -257,6 +257,8 @@ mod tests {
             dead_loop_detection: None,
             protocol_auto_converted: None,
             timeout_ms: None,
+            prompt_caching: None,
+            cached_content: None,
         };
         // system: 13 letters * 0.25 + 3 spaces * 0.5 = 4.75 -> 5 + 4 = 9;
         // user: 2 + 4 = 6; total 15

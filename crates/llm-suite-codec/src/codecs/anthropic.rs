@@ -2,9 +2,10 @@ use super::LlmCodec;
 use crate::codecs::helpers::{resolve_image_payload, ResolvedImage};
 use crate::error::{LlmError, LlmResult};
 use llm_suite_types::llm::{
-    LlmProfile, LlmPromptCaching, LlmRequest, LlmResult as LlmResponseType, MessageStreamEnd,
-    MessageStreamError, MessageStreamEvent, MessageStreamReasoning, MessageStreamStart,
-    MessageStreamText, MessageStreamToolCallDelta, MessageStreamUsage, TokenUsageStats,
+    LlmProfile, LlmPromptCaching, LlmRequest, LlmResult as LlmResponseType,
+    MessageStreamEnd, MessageStreamError, MessageStreamEvent, MessageStreamReasoning,
+    MessageStreamStart, MessageStreamText, MessageStreamToolCallDelta, MessageStreamUsage,
+    TokenUsageStats,
 };
 use llm_suite_types::message::{Message, MessageContent, MessageContentValue, MessageRole};
 use llm_suite_types::tool::{Tool, ToolParameterSchema};
@@ -96,7 +97,17 @@ impl AnthropicCodec {
 
         super::shared::apply_custom_body(&mut body, profile);
 
-        if let Some(caching) = &profile.prompt_caching {
+        // Per-request override wins over the profile-level decision,
+        // including explicitly disabling caching for a caching profile.
+        let request_caching = request.prompt_caching.as_ref().map(|c| LlmPromptCaching {
+            ttl: c.ttl.clone(),
+        });
+        let caching: Option<&LlmPromptCaching> = match &request.prompt_caching {
+            Some(req) if !req.enabled => None,
+            Some(_) => request_caching.as_ref(),
+            None => profile.prompt_caching.as_ref(),
+        };
+        if let Some(caching) = caching {
             Self::apply_prompt_caching(&mut body, caching);
         }
 
@@ -962,6 +973,7 @@ impl AnthropicCodec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use llm_suite_types::llm::LlmRequestCaching;
 
     #[test]
     fn content_block_start_tool_use_emits_name_and_id() {
@@ -1060,6 +1072,8 @@ mod tests {
             dead_loop_detection: None,
             protocol_auto_converted: None,
             timeout_ms: None,
+            prompt_caching: None,
+            cached_content: None,
         }
     }
 
@@ -1774,6 +1788,86 @@ mod tests {
         assert!(body["messages"][0]["content"][0]
             .get("cache_control")
             .is_none());
+    }
+
+    #[test]
+    fn request_override_enables_caching_without_profile_setting() {
+        let codec = AnthropicCodec::new();
+        let mut req = request(
+            vec![
+                msg(llm_suite_types::message::MessageRole::System, "You are a helper"),
+                msg(llm_suite_types::message::MessageRole::User, "Hi"),
+            ],
+            None,
+        );
+        req.prompt_caching = Some(LlmRequestCaching {
+            enabled: true,
+            ttl: Some("1h".to_string()),
+        });
+        let body = codec
+            .build_body(&req, &profile())
+            .expect("must build");
+        let control = serde_json::json!({"type": "ephemeral", "ttl": "1h"});
+        assert_eq!(body["system"][0]["cache_control"], control);
+        assert_eq!(
+            body["messages"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap()["content"][0]["cache_control"],
+            control
+        );
+    }
+
+    #[test]
+    fn request_override_disables_profile_caching() {
+        let codec = AnthropicCodec::new();
+        let mut req = request(
+            vec![
+                msg(llm_suite_types::message::MessageRole::System, "You are a helper"),
+                msg(llm_suite_types::message::MessageRole::User, "Hi"),
+            ],
+            None,
+        );
+        req.prompt_caching = Some(LlmRequestCaching {
+            enabled: false,
+            ttl: None,
+        });
+        let mut caching_profile = profile();
+        caching_profile.prompt_caching = Some(LlmPromptCaching { ttl: None });
+        let body = codec
+            .build_body(&req, &caching_profile)
+            .expect("must build");
+        // System stays in the plain-string form (no block-array upgrade).
+        assert_eq!(body["system"], serde_json::json!("You are a helper"));
+        assert!(body["messages"][0]["content"][0]
+            .get("cache_control")
+            .is_none());
+    }
+
+    #[test]
+    fn request_override_ttl_wins_over_profile() {
+        let codec = AnthropicCodec::new();
+        let mut req = request(
+            vec![
+                msg(llm_suite_types::message::MessageRole::System, "You are a helper"),
+                msg(llm_suite_types::message::MessageRole::User, "Hi"),
+            ],
+            None,
+        );
+        req.prompt_caching = Some(LlmRequestCaching {
+            enabled: true,
+            ttl: Some("5m".to_string()),
+        });
+        let mut caching_profile = profile();
+        caching_profile.prompt_caching = Some(LlmPromptCaching {
+            ttl: Some("1h".to_string()),
+        });
+        let body = codec
+            .build_body(&req, &caching_profile)
+            .expect("must build");
+        let control = serde_json::json!({"type": "ephemeral", "ttl": "5m"});
+        assert_eq!(body["system"][0]["cache_control"], control);
     }
 
     #[test]

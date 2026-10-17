@@ -20,6 +20,20 @@ pub struct LlmPromptCaching {
     pub ttl: Option<String>,
 }
 
+/// Per-request prompt-caching override carried on `LlmRequest`.
+///
+/// When present it replaces the profile-level `prompt_caching` decision for
+/// that single request — including explicitly disabling caching for a profile
+/// that enables it. Currently honored by the Anthropic codec.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LlmRequestCaching {
+    /// Enable or disable prompt caching for this request.
+    pub enabled: bool,
+    /// Cache entry time-to-live: `"5m"` (provider default) or `"1h"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LlmProfile {
     pub id: String,

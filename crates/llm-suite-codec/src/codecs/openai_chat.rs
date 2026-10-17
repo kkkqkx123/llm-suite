@@ -247,6 +247,8 @@ mod tests {
             dead_loop_detection: None,
             protocol_auto_converted: None,
             timeout_ms: None,
+            prompt_caching: None,
+            cached_content: None,
         }
     }
 
@@ -321,6 +323,20 @@ mod tests {
             .build_body(&request_with_format(ToolCallProtocol::Native), &p)
             .unwrap();
         assert_eq!(body["custom_field"]["nested"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn prompt_cache_key_passthrough_via_request_parameters() {
+        // OpenAI prompt caching is automatic; `prompt_cache_key` (cache
+        // routing hint) reaches the wire through the generic request
+        // `parameters` passthrough — no dedicated field needed.
+        let mut req = request_with_format(ToolCallProtocol::Native);
+        req.parameters = Some(serde_json::json!({"prompt_cache_key": "conv-42"}));
+        let codec = OpenaiChatCodec::new();
+        let body = codec
+            .build_body(&req, &profile())
+            .unwrap();
+        assert_eq!(body["prompt_cache_key"], serde_json::json!("conv-42"));
     }
 
     #[test]

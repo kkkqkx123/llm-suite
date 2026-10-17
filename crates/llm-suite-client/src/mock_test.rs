@@ -28,6 +28,8 @@ fn request(profile_id: &str, text: &str) -> LlmRequest {
         dead_loop_detection: None,
         protocol_auto_converted: None,
         timeout_ms: None,
+        prompt_caching: None,
+        cached_content: None,
     }
 }
 
