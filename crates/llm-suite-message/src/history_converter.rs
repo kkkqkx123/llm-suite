@@ -212,6 +212,7 @@ mod tests {
         LlmToolCall {
             id: id.to_string(),
             r#type: "function".to_string(),
+            call_id: None,
             function: llm_suite_types::message::LlmFunctionCall {
                 name: name.to_string(),
                 arguments: args.to_string(),

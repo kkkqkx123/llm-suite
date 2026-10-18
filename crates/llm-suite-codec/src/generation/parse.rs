@@ -389,8 +389,12 @@ pub fn parse_legacy_generation(value: &serde_json::Value) -> LlmGenerationParams
                 if let Some(summary) = reasoning_map.get("summary").and_then(|v| v.as_str()) {
                     let summary = match summary.to_ascii_lowercase().as_str() {
                         "auto" => Some(llm_suite_types::llm::generation::ReasoningSummary::Auto),
-                        "concise" => Some(llm_suite_types::llm::generation::ReasoningSummary::Concise),
-                        "detailed" => Some(llm_suite_types::llm::generation::ReasoningSummary::Detailed),
+                        "concise" => {
+                            Some(llm_suite_types::llm::generation::ReasoningSummary::Concise)
+                        }
+                        "detailed" => {
+                            Some(llm_suite_types::llm::generation::ReasoningSummary::Detailed)
+                        }
                         _ => None,
                     };
                     if let Some(summary) = summary {

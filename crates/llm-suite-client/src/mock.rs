@@ -138,6 +138,7 @@ impl LlmResponseSpec {
             reasoning_signature: self.reasoning_signature.clone(),
             reasoning_tokens: None,
             metadata: None,
+            refusal: None,
             stream_stats: None,
         }
     }
@@ -336,6 +337,7 @@ impl MockLlmClient {
                 reasoning_signature: None,
                 reasoning_tokens: None,
                 metadata: None,
+                refusal: None,
                 stream_stats: None,
             };
         }

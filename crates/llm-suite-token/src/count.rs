@@ -161,6 +161,7 @@ mod tests {
         msg.tool_calls = Some(vec![llm_suite_types::message::LlmToolCall {
             id: "call_1".to_string(),
             r#type: "function".to_string(),
+            call_id: None,
             function: llm_suite_types::message::LlmFunctionCall {
                 name: "get_weather".to_string(),
                 arguments: r#"{"city":"Beijing"}"#.to_string(),

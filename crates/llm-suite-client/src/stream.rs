@@ -424,6 +424,7 @@ impl MessageAccumulator {
                 Some(LlmToolCall {
                     id,
                     r#type: "function".to_string(),
+                    call_id: None,
                     function: LlmFunctionCall { name, arguments },
                 })
             })
@@ -541,7 +542,9 @@ mod tests {
             },
         ));
 
-        let final_event = acc.push(MessageStreamEvent::End(llm_suite_types::llm::MessageStreamEnd {}));
+        let final_event = acc.push(MessageStreamEvent::End(
+            llm_suite_types::llm::MessageStreamEnd {},
+        ));
         let MessageStreamEvent::FinalMessage(final_msg) = final_event.unwrap() else {
             panic!("expected FinalMessage");
         };
@@ -576,7 +579,9 @@ mod tests {
             },
         ));
 
-        let final_event = acc.push(MessageStreamEvent::End(llm_suite_types::llm::MessageStreamEnd {}));
+        let final_event = acc.push(MessageStreamEvent::End(
+            llm_suite_types::llm::MessageStreamEnd {},
+        ));
         let MessageStreamEvent::FinalMessage(final_msg) = final_event.unwrap() else {
             panic!("expected FinalMessage");
         };
@@ -612,7 +617,9 @@ mod tests {
             },
         }));
 
-        let final_event = acc.push(MessageStreamEvent::End(llm_suite_types::llm::MessageStreamEnd {}));
+        let final_event = acc.push(MessageStreamEvent::End(
+            llm_suite_types::llm::MessageStreamEnd {},
+        ));
         let MessageStreamEvent::FinalMessage(final_msg) = final_event.unwrap() else {
             panic!("expected FinalMessage");
         };
@@ -657,7 +664,9 @@ mod tests {
             },
         }));
 
-        let final_event = acc.push(MessageStreamEvent::End(llm_suite_types::llm::MessageStreamEnd {}));
+        let final_event = acc.push(MessageStreamEvent::End(
+            llm_suite_types::llm::MessageStreamEnd {},
+        ));
         let MessageStreamEvent::FinalMessage(final_msg) = final_event.unwrap() else {
             panic!("expected FinalMessage");
         };
@@ -703,7 +712,9 @@ mod tests {
             text: "hi".to_string(),
             snapshot: String::new(),
         }));
-        let final_event = acc.push(MessageStreamEvent::End(llm_suite_types::llm::MessageStreamEnd {}));
+        let final_event = acc.push(MessageStreamEvent::End(
+            llm_suite_types::llm::MessageStreamEnd {},
+        ));
         let MessageStreamEvent::FinalMessage(final_msg) = final_event.unwrap() else {
             panic!("expected FinalMessage");
         };
@@ -739,7 +750,9 @@ mod tests {
             other => panic!("expected ReasoningText, got {other:?}"),
         }
 
-        let final_event = acc.push(MessageStreamEvent::End(llm_suite_types::llm::MessageStreamEnd {}));
+        let final_event = acc.push(MessageStreamEvent::End(
+            llm_suite_types::llm::MessageStreamEnd {},
+        ));
         let MessageStreamEvent::FinalMessage(final_msg) = final_event.unwrap() else {
             panic!("expected FinalMessage");
         };

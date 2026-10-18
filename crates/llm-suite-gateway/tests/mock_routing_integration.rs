@@ -160,7 +160,10 @@ async fn mock_scripted_error_propagates_through_gateway() {
         .generate(&chat_request("mock-err", "q"), None)
         .await
         .expect_err("scripted error must propagate");
-    assert!(matches!(error, llm_suite_codec::error::LlmError::Timeout { .. }));
+    assert!(matches!(
+        error,
+        llm_suite_codec::error::LlmError::Timeout { .. }
+    ));
 }
 
 #[tokio::test]

@@ -228,8 +228,7 @@ mod tests {
             cache_write_1h_per_mtok: None,
         };
         let mut stats = usage(10, 5, None, None);
-        compute_cost(&stats, &pricing, CacheTokenScope::IncludedInPrompt)
-            .apply_to(&mut stats);
+        compute_cost(&stats, &pricing, CacheTokenScope::IncludedInPrompt).apply_to(&mut stats);
         assert_eq!(stats.prompt_tokens_cost, Some(10.0 / 1e6));
         assert_eq!(stats.completion_tokens_cost, Some(5.0 / 1e6));
         let total = stats.total_cost.expect("total_cost must be set");

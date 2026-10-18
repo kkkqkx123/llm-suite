@@ -77,6 +77,7 @@ fn parse_xml_tool_call_block(content: &str) -> Option<LlmToolCall> {
     Some(LlmToolCall {
         id: generate_tool_call_id(),
         r#type: "function".to_string(),
+        call_id: None,
         function: LlmFunctionCall {
             name: tool_name,
             arguments: serde_json::to_string(&args).unwrap_or_default(),
@@ -250,6 +251,7 @@ fn convert_to_standard_tool_call(value: &serde_json::Value) -> Option<LlmToolCal
         return Some(LlmToolCall {
             id: generate_tool_call_id(),
             r#type: "function".to_string(),
+            call_id: None,
             function: LlmFunctionCall {
                 name: tool.to_string(),
                 arguments: serde_json::to_string(&params).unwrap_or_default(),
@@ -267,6 +269,7 @@ fn convert_to_standard_tool_call(value: &serde_json::Value) -> Option<LlmToolCal
         return Some(LlmToolCall {
             id: generate_tool_call_id(),
             r#type: "function".to_string(),
+            call_id: None,
             function: LlmFunctionCall {
                 name: name.to_string(),
                 arguments: args,
@@ -289,6 +292,7 @@ fn convert_to_standard_tool_call(value: &serde_json::Value) -> Option<LlmToolCal
                     .map(String::from)
                     .unwrap_or_else(generate_tool_call_id),
                 r#type: "function".to_string(),
+                call_id: None,
                 function: LlmFunctionCall {
                     name: name.to_string(),
                     arguments: args,
@@ -509,6 +513,7 @@ fn convert_invoke_object(value: serde_json::Value) -> Result<LlmToolCall, String
     Ok(LlmToolCall {
         id: generate_tool_call_id(),
         r#type: "function".to_string(),
+        call_id: None,
         function: LlmFunctionCall {
             name: tool_name.to_string(),
             arguments: serde_json::to_string(&parameters).unwrap_or_default(),

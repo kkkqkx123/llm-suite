@@ -35,13 +35,19 @@ pub fn convert_history_for_text_mode(messages: &[Message], request: &LlmRequest)
         .locked_tool_call_protocol
         .as_ref()
         .and_then(|c| c.markers.clone());
-    llm_suite_message::history_converter::convert_to_text_mode(messages, &protocol, markers.as_ref())
+    llm_suite_message::history_converter::convert_to_text_mode(
+        messages,
+        &protocol,
+        markers.as_ref(),
+    )
 }
 
 /// Build the system prompt content for text-based tool mode: existing system
 /// message + tool usage instructions + tool declarations.
 pub fn text_mode_system_content(request: &LlmRequest) -> String {
-    use llm_suite_tool_call::tool::protocol::{build_text_mode_system_content, extract_system_message};
+    use llm_suite_tool_call::tool::protocol::{
+        build_text_mode_system_content, extract_system_message,
+    };
     let protocol = effective_tool_call_protocol(request);
     let (system, _) = extract_system_message(&request.messages);
     let tools = request.tools.as_deref().unwrap_or(&[]);
@@ -318,6 +324,7 @@ pub fn parse_openai_chat_response(body: &str) -> LlmResult<LlmResponseType> {
                     Some(llm_suite_types::message::LlmToolCall {
                         id,
                         r#type: "function".to_string(),
+                        call_id: None,
                         function: llm_suite_types::message::LlmFunctionCall { name, arguments },
                     })
                 })
@@ -367,6 +374,7 @@ pub fn parse_openai_chat_response(body: &str) -> LlmResult<LlmResponseType> {
         reasoning_signature: None,
         reasoning_tokens,
         metadata,
+        refusal: None,
         stream_stats: None,
     })
 }
@@ -478,7 +486,9 @@ pub fn parse_openai_stream_chunk(data: &str) -> LlmResult<Vec<MessageStreamEvent
                 "stop" | "tool_calls" | "length" | "content_filter"
             );
             if is_done {
-                events.push(MessageStreamEvent::End(llm_suite_types::llm::MessageStreamEnd {}));
+                events.push(MessageStreamEvent::End(
+                    llm_suite_types::llm::MessageStreamEnd {},
+                ));
             }
         }
     }
@@ -486,7 +496,9 @@ pub fn parse_openai_stream_chunk(data: &str) -> LlmResult<Vec<MessageStreamEvent
     Ok(events)
 }
 
-pub fn convert_openai_tools(tools: &[llm_suite_types::tool::Tool]) -> LlmResult<Vec<serde_json::Value>> {
+pub fn convert_openai_tools(
+    tools: &[llm_suite_types::tool::Tool],
+) -> LlmResult<Vec<serde_json::Value>> {
     let tool_defs: Vec<serde_json::Value> = tools
         .iter()
         .map(|t| {

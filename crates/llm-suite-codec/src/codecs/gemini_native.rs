@@ -1,6 +1,8 @@
 use super::LlmCodec;
 use crate::error::LlmResult;
-use llm_suite_types::llm::{LlmProfile, LlmRequest, LlmResult as LlmResponseType, MessageStreamEvent};
+use llm_suite_types::llm::{
+    LlmProfile, LlmRequest, LlmResult as LlmResponseType, MessageStreamEvent,
+};
 use llm_suite_types::tool::Tool;
 use reqwest::Method;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -64,7 +66,10 @@ impl GeminiNativeCodec {
         builder.build().map_err(crate::error::LlmError::HttpError)
     }
 
-    fn convert_messages(&self, messages: &[llm_suite_types::message::Message]) -> Vec<serde_json::Value> {
+    fn convert_messages(
+        &self,
+        messages: &[llm_suite_types::message::Message],
+    ) -> Vec<serde_json::Value> {
         messages
             .iter()
             .filter_map(|msg| {
@@ -135,7 +140,9 @@ impl GeminiNativeCodec {
                                     Err(_) => None,
                                 }
                             }
-                            llm_suite_types::message::MessageContent::ToolResult { tool_result } => {
+                            llm_suite_types::message::MessageContent::ToolResult {
+                                tool_result,
+                            } => {
                                 let content_val: serde_json::Value =
                                     serde_json::from_str(&tool_result.content).unwrap_or_else(
                                         |_| serde_json::Value::String(tool_result.content.clone()),
@@ -400,7 +407,9 @@ impl LlmCodec for GeminiNativeCodec {
                 // with content parts; it must not be swallowed by the part
                 // handling above.
                 if candidate.get("finishReason").is_some() {
-                    events.push(MessageStreamEvent::End(llm_suite_types::llm::MessageStreamEnd {}));
+                    events.push(MessageStreamEvent::End(
+                        llm_suite_types::llm::MessageStreamEnd {},
+                    ));
                 }
             }
         }
@@ -435,7 +444,10 @@ impl LlmCodec for GeminiNativeCodec {
         })])
     }
 
-    fn parse_tool_calls(&self, result: &LlmResponseType) -> Vec<llm_suite_types::message::LlmToolCall> {
+    fn parse_tool_calls(
+        &self,
+        result: &LlmResponseType,
+    ) -> Vec<llm_suite_types::message::LlmToolCall> {
         result.tool_calls.clone().unwrap_or_default()
     }
 }
@@ -555,7 +567,11 @@ impl GeminiNativeCodec {
                             tool_calls.push(llm_suite_types::message::LlmToolCall {
                                 id: format!("gemini_call_{}", llm_suite_common::generate_id()),
                                 r#type: "function".to_string(),
-                                function: llm_suite_types::message::LlmFunctionCall { name, arguments },
+                                call_id: None,
+                                function: llm_suite_types::message::LlmFunctionCall {
+                                    name,
+                                    arguments,
+                                },
                             });
                         }
                     }
@@ -641,6 +657,7 @@ impl GeminiNativeCodec {
             reasoning_signature: None,
             reasoning_tokens,
             metadata,
+            refusal: None,
             stream_stats: None,
         })
     }
@@ -776,7 +793,10 @@ mod tests {
         }
     }
 
-    fn msg(role: llm_suite_types::message::MessageRole, text: &str) -> llm_suite_types::message::Message {
+    fn msg(
+        role: llm_suite_types::message::MessageRole,
+        text: &str,
+    ) -> llm_suite_types::message::Message {
         llm_suite_types::message::Message {
             id: llm_suite_types::Id::new(),
             role,
@@ -823,7 +843,10 @@ mod tests {
         );
         req.cached_content = Some("cachedContents/abc123".to_string());
         let body = codec.build_body(&req, &profile()).expect("must build");
-        assert_eq!(body["cachedContent"], serde_json::json!("cachedContents/abc123"));
+        assert_eq!(
+            body["cachedContent"],
+            serde_json::json!("cachedContents/abc123")
+        );
 
         // Absent by default: no key is emitted.
         let plain = codec
@@ -883,7 +906,10 @@ mod tests {
         let codec = GeminiNativeCodec::new();
         let req = request(
             vec![
-                msg(llm_suite_types::message::MessageRole::System, "You are a helper"),
+                msg(
+                    llm_suite_types::message::MessageRole::System,
+                    "You are a helper",
+                ),
                 msg(llm_suite_types::message::MessageRole::User, "Hello"),
             ],
             None,
@@ -927,7 +953,10 @@ mod tests {
             metadata: None,
         };
         let req = request(
-            vec![tool_msg, msg(llm_suite_types::message::MessageRole::User, "next")],
+            vec![
+                tool_msg,
+                msg(llm_suite_types::message::MessageRole::User, "next"),
+            ],
             None,
         );
         let body = codec.build_body(&req, &profile()).expect("must build");
@@ -949,7 +978,10 @@ mod tests {
         let codec = GeminiNativeCodec::new();
         let req = request(
             vec![
-                msg(llm_suite_types::message::MessageRole::System, "You are a helper"),
+                msg(
+                    llm_suite_types::message::MessageRole::System,
+                    "You are a helper",
+                ),
                 msg(llm_suite_types::message::MessageRole::User, "Hello"),
             ],
             None,
@@ -1010,7 +1042,10 @@ mod tests {
     fn count_request() -> LlmRequest {
         request(
             vec![
-                msg(llm_suite_types::message::MessageRole::System, "You are a helper"),
+                msg(
+                    llm_suite_types::message::MessageRole::System,
+                    "You are a helper",
+                ),
                 msg(llm_suite_types::message::MessageRole::User, "Hello"),
             ],
             None,
@@ -1055,7 +1090,10 @@ mod tests {
     #[test]
     fn stream_request_targets_stream_generate_content_sse() {
         let codec = GeminiNativeCodec::new();
-        let mut req = request(vec![msg(llm_suite_types::message::MessageRole::User, "Hi")], None);
+        let mut req = request(
+            vec![msg(llm_suite_types::message::MessageRole::User, "Hi")],
+            None,
+        );
         req.stream = Some(true);
         let req = codec.build_request(&req, &profile()).expect("must build");
         let url = req.url().as_str();
@@ -1075,7 +1113,10 @@ mod tests {
         let codec = GeminiNativeCodec::new();
         let req = codec
             .build_request(
-                &request(vec![msg(llm_suite_types::message::MessageRole::User, "Hi")], None),
+                &request(
+                    vec![msg(llm_suite_types::message::MessageRole::User, "Hi")],
+                    None,
+                ),
                 &profile(),
             )
             .expect("must build");

@@ -1,7 +1,9 @@
 use super::shared;
 use super::LlmCodec;
 use crate::error::LlmResult;
-use llm_suite_types::llm::{LlmProfile, LlmRequest, LlmResult as LlmResponseType, MessageStreamEvent};
+use llm_suite_types::llm::{
+    LlmProfile, LlmRequest, LlmResult as LlmResponseType, MessageStreamEvent,
+};
 use llm_suite_types::tool::Tool;
 use reqwest::Method;
 
@@ -163,7 +165,10 @@ impl LlmCodec for OpenaiChatCodec {
         shared::convert_openai_tools(tools)
     }
 
-    fn parse_tool_calls(&self, result: &LlmResponseType) -> Vec<llm_suite_types::message::LlmToolCall> {
+    fn parse_tool_calls(
+        &self,
+        result: &LlmResponseType,
+    ) -> Vec<llm_suite_types::message::LlmToolCall> {
         result.tool_calls.clone().unwrap_or_default()
     }
 }
@@ -333,9 +338,7 @@ mod tests {
         let mut req = request_with_format(ToolCallProtocol::Native);
         req.parameters = Some(serde_json::json!({"prompt_cache_key": "conv-42"}));
         let codec = OpenaiChatCodec::new();
-        let body = codec
-            .build_body(&req, &profile())
-            .unwrap();
+        let body = codec.build_body(&req, &profile()).unwrap();
         assert_eq!(body["prompt_cache_key"], serde_json::json!("conv-42"));
     }
 
@@ -346,6 +349,7 @@ mod tests {
         assistant.tool_calls = Some(vec![llm_suite_types::message::LlmToolCall {
             id: "call_1".to_string(),
             r#type: "function".to_string(),
+            call_id: None,
             function: llm_suite_types::message::LlmFunctionCall {
                 name: "get_weather".to_string(),
                 arguments: r#"{"city":"Beijing"}"#.to_string(),

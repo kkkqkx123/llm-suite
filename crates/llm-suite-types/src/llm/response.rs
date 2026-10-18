@@ -36,6 +36,11 @@ pub struct LlmResult {
     pub reasoning_signature: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u32>,
+    /// Model refusal text when the provider declines to answer. Distinct from
+    /// `content` so callers can tell an empty answer apart from a refusal.
+    /// Populated from Responses API `refusal` output items (non-streaming).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<super::super::Metadata>,
     #[serde(skip_serializing_if = "Option::is_none")]

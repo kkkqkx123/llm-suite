@@ -14,6 +14,12 @@ pub struct LlmToolCall {
     pub id: String,
     pub r#type: String,
     pub function: LlmFunctionCall,
+    /// Provider-native tool call correlation id. OpenAI Responses API uses
+    /// `call_id` to associate a `function_call` output item with its
+    /// `function_call_output` in follow-up turns; Chat Completions has no
+    /// equivalent and leaves this `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

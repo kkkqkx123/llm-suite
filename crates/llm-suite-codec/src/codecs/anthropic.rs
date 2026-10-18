@@ -2,10 +2,9 @@ use super::LlmCodec;
 use crate::codecs::helpers::{resolve_image_payload, ResolvedImage};
 use crate::error::{LlmError, LlmResult};
 use llm_suite_types::llm::{
-    LlmProfile, LlmPromptCaching, LlmRequest, LlmResult as LlmResponseType,
-    MessageStreamEnd, MessageStreamError, MessageStreamEvent, MessageStreamReasoning,
-    MessageStreamStart, MessageStreamText, MessageStreamToolCallDelta, MessageStreamUsage,
-    TokenUsageStats,
+    LlmProfile, LlmPromptCaching, LlmRequest, LlmResult as LlmResponseType, MessageStreamEnd,
+    MessageStreamError, MessageStreamEvent, MessageStreamReasoning, MessageStreamStart,
+    MessageStreamText, MessageStreamToolCallDelta, MessageStreamUsage, TokenUsageStats,
 };
 use llm_suite_types::message::{Message, MessageContent, MessageContentValue, MessageRole};
 use llm_suite_types::tool::{Tool, ToolParameterSchema};
@@ -99,9 +98,10 @@ impl AnthropicCodec {
 
         // Per-request override wins over the profile-level decision,
         // including explicitly disabling caching for a caching profile.
-        let request_caching = request.prompt_caching.as_ref().map(|c| LlmPromptCaching {
-            ttl: c.ttl.clone(),
-        });
+        let request_caching = request
+            .prompt_caching
+            .as_ref()
+            .map(|c| LlmPromptCaching { ttl: c.ttl.clone() });
         let caching: Option<&LlmPromptCaching> = match &request.prompt_caching {
             Some(req) if !req.enabled => None,
             Some(_) => request_caching.as_ref(),
@@ -780,7 +780,10 @@ impl LlmCodec for AnthropicCodec {
         Ok(Self::build_tool_defs(tools))
     }
 
-    fn parse_tool_calls(&self, result: &LlmResponseType) -> Vec<llm_suite_types::message::LlmToolCall> {
+    fn parse_tool_calls(
+        &self,
+        result: &LlmResponseType,
+    ) -> Vec<llm_suite_types::message::LlmToolCall> {
         result.tool_calls.clone().unwrap_or_default()
     }
 }
@@ -871,6 +874,7 @@ impl AnthropicCodec {
                         tool_calls.push(llm_suite_types::message::LlmToolCall {
                             id: tc_id,
                             r#type: "function".to_string(),
+                            call_id: None,
                             function: llm_suite_types::message::LlmFunctionCall { name, arguments },
                         });
                     }
@@ -965,6 +969,7 @@ impl AnthropicCodec {
             reasoning_signature: thinking_signature,
             reasoning_tokens,
             metadata,
+            refusal: None,
             stream_stats: None,
         })
     }
@@ -1039,7 +1044,10 @@ mod tests {
         }
     }
 
-    fn msg(role: llm_suite_types::message::MessageRole, text: &str) -> llm_suite_types::message::Message {
+    fn msg(
+        role: llm_suite_types::message::MessageRole,
+        text: &str,
+    ) -> llm_suite_types::message::Message {
         llm_suite_types::message::Message {
             id: llm_suite_types::Id::new(),
             role,
@@ -1084,7 +1092,10 @@ mod tests {
             .build_body(
                 &request(
                     vec![
-                        msg(llm_suite_types::message::MessageRole::System, "You are a helper"),
+                        msg(
+                            llm_suite_types::message::MessageRole::System,
+                            "You are a helper",
+                        ),
                         msg(llm_suite_types::message::MessageRole::User, "Hello"),
                     ],
                     None,
@@ -1108,7 +1119,10 @@ mod tests {
         let codec = AnthropicCodec::new();
         let mut req = request(
             vec![
-                msg(llm_suite_types::message::MessageRole::System, "You are a helper"),
+                msg(
+                    llm_suite_types::message::MessageRole::System,
+                    "You are a helper",
+                ),
                 msg(llm_suite_types::message::MessageRole::User, "Hello"),
             ],
             None,
@@ -1180,7 +1194,11 @@ mod tests {
         }
     }
 
-    fn tool_msg(tool_use_id: &str, text: &str, is_error: bool) -> llm_suite_types::message::Message {
+    fn tool_msg(
+        tool_use_id: &str,
+        text: &str,
+        is_error: bool,
+    ) -> llm_suite_types::message::Message {
         let mut m = msg(llm_suite_types::message::MessageRole::Tool, text);
         m.tool_call_id = Some(tool_use_id.to_string());
         m.metadata = Some(std::collections::HashMap::from([(
@@ -1194,6 +1212,7 @@ mod tests {
         llm_suite_types::message::LlmToolCall {
             id: id.to_string(),
             r#type: "function".to_string(),
+            call_id: None,
             function: llm_suite_types::message::LlmFunctionCall {
                 name: name.to_string(),
                 arguments: arguments.to_string(),
@@ -1219,7 +1238,10 @@ mod tests {
             .build_body(
                 &request(
                     vec![
-                        msg(llm_suite_types::message::MessageRole::User, "weather and time?"),
+                        msg(
+                            llm_suite_types::message::MessageRole::User,
+                            "weather and time?",
+                        ),
                         assistant,
                         tool_msg("call_1", "sunny", false),
                         tool_msg("call_2", "rainy", false),
@@ -1420,7 +1442,10 @@ mod tests {
     #[test]
     fn tool_without_parameters_gets_empty_object_schema() {
         let codec = AnthropicCodec::new();
-        let mut req = request(vec![msg(llm_suite_types::message::MessageRole::User, "hi")], None);
+        let mut req = request(
+            vec![msg(llm_suite_types::message::MessageRole::User, "hi")],
+            None,
+        );
         req.tools = Some(vec![llm_suite_types::tool::Tool {
             name: "get_time".to_string(),
             description: "Returns the current time".to_string(),
@@ -1703,7 +1728,10 @@ mod tests {
         let codec = AnthropicCodec::new();
         let mut req = request(
             vec![
-                msg(llm_suite_types::message::MessageRole::System, "You are a helper"),
+                msg(
+                    llm_suite_types::message::MessageRole::System,
+                    "You are a helper",
+                ),
                 msg(llm_suite_types::message::MessageRole::User, "Hello"),
                 msg(llm_suite_types::message::MessageRole::Assistant, "Hi there"),
                 msg(llm_suite_types::message::MessageRole::User, "Bye"),
@@ -1759,7 +1787,10 @@ mod tests {
             .build_body(
                 &request(
                     vec![
-                        msg(llm_suite_types::message::MessageRole::System, "You are a helper"),
+                        msg(
+                            llm_suite_types::message::MessageRole::System,
+                            "You are a helper",
+                        ),
                         msg(llm_suite_types::message::MessageRole::User, "Hi"),
                     ],
                     None,
@@ -1780,7 +1811,10 @@ mod tests {
         let codec = AnthropicCodec::new();
         let body = codec
             .build_body(
-                &request(vec![msg(llm_suite_types::message::MessageRole::User, "Hi")], None),
+                &request(
+                    vec![msg(llm_suite_types::message::MessageRole::User, "Hi")],
+                    None,
+                ),
                 &profile(),
             )
             .expect("must build");
@@ -1795,7 +1829,10 @@ mod tests {
         let codec = AnthropicCodec::new();
         let mut req = request(
             vec![
-                msg(llm_suite_types::message::MessageRole::System, "You are a helper"),
+                msg(
+                    llm_suite_types::message::MessageRole::System,
+                    "You are a helper",
+                ),
                 msg(llm_suite_types::message::MessageRole::User, "Hi"),
             ],
             None,
@@ -1804,17 +1841,11 @@ mod tests {
             enabled: true,
             ttl: Some("1h".to_string()),
         });
-        let body = codec
-            .build_body(&req, &profile())
-            .expect("must build");
+        let body = codec.build_body(&req, &profile()).expect("must build");
         let control = serde_json::json!({"type": "ephemeral", "ttl": "1h"});
         assert_eq!(body["system"][0]["cache_control"], control);
         assert_eq!(
-            body["messages"]
-                .as_array()
-                .unwrap()
-                .last()
-                .unwrap()["content"][0]["cache_control"],
+            body["messages"].as_array().unwrap().last().unwrap()["content"][0]["cache_control"],
             control
         );
     }
@@ -1824,7 +1855,10 @@ mod tests {
         let codec = AnthropicCodec::new();
         let mut req = request(
             vec![
-                msg(llm_suite_types::message::MessageRole::System, "You are a helper"),
+                msg(
+                    llm_suite_types::message::MessageRole::System,
+                    "You are a helper",
+                ),
                 msg(llm_suite_types::message::MessageRole::User, "Hi"),
             ],
             None,
@@ -1850,7 +1884,10 @@ mod tests {
         let codec = AnthropicCodec::new();
         let mut req = request(
             vec![
-                msg(llm_suite_types::message::MessageRole::System, "You are a helper"),
+                msg(
+                    llm_suite_types::message::MessageRole::System,
+                    "You are a helper",
+                ),
                 msg(llm_suite_types::message::MessageRole::User, "Hi"),
             ],
             None,

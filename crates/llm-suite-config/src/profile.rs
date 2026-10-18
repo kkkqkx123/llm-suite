@@ -262,7 +262,9 @@ mod tests {
 
     #[test]
     fn gemini_thinking_level_and_budget_mutually_exclusive() {
-        use llm_suite_types::llm::generation::{LlmGenerationParams, LlmThinkingConfig, ThinkingLevel};
+        use llm_suite_types::llm::generation::{
+            LlmGenerationParams, LlmThinkingConfig, ThinkingLevel,
+        };
 
         let mut profile = valid_profile();
         profile.format = LlmFormat::GeminiNative;
@@ -279,7 +281,9 @@ mod tests {
 
     #[test]
     fn gemini_thinking_level_only_accepted() {
-        use llm_suite_types::llm::generation::{LlmGenerationParams, LlmThinkingConfig, ThinkingLevel};
+        use llm_suite_types::llm::generation::{
+            LlmGenerationParams, LlmThinkingConfig, ThinkingLevel,
+        };
 
         let mut profile = valid_profile();
         profile.format = LlmFormat::GeminiNative;

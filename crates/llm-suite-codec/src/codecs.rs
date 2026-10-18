@@ -48,7 +48,10 @@ pub trait LlmCodec: Send + Sync {
         }
     }
     fn convert_tools(&self, tools: &[Tool]) -> LlmResult<Vec<serde_json::Value>>;
-    fn parse_tool_calls(&self, result: &LlmResponseType) -> Vec<llm_suite_types::message::LlmToolCall>;
+    fn parse_tool_calls(
+        &self,
+        result: &LlmResponseType,
+    ) -> Vec<llm_suite_types::message::LlmToolCall>;
 
     /// Build a count-tokens request. Returns `Ok(None)` when the format
     /// does not support a token counting API (the caller falls back to

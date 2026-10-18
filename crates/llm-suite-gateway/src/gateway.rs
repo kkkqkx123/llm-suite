@@ -185,7 +185,11 @@ impl LlmGateway {
     /// Register a mock client under an arbitrary id (a real profile id can be
     /// reused, or a plain "mock" id). Mock hits take priority over profiles.
     #[cfg(feature = "mock")]
-    pub fn register_mock(&self, id: impl Into<String>, client: Arc<llm_suite_client::MockLlmClient>) {
+    pub fn register_mock(
+        &self,
+        id: impl Into<String>,
+        client: Arc<llm_suite_client::MockLlmClient>,
+    ) {
         self.mock_clients.insert(id.into(), client);
     }
 
@@ -379,7 +383,10 @@ impl LlmGateway {
     /// wins, otherwise the referenced provider definition's `rate_limit`.
     /// Keyed by resolved base URL so profiles sharing a provider share one
     /// token bucket.
-    fn limiter_for(&self, profile: &LlmProfile) -> Option<Arc<llm_suite_common::ratelimit::RateLimiter>> {
+    fn limiter_for(
+        &self,
+        profile: &LlmProfile,
+    ) -> Option<Arc<llm_suite_common::ratelimit::RateLimiter>> {
         let base_url = profile.base_url.clone().unwrap_or_default();
         let key = format!(
             "{}::{}",
@@ -393,7 +400,9 @@ impl LlmGateway {
             .metadata
             .as_ref()
             .and_then(|m| m.get("rate_limit"))
-            .and_then(|v| serde_json::from_value::<llm_suite_types::llm::RateLimitConfig>(v.clone()).ok())
+            .and_then(|v| {
+                serde_json::from_value::<llm_suite_types::llm::RateLimitConfig>(v.clone()).ok()
+            })
             .or_else(|| {
                 let provider_id = profile.provider_id.as_ref()?;
                 let def = self.providers.get(provider_id)?;

@@ -79,6 +79,7 @@ async fn tool_calls_spec_builds_matching_message() {
     client.script(LlmResponseSpec::tool_calls(vec![LlmToolCall {
         id: "call_1".to_string(),
         r#type: "function".to_string(),
+        call_id: None,
         function: LlmFunctionCall {
             name: "search".to_string(),
             arguments: r#"{"q":"rust"}"#.to_string(),
@@ -383,6 +384,7 @@ async fn synthesize_preserves_tool_calls_from_final_message() {
         tool_calls: Some(vec![LlmToolCall {
             id: "call_1".to_string(),
             r#type: "function".to_string(),
+            call_id: None,
             function: LlmFunctionCall {
                 name: "search".to_string(),
                 arguments: r#"{"q":"rust"}"#.to_string(),
