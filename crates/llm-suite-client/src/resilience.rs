@@ -127,7 +127,6 @@ mod tests {
     enum TestError {
         Transient,
         Permanent,
-        RateLimited(u64),
         BreakerOpen,
     }
 
@@ -136,7 +135,6 @@ mod tests {
             match self {
                 Self::Transient => write!(f, "transient"),
                 Self::Permanent => write!(f, "permanent"),
-                Self::RateLimited(_) => write!(f, "rate limited"),
                 Self::BreakerOpen => write!(f, "breaker open"),
             }
         }
@@ -144,18 +142,15 @@ mod tests {
 
     impl ResilienceError for TestError {
         fn is_retryable(&self) -> bool {
-            matches!(self, Self::Transient | Self::RateLimited(_))
+            matches!(self, Self::Transient)
         }
 
         fn retry_after_ms(&self) -> Option<u64> {
-            match self {
-                Self::RateLimited(ms) => Some(*ms),
-                _ => None,
-            }
+            None
         }
 
         fn is_network_failure(&self) -> bool {
-            matches!(self, Self::Transient | Self::RateLimited(_))
+            matches!(self, Self::Transient)
         }
     }
 
