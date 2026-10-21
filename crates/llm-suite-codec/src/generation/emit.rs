@@ -215,11 +215,13 @@ pub fn apply_openai_responses(
     if let Some(top_p) = gen.top_p {
         body["top_p"] = serde_json::json!(top_p);
     }
-    if let Some(seed) = gen.seed {
-        body["seed"] = serde_json::json!(seed);
-    }
     if let Some(ref tier) = gen.service_tier {
         body["service_tier"] = serde_json::json!(openai_responses_service_tier(*tier)?);
+    }
+    if gen.seed.is_some() {
+        // The Responses API has no `seed` parameter (only Chat Completions
+        // does); an unknown request field is rejected by the API.
+        tracing::warn!("seed is not supported by the OpenAI Responses API and was ignored");
     }
     if let Some(store) = gen.store {
         body["store"] = serde_json::json!(store);

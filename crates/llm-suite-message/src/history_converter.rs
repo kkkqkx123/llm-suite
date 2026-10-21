@@ -41,15 +41,19 @@ pub fn convert_to_text_mode(
             } else if msg.role == MessageRole::Tool && msg.tool_call_id.is_some() {
                 convert_tool_result_message(msg, format, markers)
             } else if let MessageContentValue::Rich(blocks) = &msg.content {
-                if blocks
-                    .iter()
-                    .any(|block| matches!(block, llm_suite_types::message::MessageContent::ToolUse { .. }))
-                {
+                if blocks.iter().any(|block| {
+                    matches!(
+                        block,
+                        llm_suite_types::message::MessageContent::ToolUse { .. }
+                    )
+                }) {
                     convert_tool_use_message(msg, format, markers)
-                } else if blocks.iter().any(|block| matches!(
-                    block,
-                    llm_suite_types::message::MessageContent::ImageUrl { .. }
-                )) {
+                } else if blocks.iter().any(|block| {
+                    matches!(
+                        block,
+                        llm_suite_types::message::MessageContent::ImageUrl { .. }
+                    )
+                }) {
                     convert_image_message(msg)
                 } else {
                     msg.clone()
@@ -359,7 +363,10 @@ mod tests {
         };
         assert!(text.contains("checking"), "{text}");
         assert!(text.contains("<tool_use>"), "{text}");
-        assert!(text.contains("<tool_name>get_weather</tool_name>"), "{text}");
+        assert!(
+            text.contains("<tool_name>get_weather</tool_name>"),
+            "{text}"
+        );
     }
 
     #[test]

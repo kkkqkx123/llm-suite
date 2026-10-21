@@ -201,14 +201,27 @@ pub fn convert_openai_messages(messages: &[Message]) -> Vec<serde_json::Value> {
 /// Validate it so an invalid request fails fast locally instead of
 /// round-tripping a `400` from the server. Text mode re-renders tool results
 /// as inline blocks, so this only applies to native (non-text) requests.
+///
+/// A message whose result lives in a rich `ToolResult` block is not checked:
+/// `convert_openai_messages` turns that block into a standalone `tool`
+/// message that carries the id, and the source message itself never reaches
+/// the wire as a `tool` entry.
 pub fn validate_openai_chat_messages(request: &LlmRequest) -> LlmResult<()> {
     for msg in &request.messages {
-        if msg.role == llm_suite_types::message::MessageRole::Tool && msg.tool_call_id.is_none() {
-            return Err(crate::error::LlmError::ConfigError(
-                "OpenAI Chat requires every `tool` role message to carry `tool_call_id`"
-                    .to_string(),
-            ));
+        if msg.role != llm_suite_types::message::MessageRole::Tool || msg.tool_call_id.is_some() {
+            continue;
         }
+        let carries_tool_result = matches!(
+            &msg.content,
+            MessageContentValue::Rich(blocks)
+                if blocks.iter().any(|b| matches!(b, MessageContent::ToolResult { .. }))
+        );
+        if carries_tool_result {
+            continue;
+        }
+        return Err(crate::error::LlmError::ConfigError(
+            "OpenAI Chat requires every `tool` role message to carry `tool_call_id`".to_string(),
+        ));
     }
     Ok(())
 }
@@ -368,6 +381,8 @@ pub fn parse_openai_chat_response(body: &str) -> LlmResult<LlmResponseType> {
         tool_call_id: None,
         tool_name: None,
         tool_calls: tool_calls.clone(),
+        // The reasoning text also lives on the message so that every codec
+        // reports it the same way.
         thinking: reasoning_content.clone(),
         thinking_signature: None,
         metadata: None,
@@ -525,11 +540,12 @@ pub fn parse_openai_stream_chunk(data: &str) -> LlmResult<Vec<MessageStreamEvent
             }
         }
         // Provider-native terminal values passed through untouched; any other
-        // value (including a missing one) leaves the stream open.
+        // value (including a missing one) leaves the stream open. The set is
+        // the official `FinishReason` enumeration.
         if let Some(finish_reason) = choice.get("finish_reason").and_then(|r| r.as_str()) {
             let is_done = matches!(
                 finish_reason,
-                "stop" | "tool_calls" | "length" | "content_filter"
+                "stop" | "tool_calls" | "length" | "content_filter" | "function_call"
             );
             if is_done {
                 events.push(MessageStreamEvent::End(
@@ -548,12 +564,25 @@ pub fn convert_openai_tools(
     let tool_defs: Vec<serde_json::Value> = tools
         .iter()
         .map(|t| {
+            // The official `function.parameters` is a JSON Schema object; a
+            // tool without a schema must not serialize `null` (the API
+            // rejects it). An empty object schema is the accepted
+            // no-argument declaration.
+            let parameters =
+                t.parameters
+                    .clone()
+                    .unwrap_or(llm_suite_types::tool::ToolParameterSchema {
+                        r#type: "object".to_string(),
+                        properties: Default::default(),
+                        required: Vec::new(),
+                        additional_properties: None,
+                    });
             serde_json::json!({
                 "type": "function",
                 "function": {
                     "name": t.name,
                     "description": t.description,
-                    "parameters": t.parameters,
+                    "parameters": parameters,
                 }
             })
         })
@@ -567,20 +596,37 @@ pub fn convert_openai_tools(
 /// carry a full endpoint including a query string (deployment-style
 /// endpoints). Otherwise the path is appended. A trailing slash on the base
 /// URL never produces a double slash.
+///
+/// The path may carry its own query string (Gemini's streaming endpoint uses
+/// `?alt=sse`). The base query and the path query are merged instead of
+/// concatenated, so a base URL that already carries a query (Azure's
+/// `?api-version=...`) still yields a well-formed URL.
 pub fn endpoint_url(base_url: &str, path: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');
-    let (without_query, query) = match trimmed.split_once('?') {
+    let (base_without_query, base_query) = match trimmed.split_once('?') {
         Some((base, query)) => (base, Some(query)),
         None => (trimmed, None),
     };
-    let url = if without_query.ends_with(&format!("/{path}")) {
-        without_query.to_string()
-    } else {
-        format!("{trimmed}/{path}")
+    let (path_without_query, path_query) = match path.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (path, None),
     };
-    match query {
-        Some(query) => format!("{url}?{query}"),
-        None => url,
+    let url = if base_without_query.ends_with(&format!("/{path_without_query}")) {
+        base_without_query.to_string()
+    } else {
+        format!("{base_without_query}/{path_without_query}")
+    };
+    let mut query_parts: Vec<&str> = Vec::new();
+    if let Some(query) = base_query {
+        query_parts.push(query);
+    }
+    if let Some(query) = path_query {
+        query_parts.push(query);
+    }
+    if query_parts.is_empty() {
+        url
+    } else {
+        format!("{url}?{}", query_parts.join("&"))
     }
 }
 
@@ -699,6 +745,27 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_url_merges_the_base_query_with_the_path_query() {
+        // A path that carries its own query (the Gemini streaming endpoint)
+        // and a base that carries one as well must not be concatenated with a
+        // second question mark.
+        assert_eq!(
+            super::endpoint_url(
+                "https://generativelanguage.googleapis.com/v1beta",
+                "models/gemini-2.5-pro:streamGenerateContent?alt=sse"
+            ),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse"
+        );
+        assert_eq!(
+            super::endpoint_url(
+                "https://gateway.example.com/v1?api-version=2024-01",
+                "models/gemini-2.5-pro:streamGenerateContent?alt=sse"
+            ),
+            "https://gateway.example.com/v1/models/gemini-2.5-pro:streamGenerateContent?api-version=2024-01&alt=sse"
+        );
+    }
+
+    #[test]
     fn refusal_is_parsed_and_kept_out_of_the_content() {
         let body = r#"{"id":"1","model":"gpt-4o","choices":[{"message":{"role":"assistant","content":null,"refusal":"I cannot help with that."},"finish_reason":"stop"}]}"#;
         let result = parse_openai_chat_response(body).expect("must parse");
@@ -786,6 +853,122 @@ mod tests {
         assert!(parse_openai_stream_chunk(chunk)
             .expect("chunk must parse")
             .is_empty());
+    }
+
+    #[test]
+    fn the_deprecated_function_call_reason_ends_the_stream() {
+        let chunk =
+            r#"{"id":"1","choices":[{"index":0,"delta":{},"finish_reason":"function_call"}]}"#;
+        let events = parse_openai_stream_chunk(chunk).expect("chunk must parse");
+        assert!(
+            matches!(events.last(), Some(MessageStreamEvent::End(_))),
+            "every official finish reason terminates the turn"
+        );
+    }
+
+    #[test]
+    fn a_tool_without_parameters_declares_an_empty_object_schema() {
+        let tools = vec![llm_suite_types::tool::Tool {
+            name: "get_time".to_string(),
+            description: "Returns the current time".to_string(),
+            parameters: None,
+        }];
+        let shape = convert_openai_tools(&tools).expect("must convert");
+        let parameters = &shape[0]["function"]["parameters"];
+        assert!(
+            parameters.is_object(),
+            "the schema must be an object, never null: {shape:?}"
+        );
+        assert_eq!(parameters["type"], serde_json::json!("object"));
+    }
+
+    #[test]
+    fn a_tool_result_in_a_rich_block_needs_no_message_level_tool_call_id() {
+        use llm_suite_types::message::{MessageContent, MessageContentValue, MessageRole};
+
+        let mut request = LlmRequest {
+            profile_id: "p1".to_string(),
+            messages: Vec::new(),
+            parameters: None,
+            generation: None,
+            tools: None,
+            tool_call_protocol: None,
+            locked_tool_call_protocol: None,
+            violation_policy: None,
+            execution_id: None,
+            stream: None,
+            dead_loop_detection: None,
+            protocol_auto_converted: None,
+            timeout_ms: None,
+            prompt_caching: None,
+            cached_content: None,
+        };
+        request.messages.push(Message {
+            id: llm_suite_types::Id::new(),
+            role: MessageRole::Tool,
+            content: MessageContentValue::Rich(vec![MessageContent::ToolResult {
+                tool_result: llm_suite_types::message::ToolResultContent {
+                    tool_use_id: "call_1".to_string(),
+                    content: "sunny".to_string(),
+                    is_error: None,
+                },
+            }]),
+            timestamp: 0,
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+            thinking: None,
+            thinking_signature: None,
+            metadata: None,
+        });
+
+        // The rich block carries the correlation id, so the message itself
+        // does not have to.
+        validate_openai_chat_messages(&request).expect("a rich tool result must not be rejected");
+
+        let converted = convert_openai_messages(&request.messages);
+        let tool_message = converted
+            .iter()
+            .find(|m| m["role"] == serde_json::json!("tool"))
+            .expect("the tool message must be present");
+        assert_eq!(tool_message["tool_call_id"], serde_json::json!("call_1"));
+    }
+
+    #[test]
+    fn a_tool_message_without_any_result_is_rejected() {
+        use llm_suite_types::message::{MessageContentValue, MessageRole};
+
+        let request = LlmRequest {
+            profile_id: "p1".to_string(),
+            messages: vec![Message {
+                id: llm_suite_types::Id::new(),
+                role: MessageRole::Tool,
+                content: MessageContentValue::Text("sunny".to_string()),
+                timestamp: 0,
+                tool_call_id: None,
+                tool_name: None,
+                tool_calls: None,
+                thinking: None,
+                thinking_signature: None,
+                metadata: None,
+            }],
+            parameters: None,
+            generation: None,
+            tools: None,
+            tool_call_protocol: None,
+            locked_tool_call_protocol: None,
+            violation_policy: None,
+            execution_id: None,
+            stream: None,
+            dead_loop_detection: None,
+            protocol_auto_converted: None,
+            timeout_ms: None,
+            prompt_caching: None,
+            cached_content: None,
+        };
+        let err = validate_openai_chat_messages(&request)
+            .expect_err("a tool message without a result id must be rejected");
+        assert!(format!("{err}").contains("tool_call_id"), "{err}");
     }
 
     #[test]

@@ -3,8 +3,9 @@ use crate::codecs::helpers::{resolve_image_payload, ResolvedImage};
 use crate::error::{LlmError, LlmResult};
 use llm_suite_types::llm::{
     LlmProfile, LlmPromptCaching, LlmRequest, LlmResult as LlmResponseType, MessageStreamEnd,
-    MessageStreamError, MessageStreamEvent, MessageStreamReasoning, MessageStreamStart,
-    MessageStreamText, MessageStreamToolCallDelta, MessageStreamUsage, TokenUsageStats,
+    MessageStreamError, MessageStreamEvent, MessageStreamInputJson, MessageStreamReasoning,
+    MessageStreamRedactedThinking, MessageStreamStart, MessageStreamText,
+    MessageStreamToolCallDelta, MessageStreamUsage, TokenUsageStats,
 };
 use llm_suite_types::message::{Message, MessageContent, MessageContentValue, MessageRole};
 use llm_suite_types::tool::{Tool, ToolParameterSchema};
@@ -356,16 +357,23 @@ impl AnthropicCodec {
             // working. Unsigned thinking is never synthesized: the API
             // rejects it. Messages that already carry thinking blocks keep
             // their own blocks, each with its own signature.
+            //
+            // The block goes to the front of the content: the API requires
+            // the thinking blocks to precede the text and the tool calls of
+            // the assistant turn.
             if role == "assistant" && !saw_thinking_block {
                 if let Some(thinking) = msg.thinking.as_deref() {
                     if !thinking.is_empty() {
                         if let Some(signature) = msg.thinking_signature.as_deref() {
                             if !signature.is_empty() {
-                                blocks.push(serde_json::json!({
-                                    "type": "thinking",
-                                    "thinking": thinking,
-                                    "signature": signature,
-                                }));
+                                blocks.insert(
+                                    0,
+                                    serde_json::json!({
+                                        "type": "thinking",
+                                        "thinking": thinking,
+                                        "signature": signature,
+                                    }),
+                                );
                             }
                         }
                     }
@@ -567,22 +575,38 @@ impl AnthropicCodec {
             }
             Some("content_block_start") => {
                 if let Some(b) = json.get("content_block") {
-                    if b.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
-                        let index =
-                            json.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                        let id = b.get("id").and_then(|v| v.as_str()).map(String::from);
-                        let name = b.get("name").and_then(|v| v.as_str()).map(String::from);
-                        return Ok(vec![MessageStreamEvent::ToolCallDelta(
-                            MessageStreamToolCallDelta {
-                                index,
-                                id,
-                                call_id: None,
-                                name,
-                                arguments: None,
-                                thought_signature: None,
-                                is_snapshot: false,
-                            },
-                        )]);
+                    match b.get("type").and_then(|v| v.as_str()) {
+                        Some("tool_use") => {
+                            let index =
+                                json.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                            let id = b.get("id").and_then(|v| v.as_str()).map(String::from);
+                            let name = b.get("name").and_then(|v| v.as_str()).map(String::from);
+                            return Ok(vec![MessageStreamEvent::ToolCallDelta(
+                                MessageStreamToolCallDelta {
+                                    index,
+                                    id,
+                                    call_id: None,
+                                    name,
+                                    arguments: None,
+                                    thought_signature: None,
+                                    is_snapshot: false,
+                                },
+                            )]);
+                        }
+                        // The redacted payload only appears in the start
+                        // frame; no delta frame carries it. It has to reach
+                        // the consumer so the reply can be replayed in the
+                        // next turn.
+                        Some("redacted_thinking") => {
+                            if let Some(data) = b.get("data").and_then(|v| v.as_str()) {
+                                return Ok(vec![MessageStreamEvent::RedactedThinking(
+                                    MessageStreamRedactedThinking {
+                                        data: data.to_string(),
+                                    },
+                                )]);
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 Ok(Vec::new())
@@ -628,15 +652,16 @@ impl AnthropicCodec {
                             if let Some(partial) = d.get("partial_json").and_then(|v| v.as_str()) {
                                 let index = json.get("index").and_then(|v| v.as_u64()).unwrap_or(0)
                                     as usize;
-                                return Ok(vec![MessageStreamEvent::ToolCallDelta(
-                                    MessageStreamToolCallDelta {
-                                        index,
-                                        id: None,
-                                        call_id: None,
-                                        name: None,
-                                        arguments: Some(partial.to_string()),
-                                        thought_signature: None,
-                                        is_snapshot: false,
+                                // The incremental JSON parser of the stream
+                                // accumulator works on this event: it
+                                // refreshes the parsed snapshot of the
+                                // arguments buffer while it is still
+                                // incomplete.
+                                return Ok(vec![MessageStreamEvent::InputJson(
+                                    MessageStreamInputJson {
+                                        partial_json: partial.to_string(),
+                                        index: Some(index),
+                                        parsed_snapshot: None,
                                     },
                                 )]);
                             }
@@ -864,6 +889,9 @@ impl AnthropicCodec {
         // Content blocks are kept per block so every thinking block keeps its
         // own signature when the message is replayed in a later turn.
         let mut content_blocks: Vec<MessageContent> = Vec::new();
+        // Sources of a grounded answer; the official text block carries them
+        // on `citations`.
+        let mut citations: Vec<serde_json::Value> = Vec::new();
 
         if let Some(blocks) = content_arr {
             for block in blocks {
@@ -875,6 +903,11 @@ impl AnthropicCodec {
                             content_blocks.push(MessageContent::Text {
                                 text: text.to_string(),
                             });
+                        }
+                        if let Some(block_citations) =
+                            block.get("citations").and_then(|v| v.as_array())
+                        {
+                            citations.extend(block_citations.iter().cloned());
                         }
                     }
                     Some("thinking") => {
@@ -1014,6 +1047,9 @@ impl AnthropicCodec {
         if let Some(seq) = json.get("stop_sequence").and_then(|v| v.as_str()) {
             metadata.insert("stop_sequence".to_string(), serde_json::json!(seq));
         }
+        if !citations.is_empty() {
+            metadata.insert("citations".to_string(), serde_json::json!(citations));
+        }
         let metadata = if metadata.is_empty() {
             None
         } else {
@@ -1086,12 +1122,13 @@ mod tests {
             .into_iter()
             .next()
         {
-            Some(MessageStreamEvent::ToolCallDelta(delta)) => {
-                assert_eq!(delta.index, 1);
-                assert_eq!(delta.arguments.as_deref(), Some(r#"{"city":"Beijing"}"#));
-                assert!(delta.name.is_none());
+            // The incremental JSON parser of the stream accumulator works on
+            // this event.
+            Some(MessageStreamEvent::InputJson(input)) => {
+                assert_eq!(input.index, Some(1));
+                assert_eq!(input.partial_json, r#"{"city":"Beijing"}"#);
             }
-            other => panic!("expected ToolCallDelta, got {:?}", other),
+            other => panic!("expected InputJson, got {:?}", other),
         }
     }
 
@@ -1165,6 +1202,56 @@ mod tests {
             prompt_caching: None,
             cached_content: None,
         }
+    }
+
+    #[test]
+    fn a_redacted_thinking_block_is_not_dropped() {
+        let codec = AnthropicCodec::new();
+        let chunk = r#"{"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"c2VjcmV0"}}"#;
+        let events = codec.parse_stream_chunk_events(chunk).expect("must parse");
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            MessageStreamEvent::RedactedThinking(redacted) => {
+                assert_eq!(redacted.data, "c2VjcmV0");
+            }
+            other => panic!("expected RedactedThinking, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn citations_are_reported_as_metadata() {
+        let codec = AnthropicCodec::new();
+        let body = r#"{"id":"m","model":"claude","stop_reason":"end_turn","content":[{"type":"text","text":"grounded","citations":[{"type":"char_location","cited_text":"x","document_index":0,"start_char_index":0,"end_char_index":1}]}]}"#;
+        let out = codec
+            .parse_response(body, &request(vec![], None))
+            .expect("must parse");
+        let citations = out.metadata.expect("metadata must be present");
+        assert_eq!(
+            citations["citations"][0]["type"],
+            serde_json::json!("char_location")
+        );
+    }
+
+    #[test]
+    fn the_replayed_thinking_block_comes_first() {
+        // The API requires the thinking blocks to precede the text and the
+        // tool calls of the assistant turn.
+        let codec = AnthropicCodec::new();
+        let mut assistant = msg(MessageRole::Assistant, "the answer");
+        assistant.thinking = Some("Let me verify".to_string());
+        assistant.thinking_signature = Some("sig-abc".to_string());
+
+        let body = codec
+            .build_body(
+                &request(vec![msg(MessageRole::User, "hi"), assistant], None),
+                &profile(),
+            )
+            .expect("must build");
+        let content = body["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], serde_json::json!("thinking"));
+        assert_eq!(content[0]["signature"], serde_json::json!("sig-abc"));
+        assert_eq!(content[1]["type"], serde_json::json!("text"));
+        assert_eq!(content[1]["text"], serde_json::json!("the answer"));
     }
 
     #[test]

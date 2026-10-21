@@ -6,13 +6,13 @@ use llm_suite_types::llm::{LlmProfile, LlmRequest, LlmResult as LlmResponseType}
 
 use llm_suite_client::client::{LlmClient, LlmClientImpl};
 use llm_suite_client::MessageStream;
-use llm_token::{compute_cost, PricingResolver};
 use llm_suite_codec::error::{LlmError, LlmResult};
 use llm_suite_codec::CodecRegistry;
 use llm_suite_config::catalog::ModelCatalog;
 use llm_suite_config::merge_request;
 use llm_suite_config::profile::ProfileManager;
 use llm_suite_config::provider::{apply_provider_defaults, ProviderDefinitionRegistry};
+use llm_token::{compute_cost, PricingResolver};
 
 /// Assembled request ready for dispatch: the resolved profile snapshot,
 /// the merged effective request and the cached client bound to them.
@@ -542,11 +542,9 @@ impl LlmGateway {
         // per-kind cost fields) are filled in when a price is found.
         let mut enriched = usage.clone();
         if let Some(resolver) = self.pricing_resolver.as_ref() {
-            if let Some(resolved) =
-                resolver.resolve(profile.provider_id.as_deref(), &profile.model)
+            if let Some(resolved) = resolver.resolve(profile.provider_id.as_deref(), &profile.model)
             {
-                compute_cost(&enriched, &resolved.pricing, resolved.scope)
-                    .apply_to(&mut enriched);
+                compute_cost(&enriched, &resolved.pricing, resolved.scope).apply_to(&mut enriched);
             }
         }
         metrics.record_token_usage(&enriched, Some(&profile.model));

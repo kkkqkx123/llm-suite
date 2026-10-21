@@ -18,15 +18,19 @@ pub struct LlmResult {
     pub tool_calls: Option<Vec<super::super::message::LlmToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<super::TokenUsageStats>,
-    /// Provider-native stop value, passed through untouched per codec:
-    /// OpenAI Chat emits `stop` / `tool_calls` / `length` / `content_filter`,
-    /// OpenAI Responses emits `completed` / `incomplete`, Anthropic emits its
-    /// `stop_reason` set (`end_turn` / `tool_use` / `max_tokens` / `stop_sequence`
-    /// / `pause_turn` / `refusal` / `model_context_window_exceeded`), Gemini
-    /// emits the normalized `finishReason`. No cross-codec normalization is
-    /// applied; consumers matching on this value must handle each family.
+    /// Stop value of the turn.
+    ///
+    /// The two OpenAI formats and Gemini report the same vocabulary
+    /// (`stop` / `length` / `content_filter` / `tool_calls`); Anthropic
+    /// reports its own `stop_reason` set (`end_turn` / `tool_use` /
+    /// `max_tokens` / `stop_sequence` / `pause_turn` / `refusal` /
+    /// `model_context_window_exceeded`). The raw lifecycle state of a
+    /// Responses call stays available in `metadata` under `status`.
     pub finish_reason: Option<String>,
     pub duration: i64,
+    /// Reasoning text the provider produced. The same text is carried on
+    /// `message.thinking`, so replaying the message in a follow-up turn
+    /// keeps it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
     /// Provider signature for the reasoning block (Anthropic extended

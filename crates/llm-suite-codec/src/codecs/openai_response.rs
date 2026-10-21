@@ -220,11 +220,23 @@ impl OpenaiResponseCodec {
         tools
             .iter()
             .map(|t| {
+                // The schema is a JSON Schema object; a tool without one must
+                // not serialize `null` (the API rejects it). An empty object
+                // schema is the accepted no-argument declaration.
+                let parameters =
+                    t.parameters
+                        .clone()
+                        .unwrap_or(llm_suite_types::tool::ToolParameterSchema {
+                            r#type: "object".to_string(),
+                            properties: Default::default(),
+                            required: Vec::new(),
+                            additional_properties: None,
+                        });
                 serde_json::json!({
                     "type": "function",
                     "name": t.name,
                     "description": t.description,
-                    "parameters": t.parameters,
+                    "parameters": parameters,
                 })
             })
             .collect()
@@ -319,6 +331,15 @@ impl OpenaiResponseCodec {
     fn parse_stream_events(&self, data: &str) -> LlmResult<Vec<MessageStreamEvent>> {
         if data.is_empty() {
             return Ok(Vec::new());
+        }
+
+        // The Responses SSE stream is terminated by a `[DONE]` sentinel that
+        // is not JSON; it closes the turn like the Chat Completions stream
+        // does.
+        if data.trim() == "[DONE]" {
+            return Ok(vec![MessageStreamEvent::End(
+                llm_suite_types::llm::MessageStreamEnd {},
+            )]);
         }
 
         let json: serde_json::Value = serde_json::from_str(data)?;
@@ -826,14 +847,27 @@ impl OpenaiResponseCodec {
             tool_call_id: None,
             tool_name: None,
             tool_calls: tool_calls.clone(),
-            thinking: None,
+            // The reasoning text also lives on the message so that replaying
+            // the message in a follow-up turn keeps it, the same way the
+            // Anthropic codec does.
+            thinking: reasoning_content.clone(),
             thinking_signature: None,
             metadata: None,
         };
 
-        // Provider-native status passed through untouched (`completed` /
-        // `incomplete` / `failed`); never normalized here.
-        let finish_reason = status;
+        // The raw lifecycle state of the response; the stop value below is
+        // derived from it.
+        let raw_status = status;
+
+        // The stop value uses the same vocabulary as the Chat Completions
+        // codec: the Responses `status` is a lifecycle state, not a stop
+        // reason. The reason an incomplete response stopped lives in
+        // `incomplete_details.reason`.
+        let finish_reason = Self::stop_reason(
+            raw_status.as_deref(),
+            json.pointer("/incomplete_details/reason")
+                .and_then(|v| v.as_str()),
+        );
 
         // Why an incomplete response stopped: `max_output_tokens`,
         // `max_messages`, `content_filter` or `steered`.
@@ -844,11 +878,16 @@ impl OpenaiResponseCodec {
         {
             metadata.insert("incomplete_reason".to_string(), serde_json::json!(reason));
         }
+        if let Some(ref status) = raw_status {
+            metadata.insert("status".to_string(), serde_json::json!(status));
+        }
         let metadata = if metadata.is_empty() {
             None
         } else {
             Some(metadata)
         };
+
+        let reasoning_tokens = usage.as_ref().and_then(|u| u.reasoning_tokens);
 
         Ok(LlmResponseType {
             id,
@@ -861,11 +900,36 @@ impl OpenaiResponseCodec {
             duration: 0,
             reasoning_content,
             reasoning_signature: None,
-            reasoning_tokens: None,
+            reasoning_tokens,
             metadata,
             refusal,
             stream_stats: None,
         })
+    }
+
+    /// Map the Responses lifecycle state onto the stop vocabulary the Chat
+    /// Completions codec reports.
+    ///
+    /// A finished response stopped because the model answered (`stop`), ran
+    /// out of output budget (`length`), was cut by a content filter
+    /// (`content_filter`) or asked for a tool (`tool_calls`). The official
+    /// `incomplete_details.reason` values (`max_output_tokens`,
+    /// `max_messages`, `content_filter`, `steered`) decide the outcome.
+    fn stop_reason(status: Option<&str>, incomplete_reason: Option<&str>) -> Option<String> {
+        match status {
+            Some("failed") => Some("error".to_string()),
+            Some("incomplete") => Some(match incomplete_reason {
+                Some("max_output_tokens") | Some("max_messages") => "length".to_string(),
+                Some("content_filter") => "content_filter".to_string(),
+                Some(other) => other.to_string(),
+                None => "incomplete".to_string(),
+            }),
+            Some("completed") => Some("stop".to_string()),
+            Some("cancelled") => Some("cancelled".to_string()),
+            Some("queued") | Some("in_progress") => None,
+            Some(other) => Some(other.to_string()),
+            None => None,
+        }
     }
 }
 
@@ -1144,6 +1208,18 @@ mod tests {
     }
 
     #[test]
+    fn the_done_sentinel_ends_the_stream() {
+        // The official Responses stream closes with a `[DONE]` sentinel that
+        // is not JSON.
+        let codec = OpenaiResponseCodec::new();
+        let events = codec
+            .parse_stream_chunk_events("[DONE]")
+            .expect("the sentinel must not be a parse error");
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], MessageStreamEvent::End(_)));
+    }
+
+    #[test]
     fn parse_response_extracts_text_output_and_usage() {
         let codec = OpenaiResponseCodec::new();
         let body = r#"{
@@ -1185,7 +1261,16 @@ mod tests {
             )
             .unwrap();
         assert_eq!(result.content.as_deref(), Some("the answer"));
-        assert_eq!(result.finish_reason.as_deref(), Some("completed"));
+        assert_eq!(
+            result.finish_reason.as_deref(),
+            Some("stop"),
+            "the stop value uses the same vocabulary as the Chat Completions codec"
+        );
+        assert_eq!(
+            result.metadata.as_ref().unwrap()["status"],
+            serde_json::json!("completed"),
+            "the raw response status stays available"
+        );
         assert_eq!(result.usage.as_ref().unwrap().total_tokens, 20);
         assert_eq!(result.usage.as_ref().unwrap().cache_read_tokens, Some(5));
         assert_eq!(result.usage.as_ref().unwrap().cache_write_tokens, Some(2));
@@ -1375,6 +1460,51 @@ mod tests {
             .as_bytes()
             .map(|b| serde_json::from_slice(b).unwrap())
             .unwrap()
+    }
+
+    #[test]
+    fn the_request_carries_no_parameter_the_api_does_not_know() {
+        // The Responses API has no `seed`; only Chat Completions does.
+        let codec = OpenaiResponseCodec::new();
+        let mut request = count_request();
+        request.generation = Some(llm_suite_types::llm::generation::LlmGenerationParams {
+            seed: Some(42),
+            ..Default::default()
+        });
+        let built = codec
+            .build_request(&request, &count_profile())
+            .expect("must build");
+        let body = request_body(&built);
+        assert!(
+            body.get("seed").is_none(),
+            "the Responses API rejects unknown request fields: {body:?}"
+        );
+    }
+
+    #[test]
+    fn the_json_schema_format_is_flat() {
+        // The Responses API keeps name, schema and strict next to the type,
+        // while Chat Completions nests them under `json_schema`.
+        let codec = OpenaiResponseCodec::new();
+        let mut request = count_request();
+        request.generation = Some(llm_suite_types::llm::generation::LlmGenerationParams {
+            response_format: Some(llm_suite_types::llm::generation::LlmResponseFormat {
+                kind: Some(llm_suite_types::llm::generation::ResponseFormatKind::JsonSchema),
+                name: Some("answer".to_string()),
+                schema: Some(serde_json::json!({"type": "object"})),
+                strict: Some(true),
+            }),
+            ..Default::default()
+        });
+        let built = codec
+            .build_request(&request, &count_profile())
+            .expect("must build");
+        let body = request_body(&built);
+        let format = &body["text"]["format"];
+        assert_eq!(format["type"], serde_json::json!("json_schema"));
+        assert_eq!(format["name"], serde_json::json!("answer"));
+        assert_eq!(format["strict"], serde_json::json!(true));
+        assert!(format.get("json_schema").is_none(), "{body:?}");
     }
 
     #[test]
@@ -1658,6 +1788,60 @@ mod tests {
             result.reasoning_content.as_deref(),
             Some("I am thinking...")
         );
+        assert_eq!(
+            result.message.thinking.as_deref(),
+            Some("I am thinking..."),
+            "the message carries the reasoning so a follow-up turn keeps it"
+        );
+    }
+
+    #[test]
+    fn parse_response_reports_the_reasoning_tokens_of_the_usage() {
+        let codec = OpenaiResponseCodec::new();
+        let body = r#"{
+            "id":"resp_x","object":"response","model":"gpt-4o","status":"completed",
+            "output": [{"type":"message","content":[{"type":"output_text","text":"hi"}]}],
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 20,
+                "total_tokens": 30,
+                "output_tokens_details": {"reasoning_tokens": 12}
+            }
+        }"#;
+        let result = codec.parse_response(body, &minimal_request()).unwrap();
+        assert_eq!(result.reasoning_tokens, Some(12));
+        assert_eq!(result.usage.as_ref().unwrap().reasoning_tokens, Some(12));
+    }
+
+    #[test]
+    fn an_incomplete_response_reports_why_it_stopped() {
+        let codec = OpenaiResponseCodec::new();
+        let cases = [
+            ("max_output_tokens", "length"),
+            ("max_messages", "length"),
+            ("content_filter", "content_filter"),
+        ];
+        for (reason, expected) in cases {
+            let body = format!(
+                r#"{{"id":"resp_x","object":"response","model":"gpt-4o","status":"incomplete",
+                    "incomplete_details":{{"reason":"{reason}"}},
+                    "output": []}}"#
+            );
+            let result = codec.parse_response(&body, &minimal_request()).unwrap();
+            assert_eq!(
+                result.finish_reason.as_deref(),
+                Some(expected),
+                "{reason} must map to {expected}"
+            );
+            assert_eq!(
+                result.metadata.as_ref().unwrap()["incomplete_reason"],
+                serde_json::json!(reason)
+            );
+            assert_eq!(
+                result.metadata.as_ref().unwrap()["status"],
+                serde_json::json!("incomplete")
+            );
+        }
     }
 
     #[test]

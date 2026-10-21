@@ -335,6 +335,14 @@ impl MessageAccumulator {
                     },
                 ))
             }
+            MessageStreamEvent::RedactedThinking(redacted) => {
+                // The payload is opaque and has to survive into the final
+                // message so the reply can be replayed in the next turn.
+                self.content_blocks.push(MessageContent::RedactedThinking {
+                    data: redacted.data.clone(),
+                });
+                Some(MessageStreamEvent::RedactedThinking(redacted))
+            }
             MessageStreamEvent::Usage(usage_event) => {
                 // Field-wise merge: providers deliver usage across several
                 // events (Anthropic's `message_start` carries input tokens,
@@ -400,10 +408,19 @@ impl MessageAccumulator {
 
                 // Build final message
                 let (tool_calls, call_signatures) = self.assemble_tool_calls();
+                // The rich blocks lead the content: a provider that sends
+                // them (Anthropic's redacted thinking) requires them before
+                // the text of the turn.
                 let content = if self.content_blocks.is_empty() {
                     MessageContentValue::Text(self.text_snapshot.clone())
                 } else {
-                    MessageContentValue::Rich(self.content_blocks.clone())
+                    let mut blocks = self.content_blocks.clone();
+                    if !self.text_snapshot.is_empty() {
+                        blocks.push(MessageContent::Text {
+                            text: self.text_snapshot.clone(),
+                        });
+                    }
+                    MessageContentValue::Rich(blocks)
                 };
                 let metadata = self.tool_call_signatures(&call_signatures);
 
@@ -871,5 +888,181 @@ mod tests {
             final_msg.message.thinking_signature.as_deref(),
             Some("sig-asig-b")
         );
+    }
+
+    #[test]
+    fn input_json_fragments_build_the_tool_call_and_its_parsed_snapshot() {
+        use llm_suite_types::llm::MessageStreamInputJson;
+
+        let mut acc = MessageAccumulator::new(None);
+
+        // The call is announced first, the arguments follow in fragments.
+        acc.push(MessageStreamEvent::ToolCallDelta(
+            llm_suite_types::llm::MessageStreamToolCallDelta {
+                index: 0,
+                id: Some("toolu_1".to_string()),
+                call_id: None,
+                name: Some("get_weather".to_string()),
+                arguments: None,
+                thought_signature: None,
+                is_snapshot: false,
+            },
+        ));
+        let emitted = acc
+            .push(MessageStreamEvent::InputJson(MessageStreamInputJson {
+                partial_json: "{\"city\":\"Bei".to_string(),
+                index: Some(0),
+                parsed_snapshot: None,
+            }))
+            .expect("the fragment must be forwarded");
+        match emitted {
+            MessageStreamEvent::InputJson(input) => {
+                assert_eq!(input.index, Some(0));
+                assert_eq!(input.partial_json, "{\"city\":\"Bei");
+                assert_eq!(
+                    input.parsed_snapshot.as_ref().and_then(|v| v.get("city")),
+                    Some(&serde_json::json!("Bei")),
+                    "the incomplete arguments are parsed on the fly"
+                );
+            }
+            other => panic!("expected InputJson, got {other:?}"),
+        }
+
+        let final_event = acc.push(MessageStreamEvent::End(
+            llm_suite_types::llm::MessageStreamEnd {},
+        ));
+        let MessageStreamEvent::FinalMessage(final_msg) = final_event.unwrap() else {
+            panic!("expected FinalMessage");
+        };
+        let calls = final_msg.message.tool_calls.expect("tool calls present");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[0].function.arguments, "{\"city\":\"Bei");
+    }
+
+    #[test]
+    fn a_redacted_thinking_payload_reaches_the_final_message() {
+        use llm_suite_types::llm::MessageStreamRedactedThinking;
+
+        let mut acc = MessageAccumulator::new(None);
+        acc.push(MessageStreamEvent::RedactedThinking(
+            MessageStreamRedactedThinking {
+                data: "c2VjcmV0".to_string(),
+            },
+        ));
+        acc.push(MessageStreamEvent::Text(MessageStreamText {
+            text: "answer".to_string(),
+            snapshot: String::new(),
+        }));
+
+        let final_event = acc.push(MessageStreamEvent::End(
+            llm_suite_types::llm::MessageStreamEnd {},
+        ));
+        let MessageStreamEvent::FinalMessage(final_msg) = final_event.unwrap() else {
+            panic!("expected FinalMessage");
+        };
+        match &final_msg.message.content {
+            MessageContentValue::Rich(blocks) => {
+                assert_eq!(blocks.len(), 2);
+                assert!(matches!(
+                    &blocks[0],
+                    MessageContent::RedactedThinking { data } if data == "c2VjcmV0"
+                ));
+                assert!(matches!(
+                    &blocks[1],
+                    MessageContent::Text { text } if text == "answer"
+                ));
+            }
+            other => panic!("expected rich content, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_anthropic_stream_assembles_the_tool_call_from_the_json_fragments() {
+        use futures::stream;
+        use llm_suite_types::llm::MessageStreamEvent;
+
+        let sse = concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-sonnet\",\"usage\":{\"input_tokens\":25,\"output_tokens\":1}}}\n\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"get_weather\",\"input\":{}}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"city\\\":\\\"Bei\"}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"jing\\\"}\"}}\n\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":7}}\n\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+
+        let inner = stream::iter(vec![Ok::<_, std::io::Error>(sse.as_bytes().to_vec())]);
+        let sse_stream = EventStream::new(inner);
+        let codec: Arc<dyn LlmCodec> = Arc::new(llm_suite_codec::AnthropicCodec::new());
+        let mut stream = SseMessageStream::new(sse_stream, codec, None, None);
+
+        let mut events: Vec<MessageStreamEvent> = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event.expect("no stream error"));
+        }
+
+        let final_msg = events
+            .iter()
+            .find_map(|e| match e {
+                MessageStreamEvent::FinalMessage(f) => Some(f),
+                _ => None,
+            })
+            .expect("FinalMessage must be emitted");
+        let calls = final_msg
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("tool calls must be assembled");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "toolu_1");
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[0].function.arguments, r#"{"city":"Beijing"}"#);
+
+        // The incremental parser reports the arguments while they are still
+        // incomplete.
+        let fragments: Vec<&MessageStreamEvent> = events
+            .iter()
+            .filter(|e| matches!(e, MessageStreamEvent::InputJson(_)))
+            .collect();
+        assert_eq!(fragments.len(), 2, "both fragments must be forwarded");
+        assert!(matches!(events.last(), Some(MessageStreamEvent::End(_))));
+    }
+
+    #[tokio::test]
+    async fn the_responses_stream_ends_on_the_done_sentinel() {
+        use futures::stream;
+        use llm_suite_types::llm::MessageStreamEvent;
+
+        // The official Responses stream closes with `data: [DONE]`.
+        let sse = concat!(
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-4o\"}}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":3,\"output_tokens\":2,\"total_tokens\":5}}}\n\n",
+            "data: [DONE]\n\n",
+        );
+
+        let inner = stream::iter(vec![Ok::<_, std::io::Error>(sse.as_bytes().to_vec())]);
+        let sse_stream = EventStream::new(inner);
+        let codec: Arc<dyn LlmCodec> = Arc::new(llm_suite_codec::OpenaiResponseCodec::new());
+        let mut stream = SseMessageStream::new(sse_stream, codec, None, None);
+
+        let mut events: Vec<MessageStreamEvent> = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event.expect("no stream error"));
+        }
+
+        let final_msg = events
+            .iter()
+            .find_map(|e| match e {
+                MessageStreamEvent::FinalMessage(f) => Some(f),
+                _ => None,
+            })
+            .expect("FinalMessage must be emitted");
+        assert_eq!(
+            llm_suite_message::helper::extract_text_content(&final_msg.message),
+            "Hello"
+        );
+        assert_eq!(final_msg.usage.as_ref().unwrap().total_tokens, 5);
+        assert!(matches!(events.last(), Some(MessageStreamEvent::End(_))));
     }
 }

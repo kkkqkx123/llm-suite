@@ -489,6 +489,24 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_without_parameters_declares_an_empty_object_schema() {
+        let codec = OpenaiChatCodec::new();
+        let mut req = request_with_format(ToolCallProtocol::Native);
+        req.tools = Some(vec![llm_suite_types::tool::Tool {
+            name: "get_time".to_string(),
+            description: "Returns the current time".to_string(),
+            parameters: None,
+        }]);
+        let body = codec.build_body(&req, &profile()).expect("must build");
+        let parameters = &body["tools"][0]["function"]["parameters"];
+        assert!(
+            parameters.is_object(),
+            "the schema must be an object, never null: {body:?}"
+        );
+        assert_eq!(parameters["type"], serde_json::json!("object"));
+    }
+
+    #[test]
     fn a_custom_body_replaces_the_built_message_list() {
         let mut p = profile();
         p.custom_body =

@@ -365,10 +365,11 @@ mod tests {
             completion_tokens: u32,
             model: Option<&str>,
         ) {
-            self.stats
-                .lock()
-                .expect("stats lock poisoned")
-                .push((stats.clone(), completion_tokens, model.map(String::from)));
+            self.stats.lock().expect("stats lock poisoned").push((
+                stats.clone(),
+                completion_tokens,
+                model.map(String::from),
+            ));
         }
 
         fn record_request(
@@ -424,12 +425,9 @@ mod tests {
             ],
         };
         let metrics = std::sync::Arc::new(RecordingMetricsSink::new());
-        let mut stream = TokenRecordingStream::new(
-            Box::new(inner),
-            None,
-            "claude-sonnet".to_string(),
-        )
-        .with_metrics_sink(Some(metrics.clone()));
+        let mut stream =
+            TokenRecordingStream::new(Box::new(inner), None, "claude-sonnet".to_string())
+                .with_metrics_sink(Some(metrics.clone()));
         while stream.next().await.is_some() {}
 
         let (stats, completion_tokens, model) = metrics.last();

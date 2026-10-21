@@ -14,6 +14,7 @@ pub enum MessageStreamEventType {
     Abort,
     End,
     ReasoningText,
+    RedactedThinking,
     Refusal,
     Usage,
     ToolCallDelta,
@@ -33,6 +34,7 @@ pub enum MessageStreamEvent {
     Abort(MessageStreamAbort),
     End(MessageStreamEnd),
     ReasoningText(MessageStreamReasoning),
+    RedactedThinking(MessageStreamRedactedThinking),
     Refusal(MessageStreamRefusal),
     Usage(MessageStreamUsage),
     ToolCallDelta(MessageStreamToolCallDelta),
@@ -144,6 +146,17 @@ pub struct MessageStreamRefusal {
     pub refusal: String,
     #[serde(default)]
     pub snapshot: String,
+}
+
+/// Opaque provider payload that has to be replayed verbatim.
+///
+/// Anthropic redacts a thinking block when a safety filter intervenes; the
+/// redacted payload travels in the block and the API expects it back in the
+/// next turn. The provider never sends it as text, so it gets its own
+/// channel.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MessageStreamRedactedThinking {
+    pub data: String,
 }
 
 /// Token usage reported mid-stream (e.g. OpenAI's `include_usage` chunk or
