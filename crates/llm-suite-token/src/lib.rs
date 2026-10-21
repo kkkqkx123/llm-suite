@@ -3,6 +3,7 @@
 pub mod count;
 pub mod estimation;
 pub mod pricing;
+pub mod pricing_resolver;
 
 pub use count::{
     estimate_image_tokens, estimate_message_tokens, estimate_messages, estimate_request_tokens,
@@ -10,3 +11,4 @@ pub use count::{
 };
 pub use estimation::{estimate_tokens, TokenEstimator};
 pub use pricing::{compute_cost, CacheTokenScope, TokenCost, TokenPricing};
+pub use pricing_resolver::{PricingResolver, ResolvedPricing};

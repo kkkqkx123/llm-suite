@@ -6,6 +6,7 @@ use llm_suite_types::llm::{LlmProfile, LlmRequest, LlmResult as LlmResponseType}
 
 use llm_suite_client::client::{LlmClient, LlmClientImpl};
 use llm_suite_client::MessageStream;
+use llm_token::{compute_cost, PricingResolver};
 use llm_suite_codec::error::{LlmError, LlmResult};
 use llm_suite_codec::CodecRegistry;
 use llm_suite_config::catalog::ModelCatalog;
@@ -67,6 +68,11 @@ pub struct LlmGateway {
     #[cfg(feature = "mock")]
     mock_clients: Arc<DashMap<String, Arc<llm_suite_client::MockLlmClient>>>,
     token_metrics: Option<SharedLlmMetricsSink>,
+    /// Optional pricing resolver that enriches recorded token usage with a
+    /// computed cost. When present, `record_token_usage` resolves the
+    /// (provider, model) price and attaches `total_cost` to the usage before
+    /// handing it to the metrics sink. Zero overhead when absent.
+    pricing_resolver: Option<Arc<dyn PricingResolver>>,
 }
 
 impl LlmGateway {
@@ -88,12 +94,20 @@ impl LlmGateway {
             #[cfg(feature = "mock")]
             mock_clients: Arc::new(DashMap::new()),
             token_metrics: None,
+            pricing_resolver: None,
         }
     }
 
     /// Attach an optional token usage collector (zero overhead when absent).
     pub fn with_token_metrics(mut self, token_metrics: SharedLlmMetricsSink) -> Self {
         self.token_metrics = Some(token_metrics);
+        self
+    }
+
+    /// Attach an optional pricing resolver that enriches recorded token usage
+    /// with a computed cost (see `record_token_usage`). Zero overhead when absent.
+    pub fn with_pricing_resolver(mut self, resolver: Arc<dyn PricingResolver>) -> Self {
+        self.pricing_resolver = Some(resolver);
         self
     }
 
@@ -520,7 +534,19 @@ impl LlmGateway {
         let Some(usage) = result.usage.as_ref() else {
             return;
         };
-        metrics.record_token_usage(usage, Some(&profile.model));
+        // Enrich usage with a computed cost when a pricing resolver is wired.
+        // `enriched` keeps the original fields; only `total_cost` (and the
+        // per-kind cost fields) are filled in when a price is found.
+        let mut enriched = usage.clone();
+        if let Some(resolver) = self.pricing_resolver.as_ref() {
+            if let Some(resolved) =
+                resolver.resolve(profile.provider_id.as_deref(), &profile.model)
+            {
+                compute_cost(&enriched, &resolved.pricing, resolved.scope)
+                    .apply_to(&mut enriched);
+            }
+        }
+        metrics.record_token_usage(&enriched, Some(&profile.model));
     }
 
     fn record_request(
