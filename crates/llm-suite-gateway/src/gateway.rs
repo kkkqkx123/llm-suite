@@ -622,7 +622,7 @@ mod tests {
     use llm_suite_codec::error::LlmError;
     use llm_suite_codec::CodecRegistry;
     use llm_suite_codec::LlmCodec;
-    use llm_suite_types::llm::{LlmFormat, LlmProfile, LlmRequest, MessageStreamEvent};
+    use llm_suite_types::llm::{LlmFormat, LlmProfile, LlmRequest};
     use llm_suite_types::tool::Tool;
 
     /// A codec whose `build_request` fails with a distinctive error, used
@@ -640,10 +640,6 @@ mod tests {
 
         fn parse_response(&self, _body: &str, _request: &LlmRequest) -> LlmResult<LlmResponseType> {
             Err(LlmError::ConfigError("custom codec engaged".to_string()))
-        }
-
-        fn parse_stream_chunk(&self, _data: &str) -> LlmResult<Option<MessageStreamEvent>> {
-            Ok(None)
         }
 
         fn convert_tools(&self, _tools: &[Tool]) -> LlmResult<Vec<serde_json::Value>> {

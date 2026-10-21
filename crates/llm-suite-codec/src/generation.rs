@@ -8,7 +8,7 @@ pub mod validate;
 
 pub use emit::{
     apply_anthropic, apply_gemini_generation_config, apply_openai_chat, apply_openai_responses,
-    gemini_schema_value,
+    gemini_schema_value, gemini_tool_config,
 };
 pub use parse::{is_typed_param_key, parse_legacy_generation};
 pub use validate::{validate_generation, ANTHROPIC_DEFAULT_MAX_TOKENS};
@@ -39,7 +39,8 @@ mod tests {
     use super::*;
     use llm_suite_types::llm::generation::{
         LlmMaxTokenField, LlmThinkingConfig, ThinkingLevel, Verbosity,
-    };    use llm_suite_types::llm::LlmFormat;
+    };
+    use llm_suite_types::llm::LlmFormat;
 
     fn profile_with(
         format: LlmFormat,
@@ -229,6 +230,49 @@ mod tests {
         .expect("generation must apply");
         assert_eq!(body["max_completion_tokens"], serde_json::json!(512));
         assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn chat_rejects_the_responses_only_service_tier() {
+        let mut body = serde_json::json!({"model": "gpt-4o"});
+        let err = apply_openai_chat(
+            &mut body,
+            &LlmGenerationParams {
+                service_tier: Some(llm_suite_types::llm::generation::LlmServiceTier::Ultrafast),
+                ..Default::default()
+            },
+        )
+        .expect_err("`ultrafast` is not a Chat Completions tier");
+        assert!(format!("{err}").contains("ultrafast"), "{err}");
+    }
+
+    #[test]
+    fn responses_accepts_the_ultrafast_service_tier() {
+        let mut body = serde_json::json!({"model": "gpt-4o"});
+        apply_openai_responses(
+            &mut body,
+            &LlmGenerationParams {
+                service_tier: Some(llm_suite_types::llm::generation::LlmServiceTier::Ultrafast),
+                ..Default::default()
+            },
+        )
+        .expect("`ultrafast` is a Responses tier");
+        assert_eq!(body["service_tier"], serde_json::json!("ultrafast"));
+    }
+
+    #[test]
+    fn the_end_user_identifier_uses_the_safety_identifier_field() {
+        let mut body = serde_json::json!({"model": "gpt-4o"});
+        apply_openai_chat(
+            &mut body,
+            &LlmGenerationParams {
+                user_id: Some("user-1".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("must apply");
+        assert_eq!(body["safety_identifier"], serde_json::json!("user-1"));
+        assert!(body.get("user").is_none(), "`user` is superseded");
     }
 
     #[test]

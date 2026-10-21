@@ -22,5 +22,5 @@ pub use config::EmbeddingConfig;
 pub use error::{EmbeddingError, Result};
 pub use openai_compatible::OpenAICompatibleProvider;
 pub use preprocessor::{PreprocessorConfig, PreprocessorImpl};
-pub use provider::{EmbeddingInput, EmbeddingProvider, EmbeddingResult, ImageUrlPayload};
+pub use provider::{EmbeddingInput, EmbeddingProvider, EmbeddingResult};
 pub use service::EmbeddingService;

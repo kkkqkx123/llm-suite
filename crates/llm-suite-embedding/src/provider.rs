@@ -27,22 +27,16 @@ pub enum EmbeddingInput {
     Image {
         #[serde(rename = "type")]
         kind: String,
-        image_url: ImageUrlPayload,
+        image_url: String,
     },
-}
-
-/// The `image_url` payload of [`EmbeddingInput::Image`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ImageUrlPayload {
-    pub url: String,
 }
 
 impl EmbeddingInput {
     /// Builds an image input from a URL or data URI.
     pub fn image(url: impl Into<String>) -> Self {
         EmbeddingInput::Image {
-            kind: "image_url".to_string(),
-            image_url: ImageUrlPayload { url: url.into() },
+            kind: "input_image".to_string(),
+            image_url: url.into(),
         }
     }
 

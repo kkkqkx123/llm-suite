@@ -101,10 +101,7 @@ impl LlmCodec for OpenaiChatCodec {
         // The profile may carry a full endpoint URL (custom path or query
         // string such as Azure `.../chat/completions?api-version=...`); in
         // that case it is used as-is, otherwise the built-in path applies.
-        let profile_url = profile
-            .base_url
-            .as_deref()
-            .unwrap_or(&self.base_url);
+        let profile_url = profile.base_url.as_deref().unwrap_or(&self.base_url);
         let url = shared::endpoint_url(profile_url, "chat/completions");
 
         let body = self.build_body(request, profile)?;
@@ -148,10 +145,6 @@ impl LlmCodec for OpenaiChatCodec {
         Ok(result)
     }
 
-    fn parse_stream_chunk(&self, data: &str) -> LlmResult<Option<MessageStreamEvent>> {
-        Ok(shared::parse_openai_stream_chunk(data)?.into_iter().next())
-    }
-
     fn parse_stream_chunk_events(&self, data: &str) -> LlmResult<Vec<MessageStreamEvent>> {
         shared::parse_openai_stream_chunk(data)
     }
@@ -172,9 +165,7 @@ impl LlmCodec for OpenaiChatCodec {
 mod tests {
     use super::*;
     use llm_suite_types::llm::{LlmStreamOptions, ToolCallProtocol};
-    use llm_suite_types::message::{
-        Message, MessageContent, MessageContentValue, MessageRole,
-    };
+    use llm_suite_types::message::{Message, MessageContent, MessageContentValue, MessageRole};
 
     fn text_msg(role: MessageRole, text: &str) -> Message {
         Message {
@@ -467,7 +458,10 @@ mod tests {
             .iter()
             .find(|m| m["role"] == serde_json::json!("assistant"))
             .expect("assistant message present");
-        assert_eq!(assistant["tool_calls"][0]["function"]["name"], "get_weather");
+        assert_eq!(
+            assistant["tool_calls"][0]["function"]["name"],
+            "get_weather"
+        );
         assert_eq!(
             assistant["tool_calls"][0]["function"]["arguments"],
             serde_json::json!(r#"{"city":"Beijing"}"#),
@@ -491,6 +485,38 @@ mod tests {
         assert!(
             tool_msg.get("is_error").is_none(),
             "Chat Completions tool messages carry no error flag"
+        );
+    }
+
+    #[test]
+    fn a_custom_body_replaces_the_built_message_list() {
+        let mut p = profile();
+        p.custom_body =
+            Some(serde_json::json!({"messages": [{"role": "user", "content": "only"}]}));
+        let codec = OpenaiChatCodec::new();
+        let body = codec
+            .build_body(&request_with_format(ToolCallProtocol::Native), &p)
+            .unwrap();
+        let messages = body["messages"].as_array().expect("messages");
+        assert_eq!(
+            messages.len(),
+            1,
+            "a custom body must not be concatenated with the built messages"
+        );
+        assert_eq!(messages[0]["content"], serde_json::json!("only"));
+    }
+
+    #[test]
+    fn annotations_are_reported_as_metadata() {
+        let codec = OpenaiChatCodec::new();
+        let body = r#"{"id":"1","model":"gpt-4o","choices":[{"message":{"role":"assistant","content":"42","annotations":[{"type":"url_citation","url_citation":{"start_index":0,"end_index":2,"title":"T","url":"https://example.com"}}]},"finish_reason":"stop"}]}"#;
+        let result = codec
+            .parse_response(body, &request_with_format(ToolCallProtocol::Native))
+            .expect("must parse");
+        let metadata = result.metadata.expect("metadata must be present");
+        assert_eq!(
+            metadata["annotations"][0]["url_citation"]["url"],
+            serde_json::json!("https://example.com")
         );
     }
 

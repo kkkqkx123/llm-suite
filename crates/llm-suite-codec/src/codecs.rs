@@ -19,7 +19,7 @@ pub use openai_response::OpenaiResponseCodec;
 
 /// Wire protocol codec with three responsibility bands:
 /// - core encoding (required): `build_request`, `parse_response`,
-///   `parse_stream_chunk`;
+///   `parse_stream_chunk_events`;
 /// - tool protocol companion (required): `convert_tools`, `parse_tool_calls`;
 /// - count-tokens extension (optional): `build_count_tokens_request`,
 ///   `parse_count_tokens_response`, both with default implementations.
@@ -35,17 +35,14 @@ pub trait LlmCodec: Send + Sync {
     /// Parse a non-streaming response. `request` carries the effective tool
     /// call protocol so the codec can route to text-mode parsing when needed.
     fn parse_response(&self, body: &str, request: &LlmRequest) -> LlmResult<LlmResponseType>;
-    fn parse_stream_chunk(&self, data: &str) -> LlmResult<Option<MessageStreamEvent>>;
-    /// Multi-event stream chunk parsing. Some wire formats pack several
-    /// logical events into one SSE chunk (e.g. Gemini parts plus
-    /// `finishReason`, or trailing `usageMetadata`); codecs that need to
-    /// emit more than one event per chunk override this. The default
-    /// delegates to `parse_stream_chunk` so existing codecs keep working.
-    fn parse_stream_chunk_events(&self, data: &str) -> LlmResult<Vec<MessageStreamEvent>> {
-        match self.parse_stream_chunk(data)? {
-            Some(event) => Ok(vec![event]),
-            None => Ok(Vec::new()),
-        }
+    /// Parse one SSE chunk into the logical events it carries.
+    ///
+    /// A single wire chunk can pack several events (Gemini parts plus
+    /// `finishReason`, a trailing `usageMetadata`, an Anthropic `message_delta`
+    /// carrying both usage and the stop reason). The whole list is returned
+    /// so no event is ever dropped.
+    fn parse_stream_chunk_events(&self, _data: &str) -> LlmResult<Vec<MessageStreamEvent>> {
+        Ok(Vec::new())
     }
     fn convert_tools(&self, tools: &[Tool]) -> LlmResult<Vec<serde_json::Value>>;
     fn parse_tool_calls(

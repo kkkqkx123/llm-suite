@@ -95,9 +95,14 @@ fn truncate(s: &str) -> String {
 }
 
 /// Deep merge two JSON values:
-/// - Arrays are concatenated
 /// - Objects are recursively merged (source wins on key conflicts)
+/// - Arrays are replaced by the source
 /// - Scalars are replaced by source
+///
+/// Arrays are replaced rather than concatenated: the wire body carries
+/// list-valued fields (`messages`, `tools`, `stop`) whose content is built by
+/// the codec, and concatenating a custom-body array with the built one would
+/// produce a malformed request.
 pub fn deep_merge(target: &serde_json::Value, source: &serde_json::Value) -> serde_json::Value {
     match (target, source) {
         (serde_json::Value::Object(t), serde_json::Value::Object(s)) => {
@@ -110,11 +115,6 @@ pub fn deep_merge(target: &serde_json::Value, source: &serde_json::Value) -> ser
                 }
             }
             serde_json::Value::Object(result)
-        }
-        (serde_json::Value::Array(t), serde_json::Value::Array(s)) => {
-            let mut result = t.clone();
-            result.extend(s.clone());
-            serde_json::Value::Array(result)
         }
         _ => source.clone(),
     }
@@ -215,8 +215,8 @@ mod tests {
         assert_eq!(merged["nested"]["keep"], serde_json::json!("me"));
         assert_eq!(
             merged["list"],
-            serde_json::json!([1, 2, 3]),
-            "arrays concat"
+            serde_json::json!([3]),
+            "arrays are replaced, never concatenated"
         );
     }
 

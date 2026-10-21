@@ -579,6 +579,7 @@ impl AnthropicCodec {
                                 call_id: None,
                                 name,
                                 arguments: None,
+                                thought_signature: None,
                                 is_snapshot: false,
                             },
                         )]);
@@ -634,6 +635,7 @@ impl AnthropicCodec {
                                         call_id: None,
                                         name: None,
                                         arguments: Some(partial.to_string()),
+                                        thought_signature: None,
                                         is_snapshot: false,
                                     },
                                 )]);
@@ -719,8 +721,8 @@ impl AnthropicCodec {
             usage: TokenUsageStats {
                 prompt_tokens,
                 completion_tokens,
-                // Recomputed by the stream accumulator from prompt +
-                // completion when the wire does not carry a total.
+                // The wire carries no total; the stream accumulator
+                // recomputes it from the merged counters.
                 total_tokens: 0,
                 reasoning_tokens,
                 cache_read_tokens,
@@ -801,10 +803,6 @@ impl LlmCodec for AnthropicCodec {
             }
         }
         Ok(result)
-    }
-
-    fn parse_stream_chunk(&self, data: &str) -> LlmResult<Option<MessageStreamEvent>> {
-        Ok(self.parse_stream_events(data)?.into_iter().next())
     }
 
     fn parse_stream_chunk_events(&self, data: &str) -> LlmResult<Vec<MessageStreamEvent>> {
@@ -943,10 +941,20 @@ impl AnthropicCodec {
         let usage = json.get("usage").map(|u| {
             let input = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
             let output = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let cache_read = u
+                .get("cache_read_input_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+            let cache_write = Self::cache_write_tokens(u).unwrap_or(0);
             llm_suite_types::llm::TokenUsageStats {
+                // Anthropic reports the cached input tokens next to the
+                // uncached ones; `prompt_tokens` stays the uncached count so
+                // the cache breakdown remains a separate, additive signal.
                 prompt_tokens: input,
                 completion_tokens: output,
-                total_tokens: input + output,
+                // The official total input is `input_tokens` plus the cache
+                // read and cache creation tokens.
+                total_tokens: input + cache_read + cache_write + output,
                 // Anthropic-native breakdown (not the OpenAI-shaped
                 // `completion_tokens_details.reasoning_tokens`).
                 reasoning_tokens: u
@@ -1003,6 +1011,9 @@ impl AnthropicCodec {
         if let Some(sr) = &stop_reason {
             metadata.insert("stop_reason".to_string(), serde_json::json!(sr));
         }
+        if let Some(seq) = json.get("stop_sequence").and_then(|v| v.as_str()) {
+            metadata.insert("stop_sequence".to_string(), serde_json::json!(seq));
+        }
         let metadata = if metadata.is_empty() {
             None
         } else {
@@ -1051,8 +1062,10 @@ mod tests {
     fn content_block_start_tool_use_emits_name_and_id() {
         let chunk = r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{}}}"#;
         match AnthropicCodec::new()
-            .parse_stream_chunk(chunk)
+            .parse_stream_chunk_events(chunk)
             .expect("chunk must parse")
+            .into_iter()
+            .next()
         {
             Some(MessageStreamEvent::ToolCallDelta(delta)) => {
                 assert_eq!(delta.index, 1);
@@ -1068,8 +1081,10 @@ mod tests {
     fn input_json_delta_emits_arguments_fragment() {
         let chunk = r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"city\":\"Beijing\"}"}}"#;
         match AnthropicCodec::new()
-            .parse_stream_chunk(chunk)
+            .parse_stream_chunk_events(chunk)
             .expect("chunk must parse")
+            .into_iter()
+            .next()
         {
             Some(MessageStreamEvent::ToolCallDelta(delta)) => {
                 assert_eq!(delta.index, 1);
@@ -1247,13 +1262,16 @@ mod tests {
         .expect("tool choice must be accepted");
         assert_eq!(body["tool_choice"]["type"], serde_json::json!("none"));
         assert!(
-            body["tool_choice"].get("disable_parallel_tool_use").is_none(),
+            body["tool_choice"]
+                .get("disable_parallel_tool_use")
+                .is_none(),
             "the none variant carries no parallel-tool flag"
         );
     }
 
     #[test]
-    fn count_tokens_includes_system() {        let codec = AnthropicCodec::new();
+    fn count_tokens_includes_system() {
+        let codec = AnthropicCodec::new();
         let req = request(
             vec![msg(
                 llm_suite_types::message::MessageRole::System,
@@ -1622,9 +1640,25 @@ mod tests {
         let usage = out.usage.expect("usage present");
         assert_eq!(usage.prompt_tokens, 10);
         assert_eq!(usage.completion_tokens, 20);
-        assert_eq!(usage.total_tokens, 30);
+        assert_eq!(
+            usage.total_tokens, 37,
+            "the official total counts the cached input tokens"
+        );
         assert_eq!(usage.cache_read_tokens, Some(5));
         assert_eq!(usage.cache_write_tokens, Some(2));
+    }
+
+    #[test]
+    fn the_matched_stop_sequence_is_reported_as_metadata() {
+        let codec = AnthropicCodec::new();
+        let body = r#"{"id":"m","model":"claude","stop_reason":"stop_sequence","stop_sequence":"END","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}"#;
+        let out = codec
+            .parse_response(body, &request(vec![], None))
+            .expect("must parse");
+        assert_eq!(
+            out.metadata.expect("metadata must be present")["stop_sequence"],
+            serde_json::json!("END")
+        );
     }
 
     #[test]
@@ -1718,17 +1752,10 @@ mod tests {
         let replayed_thinking = wire.iter().any(|message| {
             message["content"]
                 .as_array()
-                .map(|blocks| {
-                    blocks
-                        .iter()
-                        .any(|block| block["type"] == "thinking")
-                })
+                .map(|blocks| blocks.iter().any(|block| block["type"] == "thinking"))
                 .unwrap_or(false)
         });
-        assert!(
-            !replayed_thinking,
-            "unsigned thinking must not be replayed"
-        );
+        assert!(!replayed_thinking, "unsigned thinking must not be replayed");
     }
 
     #[test]

@@ -346,9 +346,7 @@ impl OpenaiResponseCodec {
                 // The function name and the call identity ride on the output
                 // item; the argument events that follow only carry fragments.
                 let item = json.get("item");
-                if item
-                    .and_then(|i| i.get("type"))
-                    .and_then(|v| v.as_str())
+                if item.and_then(|i| i.get("type")).and_then(|v| v.as_str())
                     == Some("function_call")
                 {
                     let index = json
@@ -374,6 +372,7 @@ impl OpenaiResponseCodec {
                             call_id,
                             name,
                             arguments: None,
+                            thought_signature: None,
                             is_snapshot: false,
                         },
                     ));
@@ -429,6 +428,7 @@ impl OpenaiResponseCodec {
                             call_id: None,
                             name: None,
                             arguments: Some(delta.to_string()),
+                            thought_signature: None,
                             is_snapshot: false,
                         },
                     ));
@@ -454,30 +454,47 @@ impl OpenaiResponseCodec {
                             call_id: None,
                             name: None,
                             arguments: Some(arguments.to_string()),
+                            thought_signature: None,
                             is_snapshot: true,
                         },
                     ));
                 }
             }
-            Some("response.failed") | Some("error") => {
+            Some("response.failed") => {
+                // The failure payload lives in the completed response object:
+                // `{"type":"response.failed","response":{...,"error":{...}}}`.
                 let message = json
-                    .get("error")
-                    .and_then(|e| match e {
-                        serde_json::Value::String(s) => Some(s.clone()),
-                        _ => e.get("message").and_then(|v| v.as_str()).map(String::from),
-                    })
-                    .unwrap_or_else(|| "stream error".to_string());
-                tracing::warn!(
-                    event = event_type.unwrap_or(""),
-                    "Responses stream ended with failure/error event",
-                );
+                    .pointer("/response/error/message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("response failed")
+                    .to_string();
+                tracing::warn!("Responses stream ended with a failed response: {message}");
                 events.push(MessageStreamEvent::Error(
                     llm_suite_types::llm::MessageStreamError { error: message },
                 ));
+                events.push(MessageStreamEvent::End(
+                    llm_suite_types::llm::MessageStreamEnd {},
+                ));
+            }
+            Some("error") => {
+                // Standalone stream error event: `{type, code, message, param}`.
+                let message = json
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("stream error")
+                    .to_string();
+                tracing::warn!("Responses stream ended with an error event: {message}");
+                events.push(MessageStreamEvent::Error(
+                    llm_suite_types::llm::MessageStreamError { error: message },
+                ));
+                events.push(MessageStreamEvent::End(
+                    llm_suite_types::llm::MessageStreamEnd {},
+                ));
             }
             Some("response.completed") | Some("response.incomplete") => {
-                // The terminal event carries the final usage summary.
-                if let Some(usage) = json.get("usage") {
+                // The terminal event carries the final usage summary inside
+                // the response object: `{"type":..,"response":{..,"usage":..}}`.
+                if let Some(usage) = json.pointer("/response/usage") {
                     events.push(MessageStreamEvent::Usage(
                         llm_suite_types::llm::MessageStreamUsage {
                             usage: llm_suite_types::llm::TokenUsageStats {
@@ -634,10 +651,6 @@ impl LlmCodec for OpenaiResponseCodec {
         Ok(result)
     }
 
-    fn parse_stream_chunk(&self, data: &str) -> LlmResult<Option<MessageStreamEvent>> {
-        Ok(self.parse_stream_events(data)?.into_iter().next())
-    }
-
     fn parse_stream_chunk_events(&self, data: &str) -> LlmResult<Vec<MessageStreamEvent>> {
         self.parse_stream_events(data)
     }
@@ -707,31 +720,41 @@ impl OpenaiResponseCodec {
                     "message" => {
                         if let Some(blocks) = item.get("content").and_then(|c| c.as_array()) {
                             for block in blocks {
-                                if block.get("type").and_then(|t| t.as_str()) == Some("output_text")
-                                {
-                                    if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
-                                        text_parts.push(t.to_string());
+                                match block.get("type").and_then(|t| t.as_str()) {
+                                    Some("output_text") => {
+                                        if let Some(t) = block.get("text").and_then(|v| v.as_str())
+                                        {
+                                            text_parts.push(t.to_string());
+                                        }
                                     }
+                                    // A refusal is a content block inside the
+                                    // message item, not a separate output item.
+                                    Some("refusal") => {
+                                        if let Some(t) =
+                                            block.get("refusal").and_then(|v| v.as_str())
+                                        {
+                                            refusal_parts.push(t.to_string());
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
                     }
-                    "refusal" => {
-                        if let Some(t) = item.get("refusal").and_then(|v| v.as_str()) {
-                            refusal_parts.push(t.to_string());
-                        }
-                    }
                     "reasoning" => {
+                        // The summary list and the reasoning text list are
+                        // siblings of the item, both optional.
+                        if let Some(blocks) = item.get("summary").and_then(|c| c.as_array()) {
+                            for block in blocks {
+                                if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
+                                    reasoning_parts.push(t.to_string());
+                                }
+                            }
+                        }
                         if let Some(blocks) = item.get("content").and_then(|c| c.as_array()) {
                             for block in blocks {
-                                match block.get("type").and_then(|t| t.as_str()).unwrap_or("") {
-                                    "text" | "summary_text" => {
-                                        if let Some(t) = block.get("text").and_then(|v| v.as_str())
-                                        {
-                                            reasoning_parts.push(t.to_string());
-                                        }
-                                    }
-                                    _ => {}
+                                if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
+                                    reasoning_parts.push(t.to_string());
                                 }
                             }
                         }
@@ -812,6 +835,21 @@ impl OpenaiResponseCodec {
         // `incomplete` / `failed`); never normalized here.
         let finish_reason = status;
 
+        // Why an incomplete response stopped: `max_output_tokens`,
+        // `max_messages`, `content_filter` or `steered`.
+        let mut metadata = std::collections::HashMap::new();
+        if let Some(reason) = json
+            .pointer("/incomplete_details/reason")
+            .and_then(|v| v.as_str())
+        {
+            metadata.insert("incomplete_reason".to_string(), serde_json::json!(reason));
+        }
+        let metadata = if metadata.is_empty() {
+            None
+        } else {
+            Some(metadata)
+        };
+
         Ok(LlmResponseType {
             id,
             model,
@@ -824,7 +862,7 @@ impl OpenaiResponseCodec {
             reasoning_content,
             reasoning_signature: None,
             reasoning_tokens: None,
-            metadata: None,
+            metadata,
             refusal,
             stream_stats: None,
         })
@@ -894,7 +932,12 @@ mod tests {
     fn streamed_tool_call_carries_the_provider_call_id() {
         let codec = OpenaiResponseCodec::new();
         let added = r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"get_weather","arguments":""}}"#;
-        match codec.parse_stream_chunk(added).expect("chunk must parse") {
+        match codec
+            .parse_stream_chunk_events(added)
+            .expect("chunk must parse")
+            .into_iter()
+            .next()
+        {
             Some(MessageStreamEvent::ToolCallDelta(d)) => {
                 assert_eq!(d.id.as_deref(), Some("fc_1"));
                 assert_eq!(d.call_id.as_deref(), Some("call_1"));
@@ -905,7 +948,8 @@ mod tests {
     }
 
     #[test]
-    fn tool_declaration_is_flat() {        let codec = OpenaiResponseCodec::new();
+    fn tool_declaration_is_flat() {
+        let codec = OpenaiResponseCodec::new();
         let tools = vec![serde_json::from_value(serde_json::json!({
             "name": "get_weather",
             "description": "Get weather",
@@ -939,7 +983,10 @@ mod tests {
         )
         .expect("tool choice must be accepted");
         assert_eq!(body["tool_choice"]["type"], serde_json::json!("function"));
-        assert_eq!(body["tool_choice"]["name"], serde_json::json!("get_weather"));
+        assert_eq!(
+            body["tool_choice"]["name"],
+            serde_json::json!("get_weather")
+        );
         assert!(
             body["tool_choice"].get("function").is_none(),
             "Responses names a function flat"
@@ -951,7 +998,12 @@ mod tests {
         let codec = OpenaiResponseCodec::new();
 
         let delta = r#"{"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":0,"delta":"{\"city\":"}"#;
-        match codec.parse_stream_chunk(delta).expect("chunk must parse") {
+        match codec
+            .parse_stream_chunk_events(delta)
+            .expect("chunk must parse")
+            .into_iter()
+            .next()
+        {
             Some(MessageStreamEvent::ToolCallDelta(d)) => {
                 assert_eq!(d.index, 0);
                 assert_eq!(d.arguments.as_deref(), Some(r#"{"city":"#));
@@ -961,7 +1013,12 @@ mod tests {
         }
 
         let done = r#"{"type":"response.function_call_arguments.done","item_id":"fc_1","output_index":0,"arguments":"{\"city\":\"Beijing\"}"}"#;
-        match codec.parse_stream_chunk(done).expect("chunk must parse") {
+        match codec
+            .parse_stream_chunk_events(done)
+            .expect("chunk must parse")
+            .into_iter()
+            .next()
+        {
             Some(MessageStreamEvent::ToolCallDelta(d)) => {
                 assert_eq!(d.index, 0, "fragments must land on the same call");
                 assert_eq!(d.id.as_deref(), Some("fc_1"));
@@ -976,7 +1033,12 @@ mod tests {
     fn output_item_added_announces_the_function_name() {
         let codec = OpenaiResponseCodec::new();
         let added = r#"{"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"get_weather","arguments":""}}"#;
-        match codec.parse_stream_chunk(added).expect("chunk must parse") {
+        match codec
+            .parse_stream_chunk_events(added)
+            .expect("chunk must parse")
+            .into_iter()
+            .next()
+        {
             Some(MessageStreamEvent::ToolCallDelta(d)) => {
                 assert_eq!(d.index, 1);
                 assert_eq!(d.id.as_deref(), Some("fc_1"));
@@ -992,7 +1054,7 @@ mod tests {
     fn terminal_event_emits_usage_and_ends_the_turn() {
         let codec = OpenaiResponseCodec::new();
 
-        let completed = r#"{"type":"response.completed","response":{"status":"completed"},"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15,"output_tokens_details":{"reasoning_tokens":2},"input_tokens_details":{"cached_tokens":3,"cache_write_tokens":4}}}"#;
+        let completed = r#"{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15,"output_tokens_details":{"reasoning_tokens":2},"input_tokens_details":{"cached_tokens":3,"cache_write_tokens":4}}}}"#;
         let events = codec
             .parse_stream_chunk_events(completed)
             .expect("completed chunk parses");
@@ -1023,10 +1085,12 @@ mod tests {
     fn created_event_emits_stream_identity() {
         let codec = OpenaiResponseCodec::new();
         match codec
-            .parse_stream_chunk(
+            .parse_stream_chunk_events(
                 r#"{"type":"response.created","response":{"id":"resp_1","model":"gpt-4o"}}"#,
             )
             .expect("created chunk parses")
+            .into_iter()
+            .next()
         {
             Some(MessageStreamEvent::Start(s)) => {
                 assert_eq!(s.id.as_deref(), Some("resp_1"));
@@ -1044,17 +1108,35 @@ mod tests {
                 r#"{{"type":"response.function_call_arguments.delta","item_id":"fc_{index}","output_index":{index},"delta":"x"}}"#
             )
         };
-        let i1 = match codec.parse_stream_chunk(&chunk(0)).unwrap().unwrap() {
+        let i1 = match codec
+            .parse_stream_chunk_events(&chunk(0))
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+        {
             MessageStreamEvent::ToolCallDelta(d) => d.index,
             other => panic!("expected ToolCallDelta, got {other:?}"),
         };
-        let i2 = match codec.parse_stream_chunk(&chunk(1)).unwrap().unwrap() {
+        let i2 = match codec
+            .parse_stream_chunk_events(&chunk(1))
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+        {
             MessageStreamEvent::ToolCallDelta(d) => d.index,
             other => panic!("expected ToolCallDelta, got {other:?}"),
         };
         assert_ne!(i1, i2);
         // The same output index always identifies the same call.
-        let again = match codec.parse_stream_chunk(&chunk(0)).unwrap().unwrap() {
+        let again = match codec
+            .parse_stream_chunk_events(&chunk(0))
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+        {
             MessageStreamEvent::ToolCallDelta(d) => d.index,
             other => panic!("expected ToolCallDelta, got {other:?}"),
         };
@@ -1562,9 +1644,11 @@ mod tests {
         let body = r#"{
             "id":"resp_x","object":"response","model":"gpt-4o","status":"completed",
             "output": [
-                {"type":"reasoning","content":[{"type":"text","text":"I am thinking..."}]},
-                {"type":"message","content":[{"type":"output_text","text":"hello"}]},
-                {"type":"refusal","refusal":"I cannot help with that."}
+                {"type":"reasoning","summary":[{"type":"summary_text","text":"I am thinking..."}]},
+                {"type":"message","content":[
+                    {"type":"output_text","text":"hello"},
+                    {"type":"refusal","refusal":"I cannot help with that."}
+                ]}
             ]
         }"#;
         let result = codec.parse_response(body, &minimal_request()).unwrap();
@@ -1596,8 +1680,10 @@ mod tests {
         // The running snapshot is owned by the stream accumulator, not by the
         // codec: the codec reports the raw increment only.
         match codec
-            .parse_stream_chunk(r#"{"type":"response.output_text.delta","delta":"Hello "}"#)
+            .parse_stream_chunk_events(r#"{"type":"response.output_text.delta","delta":"Hello "}"#)
             .unwrap()
+            .into_iter()
+            .next()
             .unwrap()
         {
             MessageStreamEvent::Text(t) => {
@@ -1612,8 +1698,12 @@ mod tests {
     fn stream_reasoning_delta_emits_reasoning_text() {
         let codec = OpenaiResponseCodec::new();
         match codec
-            .parse_stream_chunk(r#"{"type":"response.reasoning_text.delta","delta":"thinking"}"#)
+            .parse_stream_chunk_events(
+                r#"{"type":"response.reasoning_text.delta","delta":"thinking"}"#,
+            )
             .unwrap()
+            .into_iter()
+            .next()
             .unwrap()
         {
             MessageStreamEvent::ReasoningText(r) => {
@@ -1628,8 +1718,10 @@ mod tests {
     fn stream_refusal_delta_emits_refusal() {
         let codec = OpenaiResponseCodec::new();
         match codec
-            .parse_stream_chunk(r#"{"type":"response.refusal.delta","delta":"I cannot."}"#)
+            .parse_stream_chunk_events(r#"{"type":"response.refusal.delta","delta":"I cannot."}"#)
             .unwrap()
+            .into_iter()
+            .next()
             .unwrap()
         {
             MessageStreamEvent::Refusal(r) => assert_eq!(r.refusal, "I cannot."),
@@ -1641,9 +1733,15 @@ mod tests {
     fn stream_function_call_arguments_done_emits_snapshot() {
         let codec = OpenaiResponseCodec::new();
         let delta = r#"{"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":0,"delta":"{\"city\":"}"#;
-        codec.parse_stream_chunk(delta).unwrap();
+        codec.parse_stream_chunk_events(delta).unwrap();
         let done = r#"{"type":"response.function_call_arguments.done","item_id":"fc_1","output_index":0,"arguments":"{\"city\":\"Beijing\"}"}"#;
-        match codec.parse_stream_chunk(done).unwrap().unwrap() {
+        match codec
+            .parse_stream_chunk_events(done)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+        {
             MessageStreamEvent::ToolCallDelta(d) => {
                 assert!(d.is_snapshot, "done must emit a full snapshot");
                 assert_eq!(d.id.as_deref(), Some("fc_1"));
@@ -1656,13 +1754,18 @@ mod tests {
     #[test]
     fn stream_failed_emits_error_event() {
         let codec = OpenaiResponseCodec::new();
-        match codec
-            .parse_stream_chunk(r#"{"type":"response.failed","error":{"message":"boom"}}"#)
-            .unwrap()
-            .unwrap()
-        {
+        let chunk = r#"{"type":"response.failed","response":{"status":"failed","error":{"message":"boom","code":"server_error"}}}"#;
+        let events = codec
+            .parse_stream_chunk_events(chunk)
+            .expect("failed chunk parses");
+        assert_eq!(events.len(), 2, "the error and the terminal event");
+        match &events[0] {
             MessageStreamEvent::Error(e) => assert_eq!(e.error, "boom"),
             other => panic!("expected Error, got {other:?}"),
         }
+        assert!(
+            matches!(events[1], MessageStreamEvent::End(_)),
+            "a failed turn must end the stream"
+        );
     }
 }

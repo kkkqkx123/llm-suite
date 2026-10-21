@@ -142,8 +142,8 @@ pub fn convert_openai_messages(messages: &[Message]) -> Vec<serde_json::Value> {
                         MessageContent::ToolUse { tool_use } => {
                             // Chat Completions carries the call arguments as a
                             // JSON string under `function.arguments`.
-                            let arguments =
-                                serde_json::to_string(&tool_use.input).unwrap_or_else(|_| "{}".into());
+                            let arguments = serde_json::to_string(&tool_use.input)
+                                .unwrap_or_else(|_| "{}".into());
                             tool_calls.push(serde_json::json!({
                                 "id": tool_use.id,
                                 "type": "function",
@@ -380,6 +380,15 @@ pub fn parse_openai_chat_response(body: &str) -> LlmResult<LlmResponseType> {
     if let Some(fp) = json.get("system_fingerprint").and_then(|v| v.as_str()) {
         metadata.insert("system_fingerprint".to_string(), serde_json::json!(fp));
     }
+    // Web-search citations ride on `message.annotations`; they are the only
+    // place the sources of a grounded answer are reported.
+    if let Some(annotations) = message
+        .and_then(|m| m.get("annotations"))
+        .and_then(|a| a.as_array())
+        .filter(|a| !a.is_empty())
+    {
+        metadata.insert("annotations".to_string(), serde_json::json!(annotations));
+    }
     let metadata = if metadata.is_empty() {
         None
     } else {
@@ -508,6 +517,7 @@ pub fn parse_openai_stream_chunk(data: &str) -> LlmResult<Vec<MessageStreamEvent
                             call_id: None,
                             name,
                             arguments,
+                            thought_signature: None,
                             is_snapshot: false,
                         },
                     ));
@@ -580,6 +590,10 @@ pub fn endpoint_url(base_url: &str, path: &str) -> String {
 /// "bearer" / "x-api-key" / "x-goog-api-key"), otherwise `default_auth` is
 /// used. "native" maps to the format-specific header (x-api-key for Anthropic,
 /// x-goog-api-key for Gemini native, Bearer otherwise).
+///
+/// Headers are written once per name: `reqwest` appends duplicate header
+/// values instead of replacing them, so the profile headers are merged into a
+/// single table (`custom_headers` wins over `headers`) before they are set.
 pub fn apply_auth_and_headers(
     req_builder: reqwest::RequestBuilder,
     profile: &LlmProfile,
@@ -613,15 +627,8 @@ pub fn apply_auth_and_headers(
         }
     }
 
-    if let Some(headers) = &profile.headers {
-        for (key, value) in headers.iter() {
-            builder = builder.header(key, value.as_str().unwrap_or(""));
-        }
-    }
-    if let Some(custom_headers) = &profile.custom_headers {
-        for (key, value) in custom_headers.iter() {
-            builder = builder.header(key, value.as_str().unwrap_or(""));
-        }
+    for (key, value) in merged_profile_headers(profile) {
+        builder = builder.header(key, value);
     }
     if let Some(params) = &profile.query_params {
         let pairs: Vec<(&str, &str)> = params
@@ -632,6 +639,25 @@ pub fn apply_auth_and_headers(
     }
 
     builder
+}
+
+/// The profile headers as a single name → value table.
+///
+/// `custom_headers` overrides `headers` for the same name: the request must
+/// carry exactly one value per header name.
+fn merged_profile_headers(profile: &LlmProfile) -> Vec<(String, String)> {
+    let mut merged: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    if let Some(headers) = &profile.headers {
+        for (key, value) in headers {
+            merged.insert(key.clone(), value.as_str().unwrap_or("").to_string());
+        }
+    }
+    if let Some(custom_headers) = &profile.custom_headers {
+        for (key, value) in custom_headers {
+            merged.insert(key.clone(), value.as_str().unwrap_or("").to_string());
+        }
+    }
+    merged.into_iter().collect()
 }
 
 /// Deep-merge `profile.custom_body` into the request body (custom body wins),
@@ -677,10 +703,7 @@ mod tests {
         let body = r#"{"id":"1","model":"gpt-4o","choices":[{"message":{"role":"assistant","content":null,"refusal":"I cannot help with that."},"finish_reason":"stop"}]}"#;
         let result = parse_openai_chat_response(body).expect("must parse");
         assert_eq!(result.content, None);
-        assert_eq!(
-            result.refusal.as_deref(),
-            Some("I cannot help with that.")
-        );
+        assert_eq!(result.refusal.as_deref(), Some("I cannot help with that."));
     }
 
     #[test]
@@ -695,7 +718,8 @@ mod tests {
     }
 
     #[test]
-    fn stream_usage_chunk_is_extracted() {        let chunk = r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#;
+    fn stream_usage_chunk_is_extracted() {
+        let chunk = r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#;
         let events = parse_openai_stream_chunk(chunk).expect("chunk must parse");
         match events
             .into_iter()
@@ -959,6 +983,40 @@ mod enhancement_tests {
             .unwrap();
         assert_eq!(req.headers().get("x-custom").unwrap(), "v1");
         assert_eq!(req.url().query().unwrap(), "api-version=2024-01");
+    }
+
+    #[test]
+    fn a_header_name_is_written_once() {
+        let mut profile = profile_with(None);
+        profile.headers = Some(
+            [("x-dup".to_string(), serde_json::json!("from-headers"))]
+                .into_iter()
+                .collect(),
+        );
+        profile.custom_headers = Some(
+            [(
+                "x-dup".to_string(),
+                serde_json::json!("from-custom-headers"),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let req =
+            reqwest::Client::new().request(reqwest::Method::POST, "https://example.com/messages");
+        let req = apply_auth_and_headers(req, &profile, "bearer")
+            .build()
+            .unwrap();
+        let values: Vec<&str> = req
+            .headers()
+            .get_all("x-dup")
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect();
+        assert_eq!(
+            values,
+            vec!["from-custom-headers"],
+            "a header name must carry exactly one value"
+        );
     }
 
     #[test]

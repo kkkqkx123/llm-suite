@@ -346,8 +346,8 @@ mod tests {
             vec![
                 serde_json::json!("hello"),
                 serde_json::json!({
-                    "type": "image_url",
-                    "image_url": {"url": "data:image/png;base64,AA"},
+                    "type": "input_image",
+                    "image_url": "data:image/png;base64,AA",
                 }),
             ]
         );

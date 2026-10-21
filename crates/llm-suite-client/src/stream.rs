@@ -166,6 +166,9 @@ struct PartialToolCall {
     name: Option<String>,
     arguments: String,
     index: usize,
+    /// Provider-signed payload attached to the call (Gemini thought
+    /// signature); it has to travel back with the call in the next turn.
+    thought_signature: Option<String>,
 }
 
 impl MessageAccumulator {
@@ -256,6 +259,7 @@ impl MessageAccumulator {
                             name: None,
                             arguments: String::new(),
                             index,
+                            thought_signature: None,
                         });
                 partial_tool_call
                     .arguments
@@ -285,10 +289,14 @@ impl MessageAccumulator {
                             name: None,
                             arguments: String::new(),
                             index: delta.index,
+                            thought_signature: None,
                         });
 
                 if let Some(call_id) = delta.call_id.clone() {
                     partial.call_id = Some(call_id);
+                }
+                if let Some(signature) = delta.thought_signature.clone() {
+                    partial.thought_signature = Some(signature);
                 }
 
                 if delta.is_snapshot {
@@ -332,9 +340,7 @@ impl MessageAccumulator {
                 // events (Anthropic's `message_start` carries input tokens,
                 // `message_delta` carries cumulative output and may omit
                 // input tokens). Later non-zero / `Some` values win; zero /
-                // `None` values never erase earlier data. `total_tokens` is
-                // recomputed from prompt + completion when the wire only
-                // carries partial counters.
+                // `None` values never erase earlier data.
                 let u = &usage_event.usage;
                 let merged = match self.usage.take() {
                     Some(prev) => {
@@ -348,10 +354,22 @@ impl MessageAccumulator {
                         } else {
                             prev.completion_tokens
                         };
+                        let cache_read_tokens = u.cache_read_tokens.or(prev.cache_read_tokens);
+                        let cache_write_tokens = u.cache_write_tokens.or(prev.cache_write_tokens);
+                        // A provider that reports a total of its own owns
+                        // the number. Without one the total is recomputed
+                        // from the merged counters, and the cached input
+                        // tokens are added: a provider that reports them
+                        // next to the uncached ones (Anthropic) only reaches
+                        // this path.
+                        let component_total = prompt_tokens
+                            + completion_tokens
+                            + cache_read_tokens.unwrap_or(0)
+                            + cache_write_tokens.unwrap_or(0);
                         let total_tokens = if u.total_tokens > 0 {
                             u.total_tokens
-                        } else if u.prompt_tokens > 0 || u.completion_tokens > 0 {
-                            prompt_tokens + completion_tokens
+                        } else if component_total > 0 {
+                            component_total
                         } else {
                             prev.total_tokens
                         };
@@ -360,8 +378,8 @@ impl MessageAccumulator {
                             completion_tokens,
                             total_tokens,
                             reasoning_tokens: u.reasoning_tokens.or(prev.reasoning_tokens),
-                            cache_read_tokens: u.cache_read_tokens.or(prev.cache_read_tokens),
-                            cache_write_tokens: u.cache_write_tokens.or(prev.cache_write_tokens),
+                            cache_read_tokens,
+                            cache_write_tokens,
                             prompt_tokens_cost: u.prompt_tokens_cost.or(prev.prompt_tokens_cost),
                             completion_tokens_cost: u
                                 .completion_tokens_cost
@@ -381,12 +399,13 @@ impl MessageAccumulator {
                 self.final_emitted = true;
 
                 // Build final message
-                let tool_calls = self.assemble_tool_calls();
+                let (tool_calls, call_signatures) = self.assemble_tool_calls();
                 let content = if self.content_blocks.is_empty() {
                     MessageContentValue::Text(self.text_snapshot.clone())
                 } else {
                     MessageContentValue::Rich(self.content_blocks.clone())
                 };
+                let metadata = self.tool_call_signatures(&call_signatures);
 
                 let message = Message {
                     id: llm_suite_types::Id::new(),
@@ -410,7 +429,7 @@ impl MessageAccumulator {
                     } else {
                         Some(self.reasoning_signature_snapshot.clone())
                     },
-                    metadata: None,
+                    metadata,
                 };
 
                 Some(MessageStreamEvent::FinalMessage(MessageStreamFinal {
@@ -431,27 +450,50 @@ impl MessageAccumulator {
         }
     }
 
-    fn assemble_tool_calls(&self) -> Vec<LlmToolCall> {
-        self.tool_calls
-            .values()
-            .filter_map(|partial| {
-                let name = partial.name.clone()?;
-                let id = partial.id.clone().unwrap_or_else(|| {
-                    format!("call_{}_{}", llm_suite_common::time::now(), partial.index)
-                });
-                let arguments = if partial.arguments.is_empty() {
-                    "{}".to_string()
-                } else {
-                    partial.arguments.clone()
-                };
-                Some(LlmToolCall {
-                    id,
-                    r#type: "function".to_string(),
-                    call_id: partial.call_id.clone(),
-                    function: LlmFunctionCall { name, arguments },
-                })
-            })
-            .collect()
+    /// The provider signatures of the assembled tool calls, one entry per
+    /// call in the order the calls are reported. `None` when no call carries
+    /// a signature.
+    fn tool_call_signatures(
+        &self,
+        signatures: &[Option<String>],
+    ) -> Option<std::collections::HashMap<String, serde_json::Value>> {
+        if signatures.iter().all(|signature| signature.is_none()) {
+            return None;
+        }
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            llm_suite_types::llm::THOUGHT_SIGNATURES_KEY.to_string(),
+            serde_json::json!(signatures),
+        );
+        Some(metadata)
+    }
+
+    /// Assemble the tool calls of the turn together with the provider
+    /// signature of every call, in the order the calls are reported.
+    fn assemble_tool_calls(&self) -> (Vec<LlmToolCall>, Vec<Option<String>>) {
+        let mut calls = Vec::new();
+        let mut signatures = Vec::new();
+        for partial in self.tool_calls.values() {
+            let Some(name) = partial.name.clone() else {
+                continue;
+            };
+            let id = partial.id.clone().unwrap_or_else(|| {
+                format!("call_{}_{}", llm_suite_common::time::now(), partial.index)
+            });
+            let arguments = if partial.arguments.is_empty() {
+                "{}".to_string()
+            } else {
+                partial.arguments.clone()
+            };
+            calls.push(LlmToolCall {
+                id,
+                r#type: "function".to_string(),
+                call_id: partial.call_id.clone(),
+                function: LlmFunctionCall { name, arguments },
+            });
+            signatures.push(partial.thought_signature.clone());
+        }
+        (calls, signatures)
     }
 }
 
@@ -544,6 +586,7 @@ mod tests {
                 call_id: None,
                 name: Some("get_weather".to_string()),
                 arguments: Some(r#"{"city":"Bei"#.to_string()),
+                thought_signature: None,
                 is_snapshot: false,
             },
         ));
@@ -554,6 +597,7 @@ mod tests {
                 call_id: None,
                 name: None,
                 arguments: Some(r#"jing"}"#.to_string()),
+                thought_signature: None,
                 is_snapshot: false,
             },
         ));
@@ -564,6 +608,7 @@ mod tests {
                 call_id: None,
                 name: Some("get_time".to_string()),
                 arguments: Some("{}".to_string()),
+                thought_signature: None,
                 is_snapshot: false,
             },
         ));
@@ -593,6 +638,7 @@ mod tests {
                 call_id: None,
                 name: None,
                 arguments: Some(r#"{"a":"#.to_string()),
+                thought_signature: None,
                 is_snapshot: false,
             },
         ));
@@ -603,6 +649,7 @@ mod tests {
                 call_id: None,
                 name: Some("get_weather".to_string()),
                 arguments: Some(r#"{"city":"Beijing"}"#.to_string()),
+                thought_signature: None,
                 is_snapshot: true,
             },
         ));
@@ -617,6 +664,38 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "get_weather");
         assert_eq!(calls[0].function.arguments, r#"{"city":"Beijing"}"#);
+    }
+
+    #[test]
+    fn tool_call_signatures_reach_the_final_message() {
+        let mut acc = MessageAccumulator::new(None);
+
+        acc.push(MessageStreamEvent::ToolCallDelta(
+            MessageStreamToolCallDelta {
+                index: 0,
+                id: Some("call_1".to_string()),
+                call_id: None,
+                name: Some("get_weather".to_string()),
+                arguments: Some("{}".to_string()),
+                thought_signature: Some("sig-1".to_string()),
+                is_snapshot: true,
+            },
+        ));
+
+        let final_event = acc.push(MessageStreamEvent::End(
+            llm_suite_types::llm::MessageStreamEnd {},
+        ));
+        let MessageStreamEvent::FinalMessage(final_msg) = final_event.unwrap() else {
+            panic!("expected FinalMessage");
+        };
+        let metadata = final_msg
+            .message
+            .metadata
+            .expect("metadata must be present");
+        assert_eq!(
+            metadata[llm_suite_types::llm::THOUGHT_SIGNATURES_KEY],
+            serde_json::json!(["sig-1"])
+        );
     }
 
     #[test]
@@ -705,8 +784,8 @@ mod tests {
         );
         assert_eq!(usage.completion_tokens, 7);
         assert_eq!(
-            usage.total_tokens, 32,
-            "total recomputed from prompt + completion"
+            usage.total_tokens, 35,
+            "the official Anthropic total counts the cached input tokens"
         );
         assert_eq!(usage.cache_read_tokens, Some(3));
         assert_eq!(usage.reasoning_tokens, Some(2));

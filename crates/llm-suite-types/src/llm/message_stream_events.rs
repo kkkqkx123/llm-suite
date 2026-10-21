@@ -176,6 +176,15 @@ pub struct MessageStreamToolCallDelta {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arguments: Option<String>,
+    /// Provider-signed opaque payload attached to the call. Gemini signs a
+    /// function call with a thought signature that has to travel back with
+    /// the call in the next turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
     #[serde(default)]
     pub is_snapshot: bool,
 }
+
+/// Metadata key holding the provider signatures attached to the tool calls
+/// of a reply, one entry per tool call in the order the calls are reported.
+pub const THOUGHT_SIGNATURES_KEY: &str = "thought_signatures";

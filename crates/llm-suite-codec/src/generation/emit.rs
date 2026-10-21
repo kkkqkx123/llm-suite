@@ -63,9 +63,31 @@ fn emit_tool_choice_anthropic(
     obj
 }
 
-/// Service tiers the OpenAI APIs accept. A tier outside the set is a
-/// configuration mistake and fails fast instead of being sent to the API.
-fn openai_service_tier(tier: LlmServiceTier) -> LlmResult<&'static str> {
+/// Service tiers the OpenAI Chat Completions API accepts. A tier outside the
+/// set is a configuration mistake and fails fast instead of being sent to the
+/// API.
+fn openai_chat_service_tier(tier: LlmServiceTier) -> LlmResult<&'static str> {
+    match tier {
+        LlmServiceTier::Auto => Ok("auto"),
+        LlmServiceTier::Default => Ok("default"),
+        LlmServiceTier::Flex => Ok("flex"),
+        LlmServiceTier::Scale => Ok("scale"),
+        LlmServiceTier::Priority => Ok("priority"),
+        LlmServiceTier::Fast => Ok("fast"),
+        LlmServiceTier::Ultrafast => Err(LlmError::ConfigError(
+            "service tier `ultrafast` is a Responses API tier; Chat Completions accepts auto, default, flex, scale, priority and fast"
+                .to_string(),
+        )),
+        LlmServiceTier::StandardOnly => Err(LlmError::ConfigError(
+            "service tier `standard_only` is an Anthropic tier; Chat Completions accepts auto, default, flex, scale, priority and fast"
+                .to_string(),
+        )),
+    }
+}
+
+/// Service tiers the OpenAI Responses API accepts. It extends the Chat
+/// Completions set with `ultrafast`.
+fn openai_responses_service_tier(tier: LlmServiceTier) -> LlmResult<&'static str> {
     match tier {
         LlmServiceTier::Auto => Ok("auto"),
         LlmServiceTier::Default => Ok("default"),
@@ -75,7 +97,7 @@ fn openai_service_tier(tier: LlmServiceTier) -> LlmResult<&'static str> {
         LlmServiceTier::Fast => Ok("fast"),
         LlmServiceTier::Ultrafast => Ok("ultrafast"),
         LlmServiceTier::StandardOnly => Err(LlmError::ConfigError(
-            "service tier `standard_only` is an Anthropic tier; OpenAI accepts auto, default, flex, scale, priority and fast"
+            "service tier `standard_only` is an Anthropic tier; the Responses API accepts auto, default, flex, scale, priority, fast and ultrafast"
                 .to_string(),
         )),
     }
@@ -124,13 +146,14 @@ pub fn apply_openai_chat(body: &mut serde_json::Value, gen: &LlmGenerationParams
         body["presence_penalty"] = serde_json::json!(penalty);
     }
     if let Some(ref tier) = gen.service_tier {
-        body["service_tier"] = serde_json::json!(openai_service_tier(*tier)?);
+        body["service_tier"] = serde_json::json!(openai_chat_service_tier(*tier)?);
     }
     if let Some(store) = gen.store {
         body["store"] = serde_json::json!(store);
     }
     if let Some(ref user_id) = gen.user_id {
-        body["user"] = serde_json::json!(user_id);
+        // `user` is superseded by `safety_identifier`.
+        body["safety_identifier"] = serde_json::json!(user_id);
     }
     if let Some(ref thinking) = gen.thinking {
         if let Some(level) = thinking.level {
@@ -196,7 +219,7 @@ pub fn apply_openai_responses(
         body["seed"] = serde_json::json!(seed);
     }
     if let Some(ref tier) = gen.service_tier {
-        body["service_tier"] = serde_json::json!(openai_service_tier(*tier)?);
+        body["service_tier"] = serde_json::json!(openai_responses_service_tier(*tier)?);
     }
     if let Some(store) = gen.store {
         body["store"] = serde_json::json!(store);
@@ -482,6 +505,35 @@ fn gemini_thinking_level(level: ThinkingLevel) -> LlmResult<&'static str> {
     }
 }
 
+/// Gemini declares the tool-calling mode in `toolConfig`, a top-level
+/// sibling of `generationConfig` — not a member of it. The official request
+/// envelope keeps `systemInstruction`, `tools`, `toolConfig`,
+/// `safetySettings`, `labels` and `cachedContent` next to `generationConfig`.
+pub fn gemini_tool_config(gen: &LlmGenerationParams) -> Option<serde_json::Value> {
+    let choice = gen.tool_choice.as_ref()?;
+    let mut function_calling_config = serde_json::Map::new();
+    if let Some(ref name) = choice.tool_name {
+        // A named function restricts the model to that function; the mode
+        // alone would still allow any tool.
+        function_calling_config.insert("mode".to_string(), serde_json::json!("ANY"));
+        function_calling_config.insert(
+            "allowedFunctionNames".to_string(),
+            serde_json::json!([name]),
+        );
+    } else {
+        let mode = match choice.mode {
+            Some(ToolChoiceMode::Auto) => "AUTO",
+            Some(ToolChoiceMode::Any) | Some(ToolChoiceMode::Required) => "ANY",
+            Some(ToolChoiceMode::None) => "NONE",
+            None => "AUTO",
+        };
+        function_calling_config.insert("mode".to_string(), serde_json::json!(mode));
+    }
+    Some(serde_json::json!({
+        "functionCallingConfig": serde_json::Value::Object(function_calling_config),
+    }))
+}
+
 pub fn apply_gemini_generation_config(
     generation_config: &mut serde_json::Value,
     gen: &LlmGenerationParams,
@@ -551,29 +603,6 @@ pub fn apply_gemini_generation_config(
             }
             _ => {}
         }
-    }
-    if let Some(ref choice) = gen.tool_choice {
-        let mut function_calling_config = serde_json::Map::new();
-        if let Some(ref name) = choice.tool_name {
-            // A named function restricts the model to that function; the
-            // mode alone would still allow any tool.
-            function_calling_config.insert("mode".to_string(), serde_json::json!("ANY"));
-            function_calling_config.insert(
-                "allowedFunctionNames".to_string(),
-                serde_json::json!([name]),
-            );
-        } else {
-            let mode = match choice.mode {
-                Some(ToolChoiceMode::Auto) => "AUTO",
-                Some(ToolChoiceMode::Any) | Some(ToolChoiceMode::Required) => "ANY",
-                Some(ToolChoiceMode::None) => "NONE",
-                None => "AUTO",
-            };
-            function_calling_config.insert("mode".to_string(), serde_json::json!(mode));
-        }
-        generation_config["toolConfig"] = serde_json::json!({
-            "functionCallingConfig": serde_json::Value::Object(function_calling_config),
-        });
     }
     if gen.verbosity.is_some() {
         tracing::warn!(

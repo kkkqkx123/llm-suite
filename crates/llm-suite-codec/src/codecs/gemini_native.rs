@@ -2,20 +2,12 @@ use super::LlmCodec;
 use crate::error::LlmResult;
 use llm_suite_types::llm::{
     LlmProfile, LlmRequest, LlmResult as LlmResponseType, MessageStreamEvent,
+    THOUGHT_SIGNATURES_KEY,
 };
 use llm_suite_types::message::Message;
 use llm_suite_types::tool::Tool;
 use reqwest::Method;
 use std::sync::atomic::{AtomicUsize, Ordering};
-
-/// Globally unique tool call indices for Gemini streams (each `functionCall`
-/// part is a complete snapshot; unique indices keep separate calls apart in
-/// the accumulator).
-static GEMINI_CALL_INDEX: AtomicUsize = AtomicUsize::new(0);
-
-/// Metadata key holding the thought signatures of a reply, one entry per
-/// tool call of that reply.
-const THOUGHT_SIGNATURES_KEY: &str = "thought_signatures";
 
 /// The thought signature that belongs to the tool call at `index`, when the
 /// provider signed it.
@@ -32,6 +24,11 @@ fn thought_signature_for(message: &Message, index: usize) -> Option<String> {
 
 pub struct GeminiNativeCodec {
     base_url: String,
+    /// Tool-call index source for streamed function calls. Every streamed
+    /// `functionCall` part is a complete snapshot, so each call needs its own
+    /// index to stay apart in the stream accumulator. The counter belongs to
+    /// the codec instance, not to the process.
+    call_index: AtomicUsize,
 }
 
 impl Default for GeminiNativeCodec {
@@ -44,11 +41,15 @@ impl GeminiNativeCodec {
     pub fn new() -> Self {
         Self {
             base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            call_index: AtomicUsize::new(0),
         }
     }
 
     pub fn with_base_url(base_url: String) -> Self {
-        Self { base_url }
+        Self {
+            base_url,
+            call_index: AtomicUsize::new(0),
+        }
     }
 
     /// Effective API endpoint base.
@@ -84,132 +85,211 @@ impl GeminiNativeCodec {
         builder.build().map_err(crate::error::LlmError::HttpError)
     }
 
+    /// Convert internal messages into Gemini `contents`.
+    ///
+    /// Gemini only accepts the `user` and `model` roles; tool results ride
+    /// in a user message as `functionResponse` parts. The function name and
+    /// the call id a result refers to are taken from the tool call that
+    /// produced it, because Gemini matches the response back to the call.
     fn convert_messages(
         &self,
         messages: &[llm_suite_types::message::Message],
-    ) -> Vec<serde_json::Value> {
-        messages
-            .iter()
-            .filter_map(|msg| {
-                // Gemini only accepts "user" and "model" roles; tool results
-                // ride in a user message as `functionResponse` parts.
-                let role = match msg.role {
-                    llm_suite_types::message::MessageRole::System => return None,
-                    llm_suite_types::message::MessageRole::User => "user",
-                    llm_suite_types::message::MessageRole::Assistant => "model",
-                    llm_suite_types::message::MessageRole::Tool => "user",
-                };
-
-                let parts = match &msg.content {
-                    llm_suite_types::message::MessageContentValue::Text(text) => {
-                        if text.is_empty() && msg.tool_calls.is_none() {
-                            return None;
-                        }
-                        let mut p = Vec::new();
-                        if !text.is_empty() {
-                            p.push(serde_json::json!({"text": text}));
-                        }
-                        if let Some(ref tool_calls) = msg.tool_calls {
-                            for (index, tc) in tool_calls.iter().enumerate() {
-                                let args: serde_json::Value = serde_json::from_str(
-                                    &tc.function.arguments,
-                                )
-                                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-                                let mut part = serde_json::json!({
-                                    "function_call": {
-                                        "name": tc.function.name,
-                                        "args": args,
-                                    }
-                                });
-                                // The provider signs a function call with an
-                                // opaque thought signature; the signature has
-                                // to travel back with the call in the next turn.
-                                if let Some(signature) = thought_signature_for(msg, index) {
-                                    part["thoughtSignature"] = serde_json::json!(signature);
-                                }
-                                p.push(part);
-                            }
-                        }
-                        p
+    ) -> LlmResult<Vec<serde_json::Value>> {
+        // The function name of every tool call in the history, keyed by the
+        // call identity the result refers to.
+        let mut function_names: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for msg in messages {
+            if let Some(calls) = &msg.tool_calls {
+                for call in calls {
+                    function_names.insert(call.id.clone(), call.function.name.clone());
+                }
+            }
+            if let llm_suite_types::message::MessageContentValue::Rich(blocks) = &msg.content {
+                for block in blocks {
+                    if let llm_suite_types::message::MessageContent::ToolUse { tool_use } = block {
+                        function_names.insert(tool_use.id.clone(), tool_use.name.clone());
                     }
-                    llm_suite_types::message::MessageContentValue::Rich(blocks) => blocks
-                        .iter()
-                        .filter_map(|block| match block {
-                            llm_suite_types::message::MessageContent::Text { text } => {
-                                Some(serde_json::json!({"text": text}))
-                            }
-                            llm_suite_types::message::MessageContent::ImageUrl { image_url } => {
-                                // Inline base64 images become `inline_data`;
-                                // remote URLs become `file_data` references.
-                                // Unresolvable references are skipped rather
-                                // than silently corrupted.
-                                match super::helpers::resolve_image_payload(&image_url.url) {
-                                    Ok(super::helpers::ResolvedImage::Base64 {
-                                        media_type,
-                                        data,
-                                    }) => Some(serde_json::json!({
+                }
+            }
+        }
+
+        let mut contents: Vec<serde_json::Value> = Vec::new();
+        for msg in messages {
+            let role = match msg.role {
+                llm_suite_types::message::MessageRole::System => continue,
+                llm_suite_types::message::MessageRole::User => "user",
+                llm_suite_types::message::MessageRole::Assistant => "model",
+                llm_suite_types::message::MessageRole::Tool => "user",
+            };
+
+            let parts = self.convert_parts(msg, &function_names)?;
+            // A message without any part is not a valid Gemini content.
+            if parts.is_empty() {
+                continue;
+            }
+            contents.push(serde_json::json!({"role": role, "parts": parts}));
+        }
+        Ok(contents)
+    }
+
+    /// Convert one message into Gemini parts.
+    fn convert_parts(
+        &self,
+        msg: &llm_suite_types::message::Message,
+        function_names: &std::collections::HashMap<String, String>,
+    ) -> LlmResult<Vec<serde_json::Value>> {
+        let mut parts: Vec<serde_json::Value> = Vec::new();
+        // Whether the content already carried the function calls; the flat
+        // call list is only used when it did not.
+        let mut saw_tool_use = false;
+
+        match &msg.content {
+            llm_suite_types::message::MessageContentValue::Text(text) => {
+                if msg.role == llm_suite_types::message::MessageRole::Tool {
+                    // A tool result is a function response; plain text would
+                    // hide the output from the model.
+                    let call_id = msg.tool_call_id.clone().unwrap_or_default();
+                    let name = self.resolve_function_name(msg, &call_id, function_names)?;
+                    parts.push(Self::function_response_part(&name, &call_id, text));
+                } else if !text.is_empty() {
+                    parts.push(serde_json::json!({"text": text}));
+                }
+            }
+            llm_suite_types::message::MessageContentValue::Rich(blocks) => {
+                let mut call_ordinal = 0usize;
+                for block in blocks {
+                    match block {
+                        llm_suite_types::message::MessageContent::Text { text } => {
+                            parts.push(serde_json::json!({"text": text}));
+                        }
+                        llm_suite_types::message::MessageContent::ImageUrl { image_url } => {
+                            // Inline base64 images become `inline_data`;
+                            // remote URLs become `file_data` references.
+                            // Unresolvable references are skipped rather
+                            // than silently corrupted.
+                            match super::helpers::resolve_image_payload(&image_url.url) {
+                                Ok(super::helpers::ResolvedImage::Base64 { media_type, data }) => {
+                                    parts.push(serde_json::json!({
                                         "inline_data": {
                                             "mime_type": media_type,
                                             "data": data,
                                         }
-                                    })),
-                                    Ok(super::helpers::ResolvedImage::Url(url)) => {
-                                        Some(serde_json::json!({
-                                            "file_data": {
-                                                "mime_type":
-                                                    super::helpers::guess_image_media_type(&url),
-                                                "file_uri": url,
-                                            }
-                                        }))
-                                    }
-                                    Err(_) => None,
+                                    }))
                                 }
+                                Ok(super::helpers::ResolvedImage::Url(url)) => {
+                                    parts.push(serde_json::json!({
+                                        "file_data": {
+                                            "mime_type":
+                                                super::helpers::guess_image_media_type(&url),
+                                            "file_uri": url,
+                                        }
+                                    }))
+                                }
+                                Err(_) => {}
                             }
-                            llm_suite_types::message::MessageContent::ToolResult {
-                                tool_result,
-                            } => {
-                                let content_val: serde_json::Value =
-                                    serde_json::from_str(&tool_result.content).unwrap_or_else(
-                                        |_| serde_json::Value::String(tool_result.content.clone()),
-                                    );
-                                // Gemini requires the tool name so the model can
-                                // match the response back to its `functionCall`.
-                                // `Message.tool_name` carries it; fall back to
-                                // an empty name only when it is genuinely absent.
-                                let name = msg.tool_name.clone().unwrap_or_default();
-                                Some(serde_json::json!({
-                                    "function_response": {
-                                        "name": name,
-                                        "response": content_val,
-                                    }
-                                }))
+                        }
+                        llm_suite_types::message::MessageContent::ToolUse { tool_use } => {
+                            let mut part = serde_json::json!({
+                                "function_call": {
+                                    "name": tool_use.name,
+                                    "args": tool_use.input,
+                                }
+                            });
+                            // The provider signs a function call with an
+                            // opaque thought signature; the signature has
+                            // to travel back with the call in the next turn.
+                            if let Some(signature) = thought_signature_for(msg, call_ordinal) {
+                                part["thoughtSignature"] = serde_json::json!(signature);
                             }
-                            _ => None,
-                        })
-                        .collect(),
-                };
+                            parts.push(part);
+                            call_ordinal += 1;
+                            saw_tool_use = true;
+                        }
+                        llm_suite_types::message::MessageContent::ToolResult { tool_result } => {
+                            let name = self.resolve_function_name(
+                                msg,
+                                &tool_result.tool_use_id,
+                                function_names,
+                            )?;
+                            parts.push(Self::function_response_part(
+                                &name,
+                                &tool_result.tool_use_id,
+                                &tool_result.content,
+                            ));
+                        }
+                        // The reasoning text itself is not replayed; only the
+                        // thought signature on a function call is.
+                        llm_suite_types::message::MessageContent::Thinking { .. }
+                        | llm_suite_types::message::MessageContent::RedactedThinking { .. } => {}
+                    }
+                }
+            }
+        }
 
-                Some(serde_json::json!({"role": role, "parts": parts}))
-            })
-            .collect()
+        // Tool calls carried on the message itself become function call
+        // parts; the rich blocks already hold them otherwise.
+        if !saw_tool_use {
+            if let Some(calls) = &msg.tool_calls {
+                for (ordinal, call) in calls.iter().enumerate() {
+                    let args: serde_json::Value = serde_json::from_str(&call.function.arguments)
+                        .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                    let mut part = serde_json::json!({
+                        "function_call": {
+                            "name": call.function.name,
+                            "args": args,
+                        }
+                    });
+                    // The provider signs a function call with an opaque
+                    // thought signature; it has to travel back with the call
+                    // in the next turn.
+                    if let Some(signature) = thought_signature_for(msg, ordinal) {
+                        part["thoughtSignature"] = serde_json::json!(signature);
+                    }
+                    parts.push(part);
+                }
+            }
+        }
+
+        Ok(parts)
     }
 
-    fn convert_generation_config(
+    /// The function name a tool result answers.
+    ///
+    /// The name is taken from the result message itself when it carries one,
+    /// otherwise from the tool call the result refers to. A result whose
+    /// function cannot be named is rejected: Gemini matches the response
+    /// back to the call by name, so an unnamed response is meaningless.
+    fn resolve_function_name(
         &self,
-        request: &LlmRequest,
-        profile: &LlmProfile,
-    ) -> LlmResult<serde_json::Value> {
-        let generation = super::shared::resolve_generation(request, profile)?;
+        msg: &llm_suite_types::message::Message,
+        call_id: &str,
+        function_names: &std::collections::HashMap<String, String>,
+    ) -> LlmResult<String> {
+        if let Some(name) = msg.tool_name.as_ref().filter(|name| !name.is_empty()) {
+            return Ok(name.clone());
+        }
+        if let Some(name) = function_names.get(call_id) {
+            return Ok(name.clone());
+        }
+        Err(crate::error::LlmError::ConfigError(format!(
+            "Gemini tool result for call `{call_id}` carries no function name; keep the assistant tool call in the history or name the result"
+        )))
+    }
 
-        // Only user-set fields are emitted; unset fields stay out of the
-        // payload so the server-side model defaults apply. Defaults such as
-        // `topK: 40` or `maxOutputTokens: 4096` must not silently clamp
-        // modern Gemini models.
-        let mut config = serde_json::json!({});
-
-        crate::generation::apply_gemini_generation_config(&mut config, &generation)?;
-
-        Ok(config)
+    /// Build a `functionResponse` part. The call id is echoed back so the
+    /// provider can match the response to the call it answers.
+    fn function_response_part(name: &str, call_id: &str, content: &str) -> serde_json::Value {
+        let response_value: serde_json::Value = serde_json::from_str(content)
+            .unwrap_or_else(|_| serde_json::Value::String(content.to_string()));
+        let mut response = serde_json::json!({
+            "name": name,
+            "response": response_value,
+        });
+        if !call_id.is_empty() {
+            response["id"] = serde_json::json!(call_id);
+        }
+        serde_json::json!({"function_response": response})
     }
 
     /// Map a raw Gemini `finishReason` onto the unified finish-reason
@@ -307,13 +387,18 @@ impl LlmCodec for GeminiNativeCodec {
             &format!("models/{}:countTokens", profile.model),
         );
 
-        // Reuse the inference body so the count covers exactly what would
-        // be sent, minus `generationConfig` (output steering does not
-        // affect the input count and is not part of the count schema).
-        let mut body = self.build_body(request, profile)?;
-        if let Some(map) = body.as_object_mut() {
-            map.remove("generationConfig");
-        }
+        // The counting endpoint takes the request contents only: system
+        // instructions, tool declarations and the generation config are not
+        // part of its contract.
+        let use_text_mode = super::shared::is_text_mode(request);
+        let history = if use_text_mode {
+            super::shared::convert_history_for_text_mode(&request.messages, request)
+        } else {
+            request.messages.clone()
+        };
+        let body = serde_json::json!({
+            "contents": self.convert_messages(&history)?,
+        });
 
         Ok(Some(self.build_json_request(url, &body, profile)?))
     }
@@ -338,10 +423,6 @@ impl LlmCodec for GeminiNativeCodec {
             }
         }
         Ok(result)
-    }
-
-    fn parse_stream_chunk(&self, data: &str) -> LlmResult<Option<MessageStreamEvent>> {
-        Ok(self.parse_stream_chunk_events(data)?.into_iter().next())
     }
 
     fn parse_stream_chunk_events(&self, data: &str) -> LlmResult<Vec<MessageStreamEvent>> {
@@ -372,7 +453,15 @@ impl LlmCodec for GeminiNativeCodec {
                     .and_then(|c| c.get("parts"))
                     .and_then(|v| v.as_array())
                 {
+                    // The thought signature may ride on the function call
+                    // itself or on the thought part in front of it.
+                    let mut pending_signature: Option<String> = None;
                     for part in parts {
+                        if let Some(signature) =
+                            part.get("thoughtSignature").and_then(|v| v.as_str())
+                        {
+                            pending_signature = Some(signature.to_string());
+                        }
                         // `thought` is a boolean flag on the part (official
                         // schema: Part.thought: bool); a part like
                         // {"text": "...", "thought": true} is reasoning.
@@ -398,19 +487,6 @@ impl LlmCodec for GeminiNativeCodec {
                                     },
                                 ));
                             }
-                            continue;
-                        }
-                        if let Some(thought) = part.get("thought").and_then(|v| v.as_str()) {
-                            // Backwards compatibility for string-valued thought.
-                            events.push(MessageStreamEvent::ReasoningText(
-                                llm_suite_types::llm::MessageStreamReasoning {
-                                    snapshot: String::new(),
-                                    reasoning: thought.to_string(),
-                                    signature: None,
-                                    signature_snapshot: None,
-                                },
-                            ));
-                            continue;
                         }
                         if let Some(func_call) = part.get("functionCall") {
                             let name = func_call
@@ -423,13 +499,28 @@ impl LlmCodec for GeminiNativeCodec {
                                 .cloned()
                                 .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
                             let arguments = serde_json::to_string(&args).unwrap_or_default();
+                            // The provider assigns the call id; it has to be
+                            // echoed back in the matching function response.
+                            let id = func_call
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .map(String::from);
+                            // The thought signature may ride on the function
+                            // call itself or on the thought part in front of
+                            // it.
+                            let signature = part
+                                .get("thoughtSignature")
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                                .or_else(|| pending_signature.clone());
                             events.push(MessageStreamEvent::ToolCallDelta(
                                 llm_suite_types::llm::MessageStreamToolCallDelta {
-                                    index: GEMINI_CALL_INDEX.fetch_add(1, Ordering::Relaxed),
-                                    id: None,
+                                    index: self.call_index.fetch_add(1, Ordering::Relaxed),
+                                    id,
                                     call_id: None,
                                     name: Some(name),
                                     arguments: Some(arguments),
+                                    thought_signature: signature,
                                     is_snapshot: true,
                                 },
                             ));
@@ -460,9 +551,9 @@ impl LlmCodec for GeminiNativeCodec {
             .iter()
             .map(|t| {
                 let parameters = t.parameters.as_ref().map(|schema| {
-                    crate::generation::gemini_schema_value(&serde_json::to_value(schema).unwrap_or(
-                        serde_json::Value::Null,
-                    ))
+                    crate::generation::gemini_schema_value(
+                        &serde_json::to_value(schema).unwrap_or(serde_json::Value::Null),
+                    )
                 });
                 serde_json::json!({
                     "name": t.name,
@@ -491,7 +582,14 @@ impl GeminiNativeCodec {
         request: &LlmRequest,
         profile: &LlmProfile,
     ) -> LlmResult<serde_json::Value> {
-        let generation_config = self.convert_generation_config(request, profile)?;
+        let generation = super::shared::resolve_generation(request, profile)?;
+
+        // Only user-set fields are emitted; unset fields stay out of the
+        // payload so the server-side model defaults apply. Defaults such as
+        // `topK: 40` or `maxOutputTokens: 4096` must not silently clamp
+        // modern Gemini models.
+        let mut generation_config = serde_json::json!({});
+        crate::generation::apply_gemini_generation_config(&mut generation_config, &generation)?;
 
         let use_text_mode = super::shared::is_text_mode(request);
 
@@ -507,7 +605,7 @@ impl GeminiNativeCodec {
         } else {
             request.messages.clone()
         };
-        let messages = self.convert_messages(&history);
+        let messages = self.convert_messages(&history)?;
 
         let mut body = serde_json::json!({
             "contents": messages,
@@ -515,9 +613,16 @@ impl GeminiNativeCodec {
 
         // The generation config is only sent when it carries something;
         // an empty object would override the server-side model defaults.
-        if !generation_config.is_null() && generation_config.as_object().is_some_and(|c| !c.is_empty())
+        if !generation_config.is_null()
+            && generation_config.as_object().is_some_and(|c| !c.is_empty())
         {
             body["generationConfig"] = generation_config;
+        }
+
+        // The tool-calling mode lives next to `generationConfig`, not inside
+        // it; the official request envelope declares it at the top level.
+        if let Some(tool_config) = crate::generation::gemini_tool_config(&generation) {
+            body["toolConfig"] = tool_config;
         }
 
         if use_text_mode {
@@ -583,7 +688,18 @@ impl GeminiNativeCodec {
             if let Some(c) = content {
                 let parts = c.get("parts").and_then(|v| v.as_array());
                 if let Some(parts) = parts {
+                    // The thought signature may ride on the function call
+                    // itself or on the thought part in front of it; the
+                    // pending signature covers the second case.
+                    let mut pending_signature: Option<String> = None;
                     for part in parts {
+                        let signature = part
+                            .get("thoughtSignature")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                        if let Some(signature) = &signature {
+                            pending_signature = Some(signature.clone());
+                        }
                         // `thought` is a boolean flag on the part (official
                         // schema: Part.thought: bool); thinking-model parts
                         // look like {"text": "...", "thought": true}.
@@ -600,12 +716,6 @@ impl GeminiNativeCodec {
                                 text_content.push_str(text);
                             }
                         }
-                        if let Some(thought) = part.get("thought").and_then(|v| v.as_str()) {
-                            // Backwards compatibility for string-valued thought.
-                            reasoning_content
-                                .get_or_insert_with(String::new)
-                                .push_str(thought);
-                        }
                         if let Some(func_call) = part.get("functionCall") {
                             let name = func_call
                                 .get("name")
@@ -617,8 +727,17 @@ impl GeminiNativeCodec {
                                 .cloned()
                                 .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
                             let arguments = serde_json::to_string(&args).unwrap_or_default();
+                            // The provider assigns the call id; it has to be
+                            // echoed back in the matching function response.
+                            let id = func_call
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                                .unwrap_or_else(|| {
+                                    format!("gemini_call_{}", llm_suite_common::generate_id())
+                                });
                             tool_calls.push(llm_suite_types::message::LlmToolCall {
-                                id: format!("gemini_call_{}", llm_suite_common::generate_id()),
+                                id,
                                 r#type: "function".to_string(),
                                 call_id: None,
                                 function: llm_suite_types::message::LlmFunctionCall {
@@ -626,11 +745,7 @@ impl GeminiNativeCodec {
                                     arguments,
                                 },
                             });
-                            thought_signatures.push(
-                                part.get("thoughtSignature")
-                                    .and_then(|v| v.as_str())
-                                    .map(String::from),
-                            );
+                            thought_signatures.push(signature.or(pending_signature.clone()));
                         }
                     }
                 }
@@ -827,12 +942,18 @@ mod tests {
         let shape = codec.convert_tools(&tools).unwrap();
         let parameters = &shape[0]["functionDeclarations"][0]["parameters"];
         assert_eq!(parameters["type"], serde_json::json!("OBJECT"));
-        assert_eq!(parameters["properties"]["city"]["type"], serde_json::json!("STRING"));
+        assert_eq!(
+            parameters["properties"]["city"]["type"],
+            serde_json::json!("STRING")
+        );
         assert_eq!(
             parameters["properties"]["days"]["type"],
             serde_json::json!("INTEGER")
         );
-        assert_eq!(parameters["properties"]["tags"]["type"], serde_json::json!("ARRAY"));
+        assert_eq!(
+            parameters["properties"]["tags"]["type"],
+            serde_json::json!("ARRAY")
+        );
         assert_eq!(
             parameters["properties"]["tags"]["items"]["type"],
             serde_json::json!("STRING")
@@ -877,16 +998,15 @@ mod tests {
         );
 
         let contents = codec
-            .convert_messages(std::slice::from_ref(&message));
+            .convert_messages(std::slice::from_ref(&message))
+            .expect("must convert");
         let parts = contents[0]["parts"].as_array().unwrap();
         assert_eq!(parts[0]["thoughtSignature"], serde_json::json!("sig-1"));
     }
 
     #[test]
     fn named_tool_choice_restricts_the_allowed_functions() {
-        let mut config = serde_json::json!({});
-        crate::generation::apply_gemini_generation_config(
-            &mut config,
+        let tool_config = crate::generation::gemini_tool_config(
             &llm_suite_types::llm::generation::LlmGenerationParams {
                 tool_choice: Some(llm_suite_types::llm::generation::LlmToolChoice {
                     mode: None,
@@ -897,11 +1017,11 @@ mod tests {
         )
         .expect("tool choice must be accepted");
         assert_eq!(
-            config["toolConfig"]["functionCallingConfig"]["mode"],
+            tool_config["functionCallingConfig"]["mode"],
             serde_json::json!("ANY")
         );
         assert_eq!(
-            config["toolConfig"]["functionCallingConfig"]["allowedFunctionNames"],
+            tool_config["functionCallingConfig"]["allowedFunctionNames"],
             serde_json::json!(["get_weather"])
         );
     }
@@ -909,7 +1029,8 @@ mod tests {
     #[test]
     fn blocked_prompt_surfaces_as_an_error() {
         let codec = GeminiNativeCodec::new();
-        let body = r#"{"promptFeedback": {"blockReason": "SAFETY", "blockReasonMessage": "unsafe"}}"#;
+        let body =
+            r#"{"promptFeedback": {"blockReason": "SAFETY", "blockReasonMessage": "unsafe"}}"#;
         let err = codec
             .parse_response(body, &request(vec![], None))
             .expect_err("a blocked prompt must not look like an empty answer");
@@ -917,7 +1038,8 @@ mod tests {
     }
 
     #[test]
-    fn usage_metadata_parses_cached_content_tokens() {        let codec = GeminiNativeCodec::new();
+    fn usage_metadata_parses_cached_content_tokens() {
+        let codec = GeminiNativeCodec::new();
         // Primary source: `cachedContentTokenCount` (python-genai
         // `GenerateContentResponseUsageMetadata.cached_content_token_count`).
         let chunk = r#"{"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":5,"totalTokenCount":105,"thoughtsTokenCount":3,"cachedContentTokenCount":40}}"#;
@@ -1077,7 +1199,7 @@ mod tests {
             thinking_signature: None,
             metadata: None,
         };
-        let entries = codec.convert_messages(&[image_msg]);
+        let entries = codec.convert_messages(&[image_msg]).expect("must convert");
         assert_eq!(entries.len(), 1);
         let parts = entries[0]["parts"].as_array().expect("parts array");
         // Regression guard: none of the three blocks may be silently dropped.
@@ -1090,6 +1212,210 @@ mod tests {
             "https://example.com/a.jpg"
         );
         assert_eq!(parts[2]["file_data"]["mime_type"], "image/jpeg");
+    }
+
+    #[test]
+    fn the_tool_mode_is_a_top_level_field_of_the_request() {
+        let codec = GeminiNativeCodec::new();
+        let mut req = request(
+            vec![msg(llm_suite_types::message::MessageRole::User, "Hi")],
+            None,
+        );
+        req.generation = Some(llm_suite_types::llm::generation::LlmGenerationParams {
+            tool_choice: Some(llm_suite_types::llm::generation::LlmToolChoice {
+                mode: Some(llm_suite_types::llm::generation::ToolChoiceMode::None),
+                tool_name: None,
+            }),
+            ..Default::default()
+        });
+        let body = codec.build_body(&req, &profile()).expect("must build");
+        assert_eq!(
+            body["toolConfig"]["functionCallingConfig"]["mode"],
+            serde_json::json!("NONE")
+        );
+        assert!(
+            body["generationConfig"].get("toolConfig").is_none(),
+            "the tool mode is not a member of the generation config"
+        );
+    }
+
+    #[test]
+    fn a_plain_text_tool_result_becomes_a_function_response() {
+        let codec = GeminiNativeCodec::new();
+        let mut assistant = msg(llm_suite_types::message::MessageRole::Assistant, "");
+        assistant.tool_calls = Some(vec![llm_suite_types::message::LlmToolCall {
+            id: "call_1".to_string(),
+            r#type: "function".to_string(),
+            call_id: None,
+            function: llm_suite_types::message::LlmFunctionCall {
+                name: "get_weather".to_string(),
+                arguments: "{}".to_string(),
+            },
+        }]);
+        let mut result = msg(llm_suite_types::message::MessageRole::Tool, "sunny");
+        result.tool_call_id = Some("call_1".to_string());
+
+        let contents = codec
+            .convert_messages(&[assistant, result])
+            .expect("must convert");
+        assert_eq!(contents[0]["role"], serde_json::json!("model"));
+        assert_eq!(
+            contents[0]["parts"][0]["function_call"]["name"],
+            serde_json::json!("get_weather")
+        );
+        assert_eq!(contents[1]["role"], serde_json::json!("user"));
+        assert_eq!(
+            contents[1]["parts"][0]["function_response"]["name"],
+            serde_json::json!("get_weather"),
+            "the function name comes from the call the result answers"
+        );
+        assert_eq!(
+            contents[1]["parts"][0]["function_response"]["id"],
+            serde_json::json!("call_1")
+        );
+        assert_eq!(
+            contents[1]["parts"][0]["function_response"]["response"],
+            serde_json::json!("sunny")
+        );
+    }
+
+    #[test]
+    fn a_tool_result_without_a_known_function_is_rejected() {
+        let codec = GeminiNativeCodec::new();
+        let mut result = msg(llm_suite_types::message::MessageRole::Tool, "sunny");
+        result.tool_call_id = Some("call_unknown".to_string());
+        let err = codec
+            .convert_messages(&[result])
+            .expect_err("an unnamed function response is meaningless");
+        assert!(format!("{err}").contains("call_unknown"), "{err}");
+    }
+
+    #[test]
+    fn the_provider_call_id_is_kept_and_echoed_back() {
+        let codec = GeminiNativeCodec::new();
+        let body = r#"{
+            "candidates": [{"content": {"parts": [
+                {"functionCall": {"id": "fc-1", "name": "get_weather", "args": {}}}
+            ]}}]
+        }"#;
+        let result = codec
+            .parse_response(body, &request(vec![], None))
+            .expect("must parse");
+        let calls = result.tool_calls.expect("tool calls present");
+        assert_eq!(calls[0].id, "fc-1", "the provider call id must survive");
+
+        let mut tool_result = msg(llm_suite_types::message::MessageRole::Tool, "sunny");
+        tool_result.tool_call_id = Some("fc-1".to_string());
+        let contents = codec
+            .convert_messages(&[result.message.clone(), tool_result])
+            .expect("must convert");
+        assert_eq!(
+            contents[1]["parts"][0]["function_response"]["id"],
+            serde_json::json!("fc-1")
+        );
+        assert_eq!(
+            contents[1]["parts"][0]["function_response"]["name"],
+            serde_json::json!("get_weather")
+        );
+    }
+
+    #[test]
+    fn a_rich_tool_use_block_becomes_a_function_call_part() {
+        let codec = GeminiNativeCodec::new();
+        let mut assistant = msg(llm_suite_types::message::MessageRole::Assistant, "checking");
+        assistant.content = llm_suite_types::message::MessageContentValue::Rich(vec![
+            llm_suite_types::message::MessageContent::Text {
+                text: "checking".to_string(),
+            },
+            llm_suite_types::message::MessageContent::ToolUse {
+                tool_use: llm_suite_types::message::ToolUseContent {
+                    id: "call_1".to_string(),
+                    name: "get_weather".to_string(),
+                    input: serde_json::json!({"city": "Beijing"}),
+                },
+            },
+        ]);
+        let contents = codec.convert_messages(&[assistant]).expect("must convert");
+        let parts = contents[0]["parts"].as_array().expect("parts");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["text"], serde_json::json!("checking"));
+        assert_eq!(
+            parts[1]["function_call"]["name"],
+            serde_json::json!("get_weather")
+        );
+        assert_eq!(
+            parts[1]["function_call"]["args"]["city"],
+            serde_json::json!("Beijing")
+        );
+    }
+
+    #[test]
+    fn a_rich_tool_result_names_the_function_of_its_tool_use_block() {
+        let codec = GeminiNativeCodec::new();
+        let mut assistant = msg(llm_suite_types::message::MessageRole::Assistant, "");
+        assistant.content = llm_suite_types::message::MessageContentValue::Rich(vec![
+            llm_suite_types::message::MessageContent::ToolUse {
+                tool_use: llm_suite_types::message::ToolUseContent {
+                    id: "call_1".to_string(),
+                    name: "get_weather".to_string(),
+                    input: serde_json::json!({}),
+                },
+            },
+        ]);
+        let mut result = msg(llm_suite_types::message::MessageRole::Tool, "");
+        result.content = llm_suite_types::message::MessageContentValue::Rich(vec![
+            llm_suite_types::message::MessageContent::ToolResult {
+                tool_result: llm_suite_types::message::ToolResultContent {
+                    tool_use_id: "call_1".to_string(),
+                    content: "sunny".to_string(),
+                    is_error: None,
+                },
+            },
+        ]);
+
+        let contents = codec
+            .convert_messages(&[assistant, result])
+            .expect("must convert");
+        assert_eq!(
+            contents[1]["parts"][0]["function_response"]["name"],
+            serde_json::json!("get_weather")
+        );
+        assert_eq!(
+            contents[1]["parts"][0]["function_response"]["id"],
+            serde_json::json!("call_1")
+        );
+    }
+
+    #[test]
+    fn a_message_without_parts_is_skipped() {
+        let codec = GeminiNativeCodec::new();
+        let empty = msg(llm_suite_types::message::MessageRole::User, "");
+        let contents = codec
+            .convert_messages(&[
+                empty,
+                msg(llm_suite_types::message::MessageRole::User, "hi"),
+            ])
+            .expect("must convert");
+        assert_eq!(contents.len(), 1);
+        assert_eq!(contents[0]["parts"][0]["text"], serde_json::json!("hi"));
+    }
+
+    #[test]
+    fn a_thought_signature_on_the_thought_part_is_kept() {
+        let codec = GeminiNativeCodec::new();
+        let body = r#"{
+            "candidates": [{"content": {"parts": [
+                {"text": "planning", "thought": true, "thoughtSignature": "sig-1"},
+                {"functionCall": {"name": "f", "args": {}}}
+            ]}}]
+        }"#;
+        let result = codec
+            .parse_response(body, &request(vec![], None))
+            .expect("must parse");
+        assert_eq!(
+            result.message.metadata.as_ref().unwrap()["thought_signatures"],
+            serde_json::json!(["sig-1"])
+        );
     }
 
     #[test]
@@ -1268,9 +1594,9 @@ mod tests {
             .map(|b| serde_json::from_slice(b).unwrap())
             .unwrap();
         assert_eq!(body["contents"][0]["role"], serde_json::json!("user"));
-        assert_eq!(
-            body["systemInstruction"]["parts"][0]["text"],
-            serde_json::json!("You are a helper")
+        assert!(
+            body.get("systemInstruction").is_none(),
+            "the counting endpoint does not take a system instruction"
         );
         assert!(
             body.get("generationConfig").is_none(),
@@ -1318,7 +1644,7 @@ mod tests {
     }
 
     #[test]
-    fn count_tokens_body_covers_same_contents_as_inference() {
+    fn count_tokens_body_covers_the_same_contents_as_the_inference_request() {
         let codec = GeminiNativeCodec::new();
         let inference = codec
             .build_body(&count_request(), &profile())
@@ -1334,10 +1660,11 @@ mod tests {
             .map(|b| serde_json::from_slice(b).unwrap())
             .unwrap();
         assert_eq!(count_body["contents"], inference["contents"]);
-        assert_eq!(
-            count_body["systemInstruction"],
-            inference["systemInstruction"]
+        assert!(
+            count_body.get("systemInstruction").is_none(),
+            "the counting endpoint does not take a system instruction"
         );
+        assert!(count_body.get("tools").is_none());
     }
 
     #[test]

@@ -18,14 +18,29 @@ use crate::request_builder::RequestBuilder;
 /// Chat completion result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatResult {
-    /// Generated message content.
+    /// Generated message content. Empty when the provider answered with a
+    /// tool call: the official API leaves the content empty in that case.
     pub content: String,
+    /// Tool calls requested by the provider.
+    #[serde(default)]
+    pub tool_calls: Vec<ChatToolCall>,
     /// Prompt tokens reported by the provider.
     pub prompt_tokens: u64,
     /// Completion tokens derived as `total - prompt`.
     pub completion_tokens: u64,
     /// Total tokens reported by the provider.
     pub total_tokens: u64,
+}
+
+/// One tool call requested by the provider.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChatToolCall {
+    /// Provider call id.
+    pub id: String,
+    /// Called function name.
+    pub name: String,
+    /// Called function arguments as a JSON string.
+    pub arguments: String,
 }
 
 /// Port for basic chat completion capability.
@@ -169,14 +184,48 @@ fn flatten_content(content: &MessageContentValue) -> String {
 
 /// Decodes a `/chat/completions` response into a [`ChatResult`].
 pub fn parse_chat_response(body: &Value) -> Result<ChatResult> {
-    let content = body
+    let choice = body
         .get("choices")
         .and_then(Value::as_array)
         .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("message"))
+        .ok_or_else(|| ChatError::Decode("chat response contains no choices".into()))?;
+
+    // The official API leaves the content empty when the provider answers
+    // with a tool call, so an absent content is not an error.
+    let content = choice
+        .get("message")
         .and_then(|message| message.get("content"))
         .and_then(Value::as_str)
-        .ok_or_else(|| ChatError::Decode("chat response contains no choices".into()))?;
+        .unwrap_or_default()
+        .to_string();
+
+    let tool_calls = choice
+        .get("message")
+        .and_then(|message| message.get("tool_calls"))
+        .and_then(Value::as_array)
+        .map(|calls| {
+            calls
+                .iter()
+                .filter_map(|call| {
+                    let function = call.get("function")?;
+                    let name = function.get("name").and_then(Value::as_str)?;
+                    Some(ChatToolCall {
+                        id: call
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        name: name.to_string(),
+                        arguments: function
+                            .get("arguments")
+                            .and_then(Value::as_str)
+                            .unwrap_or("{}")
+                            .to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     let prompt_tokens = body
         .pointer("/usage/prompt_tokens")
@@ -188,7 +237,8 @@ pub fn parse_chat_response(body: &Value) -> Result<ChatResult> {
         .unwrap_or(0);
 
     Ok(ChatResult {
-        content: content.to_string(),
+        content,
+        tool_calls,
         prompt_tokens,
         completion_tokens: total_tokens.saturating_sub(prompt_tokens),
         total_tokens,
@@ -272,6 +322,32 @@ mod tests {
         assert_eq!(result.prompt_tokens, 10);
         assert_eq!(result.completion_tokens, 15);
         assert_eq!(result.total_tokens, 25);
+    }
+
+    #[test]
+    fn parse_response_reads_tool_calls_and_an_empty_content() {
+        // The official API leaves the content empty when the provider asks
+        // for a tool call.
+        let body = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": "{\"city\":\"Beijing\"}"}
+                    }]
+                }
+            }],
+            "usage": {"prompt_tokens": 10, "total_tokens": 25}
+        });
+        let result = parse_chat_response(&body).expect("must parse");
+        assert_eq!(result.content, "");
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].id, "call_1");
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+        assert_eq!(result.tool_calls[0].arguments, r#"{"city":"Beijing"}"#);
     }
 
     #[test]

@@ -11,7 +11,7 @@ pub use codecs::{
 pub use error::{LlmError, LlmResult};
 pub use generation::{
     apply_anthropic, apply_gemini_generation_config, apply_openai_chat, apply_openai_responses,
-    is_typed_param_key, parse_legacy_generation, resolve_generation, validate_generation,
-    ANTHROPIC_DEFAULT_MAX_TOKENS,
+    gemini_tool_config, is_typed_param_key, parse_legacy_generation, resolve_generation,
+    validate_generation, ANTHROPIC_DEFAULT_MAX_TOKENS,
 };
 pub use registry::CodecRegistry;

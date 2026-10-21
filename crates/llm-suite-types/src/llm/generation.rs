@@ -248,8 +248,9 @@ pub struct LlmGenerationParams {
     )]
     pub max_tokens: Option<u32>,
     /// Explicit wire-field selection for the OpenAI Chat `max_tokens`
-    /// parameter. Defaults to `max_tokens`; set to `max_completion_tokens`
-    /// for OpenAI reasoning models. Never inferred from the model name.
+    /// parameter. Defaults to `max_completion_tokens`, the field the
+    /// official API recommends; set to `max_tokens` for servers that only
+    /// accept the legacy field. Never inferred from the model name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_token_field: Option<LlmMaxTokenField>,
     #[serde(skip_serializing_if = "Option::is_none")]
