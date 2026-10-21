@@ -1,4 +1,6 @@
-use llm_suite_types::llm::{ToolCallMarkers, ToolCallProtocol};
+use llm_suite_types::llm::{
+    ToolCallMarkers, ToolCallProtocol, DEFAULT_JSON_MARKER_END, DEFAULT_JSON_MARKER_START,
+};
 use llm_suite_types::message::{LlmToolCall, Message, MessageContentValue, MessageRole};
 
 /// Default XML tags used for text-mode tool call/result rendering.
@@ -8,9 +10,6 @@ const XML_TOOL_ARGS: &str = "parameters";
 const XML_TOOL_RESULT: &str = "tool_result";
 const XML_TOOL_CALL_ID: &str = "tool_call_id";
 const XML_TOOL_OUTPUT: &str = "tool_output";
-
-const DEFAULT_JSON_START: &str = "<<<TOOL_CALL>>>";
-const DEFAULT_JSON_END: &str = "<<<END_TOOL_CALL>>>";
 
 /// Convert an entire message history from native function-calling format to a
 /// text-based tool format (XML/JSON):
@@ -191,12 +190,8 @@ pub fn render_tool_calls(
             .collect::<Vec<_>>()
             .join("\n"),
         ToolCallProtocol::JsonWrapped | ToolCallProtocol::JsonRaw => {
-            let start = markers
-                .and_then(|m| m.start.as_deref())
-                .unwrap_or(DEFAULT_JSON_START);
-            let end = markers
-                .and_then(|m| m.end.as_deref())
-                .unwrap_or(DEFAULT_JSON_END);
+            let start = markers.map_or(DEFAULT_JSON_MARKER_START, ToolCallMarkers::effective_start);
+            let end = markers.map_or(DEFAULT_JSON_MARKER_END, ToolCallMarkers::effective_end);
             calls
                 .iter()
                 .map(|tc| {
@@ -229,12 +224,8 @@ pub fn render_tool_result(
             "<{XML_TOOL_RESULT}>\n<{XML_TOOL_CALL_ID}>{tool_call_id}</{XML_TOOL_CALL_ID}>\n<{XML_TOOL_OUTPUT}>{output}</{XML_TOOL_OUTPUT}>\n</{XML_TOOL_RESULT}>"
         ),
         ToolCallProtocol::JsonWrapped | ToolCallProtocol::JsonRaw => {
-            let start = markers
-                .and_then(|m| m.start.as_deref())
-                .unwrap_or(DEFAULT_JSON_START);
-            let end = markers
-                .and_then(|m| m.end.as_deref())
-                .unwrap_or(DEFAULT_JSON_END);
+            let start = markers.map_or(DEFAULT_JSON_MARKER_START, ToolCallMarkers::effective_start);
+            let end = markers.map_or(DEFAULT_JSON_MARKER_END, ToolCallMarkers::effective_end);
             format!(
                 "{start}\n{}\n{end}",
                 serde_json::json!({

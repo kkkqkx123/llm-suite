@@ -68,13 +68,28 @@ pub struct ToolCallMarkers {
     pub end: Option<String>,
 }
 
+/// Canonical start marker of the wrapped JSON tool-call protocol.
+pub const DEFAULT_JSON_MARKER_START: &str = "<<<TOOL_CALL>>>";
+/// Canonical end marker of the wrapped JSON tool-call protocol.
+pub const DEFAULT_JSON_MARKER_END: &str = "<<<END_TOOL_CALL>>>";
+
 impl ToolCallMarkers {
     /// Default markers for wrapped JSON protocol: `<<<TOOL_CALL>>> ... <<<END_TOOL_CALL>>>`.
     pub fn default_json() -> Self {
         Self {
-            start: Some("<<<TOOL_CALL>>>".to_string()),
-            end: Some("<<<END_TOOL_CALL>>>".to_string()),
+            start: Some(DEFAULT_JSON_MARKER_START.to_string()),
+            end: Some(DEFAULT_JSON_MARKER_END.to_string()),
         }
+    }
+
+    /// Resolve the start marker, falling back to the canonical default.
+    pub fn effective_start(&self) -> &str {
+        self.start.as_deref().unwrap_or(DEFAULT_JSON_MARKER_START)
+    }
+
+    /// Resolve the end marker, falling back to the canonical default.
+    pub fn effective_end(&self) -> &str {
+        self.end.as_deref().unwrap_or(DEFAULT_JSON_MARKER_END)
     }
 }
 
@@ -83,16 +98,14 @@ impl ToolCallProtocolConfig {
     pub fn effective_start(&self) -> &str {
         self.markers
             .as_ref()
-            .and_then(|m| m.start.as_deref())
-            .unwrap_or("<<<TOOL_CALL>>>")
+            .map_or(DEFAULT_JSON_MARKER_START, ToolCallMarkers::effective_start)
     }
 
     /// Resolve effective end marker.
     pub fn effective_end(&self) -> &str {
         self.markers
             .as_ref()
-            .and_then(|m| m.end.as_deref())
-            .unwrap_or("<<<END_TOOL_CALL>>>")
+            .map_or(DEFAULT_JSON_MARKER_END, ToolCallMarkers::effective_end)
     }
 }
 

@@ -10,7 +10,7 @@ pub mod gemini_native;
 pub mod helpers;
 pub mod openai_chat;
 pub mod openai_response;
-pub mod shared;
+pub(crate) mod shared;
 
 pub use anthropic::AnthropicCodec;
 pub use gemini_native::GeminiNativeCodec;

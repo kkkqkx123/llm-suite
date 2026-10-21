@@ -7,6 +7,13 @@ use llm_suite_types::llm::{
 use llm_suite_types::tool::Tool;
 use reqwest::Method;
 
+pub(crate) mod messages;
+pub(crate) mod response;
+pub(crate) mod stream;
+pub(crate) mod tools;
+pub(crate) mod usage;
+pub(crate) mod validate;
+
 pub struct OpenaiChatCodec {
     base_url: String,
     // Reused across requests; constructing a `reqwest::Client` per call would
@@ -48,13 +55,13 @@ impl OpenaiChatCodec {
                 llm_suite_tool_call::tool::protocol::extract_system_message(&request.messages);
             let content = shared::text_mode_system_content(request);
             let history = shared::convert_history_for_text_mode(&filtered, request);
-            let mut converted = shared::convert_openai_messages(&history);
+            let mut converted = messages::convert_openai_messages(&history);
             if !content.is_empty() {
                 converted.insert(0, serde_json::json!({"role": "system", "content": content}));
             }
             converted
         } else {
-            shared::convert_openai_messages(&request.messages)
+            messages::convert_openai_messages(&request.messages)
         };
 
         let mut body = serde_json::json!({
@@ -68,9 +75,9 @@ impl OpenaiChatCodec {
 
         if !use_text_mode {
             // `tool` role messages must carry `tool_call_id` for OpenAI Chat.
-            shared::validate_openai_chat_messages(request)?;
+            validate::validate_openai_chat_messages(request)?;
             if let Some(tools) = &request.tools {
-                body["tools"] = serde_json::json!(shared::convert_openai_tools(tools)?);
+                body["tools"] = serde_json::json!(tools::convert_openai_tools(tools)?);
             }
         }
 
@@ -132,7 +139,7 @@ impl LlmCodec for OpenaiChatCodec {
     }
 
     fn parse_response(&self, body: &str, request: &LlmRequest) -> LlmResult<LlmResponseType> {
-        let mut result = shared::parse_openai_chat_response(body)?;
+        let mut result = response::parse_openai_chat_response(body)?;
         if shared::is_text_mode(request) {
             if let Some(content) = result.content.clone() {
                 let calls = shared::parse_text_tool_calls(request, &content);
@@ -146,11 +153,11 @@ impl LlmCodec for OpenaiChatCodec {
     }
 
     fn parse_stream_chunk_events(&self, data: &str) -> LlmResult<Vec<MessageStreamEvent>> {
-        shared::parse_openai_stream_chunk(data)
+        stream::parse_openai_stream_chunk(data)
     }
 
     fn convert_tools(&self, tools: &[Tool]) -> LlmResult<Vec<serde_json::Value>> {
-        shared::convert_openai_tools(tools)
+        tools::convert_openai_tools(tools)
     }
 
     fn parse_tool_calls(
