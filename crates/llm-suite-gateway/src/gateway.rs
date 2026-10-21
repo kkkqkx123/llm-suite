@@ -343,11 +343,14 @@ impl LlmGateway {
             .token_metrics
             .as_ref()
             .map(|m| Arc::clone(m) as llm_suite_client::SharedTokenUsageSink);
-        Ok(Box::new(llm_suite_client::TokenRecordingStream::new(
-            stream,
-            usage_sink,
-            prepared.profile.model.clone(),
-        )))
+        Ok(Box::new(
+            llm_suite_client::TokenRecordingStream::new(
+                stream,
+                usage_sink,
+                prepared.profile.model.clone(),
+            )
+            .with_metrics_sink(self.token_metrics.clone()),
+        ))
     }
 
     pub async fn count_tokens(
