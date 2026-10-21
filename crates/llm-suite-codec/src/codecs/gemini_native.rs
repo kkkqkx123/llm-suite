@@ -3,6 +3,7 @@ use crate::error::LlmResult;
 use llm_suite_types::llm::{
     LlmProfile, LlmRequest, LlmResult as LlmResponseType, MessageStreamEvent,
 };
+use llm_suite_types::message::Message;
 use llm_suite_types::tool::Tool;
 use reqwest::Method;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -11,6 +12,23 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// part is a complete snapshot; unique indices keep separate calls apart in
 /// the accumulator).
 static GEMINI_CALL_INDEX: AtomicUsize = AtomicUsize::new(0);
+
+/// Metadata key holding the thought signatures of a reply, one entry per
+/// tool call of that reply.
+const THOUGHT_SIGNATURES_KEY: &str = "thought_signatures";
+
+/// The thought signature that belongs to the tool call at `index`, when the
+/// provider signed it.
+fn thought_signature_for(message: &Message, index: usize) -> Option<String> {
+    message
+        .metadata
+        .as_ref()?
+        .get(THOUGHT_SIGNATURES_KEY)?
+        .as_array()?
+        .get(index)?
+        .as_str()
+        .map(String::from)
+}
 
 pub struct GeminiNativeCodec {
     base_url: String,
@@ -92,17 +110,24 @@ impl GeminiNativeCodec {
                             p.push(serde_json::json!({"text": text}));
                         }
                         if let Some(ref tool_calls) = msg.tool_calls {
-                            for tc in tool_calls {
+                            for (index, tc) in tool_calls.iter().enumerate() {
                                 let args: serde_json::Value = serde_json::from_str(
                                     &tc.function.arguments,
                                 )
                                 .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-                                p.push(serde_json::json!({
+                                let mut part = serde_json::json!({
                                     "function_call": {
                                         "name": tc.function.name,
                                         "args": args,
                                     }
-                                }));
+                                });
+                                // The provider signs a function call with an
+                                // opaque thought signature; the signature has
+                                // to travel back with the call in the next turn.
+                                if let Some(signature) = thought_signature_for(msg, index) {
+                                    part["thoughtSignature"] = serde_json::json!(signature);
+                                }
+                                p.push(part);
                             }
                         }
                         p
@@ -262,11 +287,9 @@ impl LlmCodec for GeminiNativeCodec {
         } else {
             "generateContent"
         };
-        let url = format!(
-            "{}/models/{}:{}",
+        let url = super::shared::endpoint_url(
             self.endpoint_base(profile),
-            profile.model,
-            action
+            &format!("models/{}:{}", profile.model, action),
         );
 
         let body = self.build_body(request, profile)?;
@@ -279,10 +302,9 @@ impl LlmCodec for GeminiNativeCodec {
         request: &LlmRequest,
         profile: &LlmProfile,
     ) -> LlmResult<Option<reqwest::Request>> {
-        let url = format!(
-            "{}/models/{}:countTokens",
+        let url = super::shared::endpoint_url(
             self.endpoint_base(profile),
-            profile.model
+            &format!("models/{}:countTokens", profile.model),
         );
 
         // Reuse the inference body so the count covers exactly what would
@@ -329,6 +351,17 @@ impl LlmCodec for GeminiNativeCodec {
 
         let json: serde_json::Value = serde_json::from_str(data)?;
         let mut events = Vec::new();
+
+        // Streaming usage arrives in the final chunk's `usageMetadata`. It
+        // must be surfaced before the terminal event: the accumulator builds
+        // the final message when the terminal event arrives.
+        if let Some(u) = json.get("usageMetadata") {
+            events.push(MessageStreamEvent::Usage(
+                llm_suite_types::llm::MessageStreamUsage {
+                    usage: Self::parse_usage_metadata(u),
+                },
+            ));
+        }
 
         if let Some(candidates) = json.get("candidates").and_then(|v| v.as_array()) {
             if let Some(candidate) = candidates.first() {
@@ -394,6 +427,7 @@ impl LlmCodec for GeminiNativeCodec {
                                 llm_suite_types::llm::MessageStreamToolCallDelta {
                                     index: GEMINI_CALL_INDEX.fetch_add(1, Ordering::Relaxed),
                                     id: None,
+                                    call_id: None,
                                     name: Some(name),
                                     arguments: Some(arguments),
                                     is_snapshot: true,
@@ -414,28 +448,26 @@ impl LlmCodec for GeminiNativeCodec {
             }
         }
 
-        // Streaming usage arrives in the final chunk's `usageMetadata`.
-        if let Some(u) = json.get("usageMetadata") {
-            events.push(MessageStreamEvent::Usage(
-                llm_suite_types::llm::MessageStreamUsage {
-                    usage: Self::parse_usage_metadata(u),
-                },
-            ));
-        }
-
         Ok(events)
     }
 
     fn convert_tools(&self, tools: &[Tool]) -> LlmResult<Vec<serde_json::Value>> {
         // Full `tools` array shape: `[{"functionDeclarations": [...]}]`, ready
-        // to be assigned to the request body `tools` field.
+        // to be assigned to the request body `tools` field. The parameter
+        // schema is rewritten into Gemini's dialect, whose type names are
+        // uppercase enum members.
         let function_declarations: Vec<serde_json::Value> = tools
             .iter()
             .map(|t| {
+                let parameters = t.parameters.as_ref().map(|schema| {
+                    crate::generation::gemini_schema_value(&serde_json::to_value(schema).unwrap_or(
+                        serde_json::Value::Null,
+                    ))
+                });
                 serde_json::json!({
                     "name": t.name,
                     "description": t.description,
-                    "parameters": t.parameters,
+                    "parameters": parameters,
                 })
             })
             .collect();
@@ -479,8 +511,14 @@ impl GeminiNativeCodec {
 
         let mut body = serde_json::json!({
             "contents": messages,
-            "generationConfig": generation_config,
         });
+
+        // The generation config is only sent when it carries something;
+        // an empty object would override the server-side model defaults.
+        if !generation_config.is_null() && generation_config.as_object().is_some_and(|c| !c.is_empty())
+        {
+            body["generationConfig"] = generation_config;
+        }
 
         if use_text_mode {
             let system = super::shared::text_mode_system_content(request);
@@ -514,13 +552,31 @@ impl GeminiNativeCodec {
     fn parse_gemini_response(&self, body: &str) -> LlmResult<LlmResponseType> {
         let json: serde_json::Value = serde_json::from_str(body)?;
 
+        // A blocked prompt carries no candidates; the reason lives in the
+        // prompt feedback and has to surface as an error instead of an empty
+        // answer.
+        if let Some(block_reason) = json
+            .pointer("/promptFeedback/blockReason")
+            .and_then(|v| v.as_str())
+        {
+            let detail = json
+                .pointer("/promptFeedback/blockReasonMessage")
+                .and_then(|v| v.as_str())
+                .unwrap_or(block_reason);
+            return Err(crate::error::LlmError::InvalidResponse(format!(
+                "Gemini blocked the prompt ({block_reason}): {detail}"
+            )));
+        }
+
         let candidates = json.get("candidates").and_then(|v| v.as_array());
         let first_candidate = candidates.and_then(|c| c.first());
 
         let mut text_content = String::new();
         let mut reasoning_content: Option<String> = None;
         let mut tool_calls = Vec::new();
-        let mut thought_signatures: Vec<String> = Vec::new();
+        // One entry per tool call; the signature the provider attached to the
+        // function call has to travel back with that call.
+        let mut thought_signatures: Vec<Option<String>> = Vec::new();
 
         if let Some(candidate) = first_candidate {
             let content = candidate.get("content");
@@ -550,9 +606,6 @@ impl GeminiNativeCodec {
                                 .get_or_insert_with(String::new)
                                 .push_str(thought);
                         }
-                        if let Some(sig) = part.get("thoughtSignature").and_then(|v| v.as_str()) {
-                            thought_signatures.push(sig.to_string());
-                        }
                         if let Some(func_call) = part.get("functionCall") {
                             let name = func_call
                                 .get("name")
@@ -573,6 +626,11 @@ impl GeminiNativeCodec {
                                     arguments,
                                 },
                             });
+                            thought_signatures.push(
+                                part.get("thoughtSignature")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from),
+                            );
                         }
                     }
                 }
@@ -580,6 +638,19 @@ impl GeminiNativeCodec {
         }
 
         let usage = json.get("usageMetadata").map(Self::parse_usage_metadata);
+
+        let mut message_metadata = std::collections::HashMap::new();
+        if !thought_signatures.is_empty() {
+            message_metadata.insert(
+                THOUGHT_SIGNATURES_KEY.to_string(),
+                serde_json::json!(thought_signatures),
+            );
+        }
+        let message_metadata = if message_metadata.is_empty() {
+            None
+        } else {
+            Some(message_metadata)
+        };
 
         let message = llm_suite_types::message::Message {
             id: llm_suite_types::Id::new(),
@@ -595,12 +666,12 @@ impl GeminiNativeCodec {
             },
             thinking: None,
             thinking_signature: None,
-            metadata: None,
+            metadata: message_metadata,
         };
 
-        // Provider-native value normalized only for the envelope; the raw
-        // `finishReason` is preserved in metadata and never unified across
-        // codecs here.
+        // The envelope carries the normalized stop value; the raw
+        // `finishReason` stays available in the metadata. Every codec
+        // documents which spelling it reports, so consumers match per family.
         let finish_reason = first_candidate
             .and_then(|c| c.get("finishReason"))
             .and_then(|v| v.as_str())
@@ -725,8 +796,128 @@ mod tests {
     }
 
     #[test]
-    fn usage_metadata_parses_cached_content_tokens() {
+    fn empty_generation_config_is_not_sent() {
         let codec = GeminiNativeCodec::new();
+        let body = codec
+            .build_body(&request(vec![], None), &profile())
+            .expect("must build");
+        assert!(
+            body.get("generationConfig").is_none(),
+            "an empty generation config would override the model defaults"
+        );
+    }
+
+    #[test]
+    fn tool_parameter_schema_uses_gemini_enum_members() {
+        let codec = GeminiNativeCodec::new();
+        let tools = vec![serde_json::from_value(serde_json::json!({
+            "name": "get_weather",
+            "description": "Get weather",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"},
+                    "days": {"type": "integer"},
+                    "tags": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["city"]
+            }
+        }))
+        .unwrap()];
+        let shape = codec.convert_tools(&tools).unwrap();
+        let parameters = &shape[0]["functionDeclarations"][0]["parameters"];
+        assert_eq!(parameters["type"], serde_json::json!("OBJECT"));
+        assert_eq!(parameters["properties"]["city"]["type"], serde_json::json!("STRING"));
+        assert_eq!(
+            parameters["properties"]["days"]["type"],
+            serde_json::json!("INTEGER")
+        );
+        assert_eq!(parameters["properties"]["tags"]["type"], serde_json::json!("ARRAY"));
+        assert_eq!(
+            parameters["properties"]["tags"]["items"]["type"],
+            serde_json::json!("STRING")
+        );
+    }
+
+    #[test]
+    fn thinking_level_is_emitted_as_gemini_enum_member() {
+        let mut config = serde_json::json!({});
+        crate::generation::apply_gemini_generation_config(
+            &mut config,
+            &llm_suite_types::llm::generation::LlmGenerationParams {
+                thinking: Some(llm_suite_types::llm::generation::LlmThinkingConfig {
+                    level: Some(llm_suite_types::llm::generation::ThinkingLevel::High),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("thinking level must be accepted");
+        assert_eq!(
+            config["thinkingConfig"]["thinkingLevel"],
+            serde_json::json!("HIGH")
+        );
+    }
+
+    #[test]
+    fn thought_signature_travels_back_with_the_function_call() {
+        let codec = GeminiNativeCodec::new();
+        let body = r#"{
+            "candidates": [{"content": {"parts": [
+                {"functionCall": {"name": "f", "args": {}}, "thoughtSignature": "sig-1"}
+            ]}}]
+        }"#;
+        let result = codec
+            .parse_response(body, &request(vec![], None))
+            .expect("must parse");
+        let message = result.message.clone();
+        assert_eq!(
+            message.metadata.as_ref().unwrap()["thought_signatures"],
+            serde_json::json!(["sig-1"])
+        );
+
+        let contents = codec
+            .convert_messages(std::slice::from_ref(&message));
+        let parts = contents[0]["parts"].as_array().unwrap();
+        assert_eq!(parts[0]["thoughtSignature"], serde_json::json!("sig-1"));
+    }
+
+    #[test]
+    fn named_tool_choice_restricts_the_allowed_functions() {
+        let mut config = serde_json::json!({});
+        crate::generation::apply_gemini_generation_config(
+            &mut config,
+            &llm_suite_types::llm::generation::LlmGenerationParams {
+                tool_choice: Some(llm_suite_types::llm::generation::LlmToolChoice {
+                    mode: None,
+                    tool_name: Some("get_weather".to_string()),
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("tool choice must be accepted");
+        assert_eq!(
+            config["toolConfig"]["functionCallingConfig"]["mode"],
+            serde_json::json!("ANY")
+        );
+        assert_eq!(
+            config["toolConfig"]["functionCallingConfig"]["allowedFunctionNames"],
+            serde_json::json!(["get_weather"])
+        );
+    }
+
+    #[test]
+    fn blocked_prompt_surfaces_as_an_error() {
+        let codec = GeminiNativeCodec::new();
+        let body = r#"{"promptFeedback": {"blockReason": "SAFETY", "blockReasonMessage": "unsafe"}}"#;
+        let err = codec
+            .parse_response(body, &request(vec![], None))
+            .expect_err("a blocked prompt must not look like an empty answer");
+        assert!(format!("{err}").contains("SAFETY"), "{err}");
+    }
+
+    #[test]
+    fn usage_metadata_parses_cached_content_tokens() {        let codec = GeminiNativeCodec::new();
         // Primary source: `cachedContentTokenCount` (python-genai
         // `GenerateContentResponseUsageMetadata.cached_content_token_count`).
         let chunk = r#"{"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":5,"totalTokenCount":105,"thoughtsTokenCount":3,"cachedContentTokenCount":40}}"#;

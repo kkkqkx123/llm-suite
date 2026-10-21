@@ -8,6 +8,7 @@ pub mod validate;
 
 pub use emit::{
     apply_anthropic, apply_gemini_generation_config, apply_openai_chat, apply_openai_responses,
+    gemini_schema_value,
 };
 pub use parse::{is_typed_param_key, parse_legacy_generation};
 pub use validate::{validate_generation, ANTHROPIC_DEFAULT_MAX_TOKENS};
@@ -38,8 +39,7 @@ mod tests {
     use super::*;
     use llm_suite_types::llm::generation::{
         LlmMaxTokenField, LlmThinkingConfig, ThinkingLevel, Verbosity,
-    };
-    use llm_suite_types::llm::LlmFormat;
+    };    use llm_suite_types::llm::LlmFormat;
 
     fn profile_with(
         format: LlmFormat,
@@ -175,7 +175,8 @@ mod tests {
                 verbosity: Some(Verbosity::Low),
                 ..Default::default()
             },
-        );
+        )
+        .expect("generation must apply");
         assert_eq!(body["max_completion_tokens"], serde_json::json!(512));
         assert_eq!(body["reasoning_effort"], serde_json::json!("xhigh"));
         assert_eq!(body["verbosity"], serde_json::json!("low"));
@@ -185,8 +186,7 @@ mod tests {
     #[test]
     fn openai_chat_reasoning_model_name_does_not_change_field() {
         // The model name must never drive emission: without an explicit
-        // `max_token_field`, even a reasoning-style model name emits the
-        // default `max_tokens` field.
+        // `max_token_field` the officially recommended field is used.
         let mut body = serde_json::json!({"model": "gpt-5"});
         apply_openai_chat(
             &mut body,
@@ -194,13 +194,30 @@ mod tests {
                 max_tokens: Some(512),
                 ..Default::default()
             },
-        );
+        )
+        .expect("generation must apply");
+        assert_eq!(body["max_completion_tokens"], serde_json::json!(512));
+        assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn openai_chat_legacy_max_tokens_field_is_opt_in() {
+        let mut body = serde_json::json!({"model": "local-model"});
+        apply_openai_chat(
+            &mut body,
+            &LlmGenerationParams {
+                max_tokens: Some(512),
+                max_token_field: Some(LlmMaxTokenField::MaxTokens),
+                ..Default::default()
+            },
+        )
+        .expect("generation must apply");
         assert_eq!(body["max_tokens"], serde_json::json!(512));
         assert!(body.get("max_completion_tokens").is_none());
     }
 
     #[test]
-    fn openai_chat_non_reasoning_uses_max_tokens() {
+    fn openai_chat_non_reasoning_uses_the_recommended_field() {
         let mut body = serde_json::json!({"model": "gpt-4o"});
         apply_openai_chat(
             &mut body,
@@ -208,9 +225,10 @@ mod tests {
                 max_tokens: Some(512),
                 ..Default::default()
             },
-        );
-        assert_eq!(body["max_tokens"], serde_json::json!(512));
-        assert!(body.get("max_completion_tokens").is_none());
+        )
+        .expect("generation must apply");
+        assert_eq!(body["max_completion_tokens"], serde_json::json!(512));
+        assert!(body.get("max_tokens").is_none());
     }
 
     #[test]
@@ -250,7 +268,8 @@ mod tests {
                 }),
                 ..Default::default()
             },
-        );
+        )
+        .expect("generation must apply");
         let rf = body["response_format"]["json_schema"]
             .as_object()
             .expect("json_schema present");

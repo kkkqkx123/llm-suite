@@ -1,29 +1,17 @@
 use super::LlmCodec;
 use crate::error::LlmResult;
 use llm_suite_types::llm::{
-    LlmProfile, LlmRequest, LlmResult as LlmResponseType, MessageStreamEvent,
+    LlmProfile, LlmRequest, LlmResult as LlmResponseType, MessageStreamEvent, MessageStreamStart,
 };
 use llm_suite_types::tool::Tool;
 use reqwest::Method;
 use std::collections::HashMap;
-use std::sync::Mutex;
 
 pub struct OpenaiResponseCodec {
     base_url: String,
     /// Reused across requests; constructing a `reqwest::Client` per call would
     /// discard the connection pool and TLS session cache every time.
     client: reqwest::Client,
-    /// Maps streaming `item_id` to the accumulated tool call index so
-    /// `function_call_arguments.delta` fragments land on the same call as the
-    /// final `function_call_arguments.done` snapshot.
-    call_indices: Mutex<HashMap<String, usize>>,
-    next_index: Mutex<usize>,
-    /// Accumulated assistant text across `output_text.delta` chunks so the
-    /// streamed `Text` event carries a running snapshot (matching the official
-    /// SDK's accumulator). Reset on `response.created`.
-    text_snapshot: Mutex<String>,
-    /// Accumulated reasoning text across `reasoning_text.delta` chunks.
-    reasoning_snapshot: Mutex<String>,
 }
 
 impl Default for OpenaiResponseCodec {
@@ -37,10 +25,6 @@ impl OpenaiResponseCodec {
         Self {
             base_url: "https://api.openai.com/v1".to_string(),
             client: reqwest::Client::new(),
-            call_indices: Mutex::new(HashMap::new()),
-            next_index: Mutex::new(0),
-            text_snapshot: Mutex::new(String::new()),
-            reasoning_snapshot: Mutex::new(String::new()),
         }
     }
 
@@ -48,23 +32,7 @@ impl OpenaiResponseCodec {
         Self {
             base_url,
             client: reqwest::Client::new(),
-            call_indices: Mutex::new(HashMap::new()),
-            next_index: Mutex::new(0),
-            text_snapshot: Mutex::new(String::new()),
-            reasoning_snapshot: Mutex::new(String::new()),
         }
-    }
-
-    fn call_index_for(&self, item_id: &str) -> usize {
-        let mut indices = llm_suite_common::lock::lock_ok(self.call_indices.lock());
-        if let Some(idx) = indices.get(item_id) {
-            return *idx;
-        }
-        let mut next = llm_suite_common::lock::lock_ok(self.next_index.lock());
-        let idx = *next;
-        *next += 1;
-        indices.insert(item_id.to_string(), idx);
-        idx
     }
 
     fn convert_messages(
@@ -72,6 +40,22 @@ impl OpenaiResponseCodec {
         messages: &[llm_suite_types::message::Message],
     ) -> Vec<serde_json::Value> {
         let mut items: Vec<serde_json::Value> = Vec::new();
+
+        // A function call is keyed by its provider call id. A tool result
+        // references that same id, so every identity a result may carry (the
+        // item id or the call id) is mapped onto the id the call item uses.
+        let mut call_ids: HashMap<&str, String> = HashMap::new();
+        for msg in messages {
+            if let Some(ref calls) = msg.tool_calls {
+                for tc in calls {
+                    let call_id = tc.call_id.clone().unwrap_or_else(|| tc.id.clone());
+                    call_ids.insert(tc.id.as_str(), call_id.clone());
+                    if let Some(ref provider_call_id) = tc.call_id {
+                        call_ids.insert(provider_call_id.as_str(), call_id.clone());
+                    }
+                }
+            }
+        }
 
         for msg in messages {
             let role = match msg.role {
@@ -116,6 +100,14 @@ impl OpenaiResponseCodec {
                                 } => {
                                     serde_json::json!({"type": "input_text", "text": thinking})
                                 }
+                                llm_suite_types::message::MessageContent::RedactedThinking {
+                                    data,
+                                } => {
+                                    // The Responses API has no redacted-thinking
+                                    // part; the opaque payload is kept as text
+                                    // so the block is not dropped from history.
+                                    serde_json::json!({"type": "input_text", "text": data})
+                                }
                                 // Tool blocks are not valid user content in
                                 // the Responses API; render them as text so
                                 // history is not silently dropped.
@@ -145,7 +137,14 @@ impl OpenaiResponseCodec {
                 // `call_id` (the message's `tool_call_id`). Chat's
                 // `tool_calls`/`tool_call_id` shape is rejected by the API.
                 llm_suite_types::message::MessageRole::Tool => {
-                    if let Some(ref call_id) = msg.tool_call_id {
+                    if let Some(ref tool_call_id) = msg.tool_call_id {
+                        // The output item has to carry the same id the call
+                        // item was keyed by, whichever identity the history
+                        // recorded the result under.
+                        let call_id = call_ids
+                            .get(tool_call_id.as_str())
+                            .cloned()
+                            .unwrap_or_else(|| tool_call_id.clone());
                         let output = match &msg.content {
                             llm_suite_types::message::MessageContentValue::Text(text) => {
                                 text.clone()
@@ -214,17 +213,18 @@ impl OpenaiResponseCodec {
         items
     }
 
+    /// Wire tool declarations. The Responses API declares a function tool
+    /// flat: `name`, `description` and `parameters` sit next to `type`
+    /// instead of being wrapped in a `function` object.
     fn response_tool_defs(tools: &[Tool]) -> Vec<serde_json::Value> {
         tools
             .iter()
             .map(|t| {
                 serde_json::json!({
                     "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.parameters,
-                    }
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
                 })
             })
             .collect()
@@ -309,123 +309,26 @@ impl OpenaiResponseCodec {
             })
             .collect()
     }
-}
 
-impl LlmCodec for OpenaiResponseCodec {
-    fn build_request(
-        &self,
-        request: &LlmRequest,
-        profile: &LlmProfile,
-    ) -> LlmResult<reqwest::Request> {
-        let url = format!(
-            "{}/responses",
-            profile.base_url.as_deref().unwrap_or(&self.base_url)
-        );
-
-        let use_text_mode = super::shared::is_text_mode(request);
-
-        let mut body = serde_json::json!({
-            "model": profile.model,
-            "input": self.convert_messages(&request.messages),
-        });
-
-        if use_text_mode {
-            let history = super::shared::convert_history_for_text_mode(&request.messages, request);
-            body["input"] = serde_json::json!(self.convert_messages(&history));
-            let system = super::shared::text_mode_system_content(request);
-            if !system.is_empty() {
-                let mut input = body["input"].take();
-                if let Some(arr) = input.as_array_mut() {
-                    arr.insert(0, serde_json::json!({"role": "system", "content": system}));
-                }
-                body["input"] = input;
-            }
-        }
-
-        if request.stream == Some(true) {
-            body["stream"] = serde_json::json!(true);
-        }
-
-        let generation = super::shared::resolve_generation(request, profile)?;
-        crate::generation::apply_openai_responses(&mut body, &generation);
-        super::shared::merge_and_apply_params(&mut body, profile, &request.parameters);
-
-        if !use_text_mode {
-            if let Some(tools) = &request.tools {
-                body["tools"] = serde_json::json!(Self::response_tool_defs(tools));
-            }
-        }
-
-        super::shared::apply_custom_body(&mut body, profile);
-
-        let mut req_builder = self
-            .client
-            .request(Method::POST, &url)
-            .header("Content-Type", "application/json")
-            .json(&body);
-
-        req_builder = super::shared::apply_auth_and_headers(req_builder, profile, "bearer");
-
-        req_builder
-            .build()
-            .map_err(crate::error::LlmError::HttpError)
-    }
-
-    fn build_count_tokens_request(
-        &self,
-        request: &LlmRequest,
-        profile: &LlmProfile,
-    ) -> LlmResult<Option<reqwest::Request>> {
-        let url = format!(
-            "{}/responses/input_tokens",
-            profile.base_url.as_deref().unwrap_or(&self.base_url)
-        );
-
-        let body = self.build_count_tokens_body(request, profile)?;
-
-        let mut req_builder = self
-            .client
-            .request(Method::POST, &url)
-            .header("Content-Type", "application/json")
-            .json(&body);
-
-        req_builder = super::shared::apply_auth_and_headers(req_builder, profile, "bearer");
-
-        req_builder
-            .build()
-            .map(Some)
-            .map_err(crate::error::LlmError::HttpError)
-    }
-
-    fn parse_response(&self, body: &str, request: &LlmRequest) -> LlmResult<LlmResponseType> {
-        let mut result = self.parse_response_inner(body)?;
-        if super::shared::is_text_mode(request) {
-            if let Some(content) = result.content.clone() {
-                let calls = super::shared::parse_text_tool_calls(request, &content);
-                if !calls.is_empty() {
-                    result.tool_calls = Some(calls.clone());
-                    result.message.tool_calls = Some(calls);
-                }
-            }
-        }
-        Ok(result)
-    }
-
-    fn parse_stream_chunk(&self, data: &str) -> LlmResult<Option<MessageStreamEvent>> {
+    /// Parse one Responses SSE chunk into zero or more stream events.
+    ///
+    /// The terminal event carries the final usage and closes the turn, so a
+    /// chunk can produce both a usage and a terminal event. The usage event
+    /// comes first: the stream accumulator builds the final message when the
+    /// terminal event arrives.
+    fn parse_stream_events(&self, data: &str) -> LlmResult<Vec<MessageStreamEvent>> {
         if data.is_empty() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
 
         let json: serde_json::Value = serde_json::from_str(data)?;
-
         let event_type = json.get("type").and_then(|v| v.as_str());
+        let mut events = Vec::new();
+
         match event_type {
             Some("response.created") => {
                 // Stream identity; the accumulator records it for the final
-                // message and forwards it once. Reset accumulated snapshots so
-                // a reused codec doesn't carry text from a previous request.
-                *llm_suite_common::lock::lock_ok(self.text_snapshot.lock()) = String::new();
-                *llm_suite_common::lock::lock_ok(self.reasoning_snapshot.lock()) = String::new();
+                // message and forwards it once.
                 let response = json.get("response");
                 let id = response
                     .and_then(|r| r.get("id"))
@@ -436,102 +339,127 @@ impl LlmCodec for OpenaiResponseCodec {
                     .and_then(|v| v.as_str())
                     .map(String::from);
                 if id.is_some() || model.is_some() {
-                    return Ok(Some(MessageStreamEvent::Start(
-                        llm_suite_types::llm::MessageStreamStart { id, model },
-                    )));
+                    events.push(MessageStreamEvent::Start(MessageStreamStart { id, model }));
+                }
+            }
+            Some("response.output_item.added") => {
+                // The function name and the call identity ride on the output
+                // item; the argument events that follow only carry fragments.
+                let item = json.get("item");
+                if item
+                    .and_then(|i| i.get("type"))
+                    .and_then(|v| v.as_str())
+                    == Some("function_call")
+                {
+                    let index = json
+                        .get("output_index")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as usize;
+                    let id = item
+                        .and_then(|i| i.get("id"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    let call_id = item
+                        .and_then(|i| i.get("call_id"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    let name = item
+                        .and_then(|i| i.get("name"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    events.push(MessageStreamEvent::ToolCallDelta(
+                        llm_suite_types::llm::MessageStreamToolCallDelta {
+                            index,
+                            id,
+                            call_id,
+                            name,
+                            arguments: None,
+                            is_snapshot: false,
+                        },
+                    ));
                 }
             }
             Some("response.output_text.delta") => {
                 if let Some(delta) = json.get("delta").and_then(|v| v.as_str()) {
-                    let mut snap = llm_suite_common::lock::lock_ok(self.text_snapshot.lock());
-                    snap.push_str(delta);
-                    return Ok(Some(MessageStreamEvent::Text(
+                    events.push(MessageStreamEvent::Text(
                         llm_suite_types::llm::MessageStreamText {
-                            snapshot: snap.clone(),
+                            snapshot: String::new(),
                             text: delta.to_string(),
                         },
-                    )));
+                    ));
                 }
             }
             Some("response.reasoning_text.delta")
             | Some("response.reasoning_summary_text.delta") => {
                 if let Some(delta) = json.get("delta").and_then(|v| v.as_str()) {
-                    let mut snap = llm_suite_common::lock::lock_ok(self.reasoning_snapshot.lock());
-                    snap.push_str(delta);
-                    return Ok(Some(MessageStreamEvent::ReasoningText(
+                    events.push(MessageStreamEvent::ReasoningText(
                         llm_suite_types::llm::MessageStreamReasoning {
                             reasoning: delta.to_string(),
-                            snapshot: snap.clone(),
+                            snapshot: String::new(),
                             signature: None,
                             signature_snapshot: None,
                         },
-                    )));
+                    ));
                 }
             }
             Some("response.refusal.delta") => {
                 if let Some(delta) = json.get("delta").and_then(|v| v.as_str()) {
-                    let mut snap = llm_suite_common::lock::lock_ok(self.text_snapshot.lock());
-                    snap.push_str(delta);
-                    return Ok(Some(MessageStreamEvent::Text(
-                        llm_suite_types::llm::MessageStreamText {
-                            snapshot: snap.clone(),
-                            text: delta.to_string(),
+                    events.push(MessageStreamEvent::Refusal(
+                        llm_suite_types::llm::MessageStreamRefusal {
+                            refusal: delta.to_string(),
+                            snapshot: String::new(),
                         },
-                    )));
+                    ));
                 }
             }
             Some("response.function_call_arguments.delta") => {
-                // Incremental arguments fragment; grouped by item_id onto a
-                // stable index (mirrors the toolCallsDelta accumulation).
-                let item_id = json
-                    .get("item_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
+                // Incremental arguments fragment. The output index is the
+                // position of the call in the response output array and is
+                // stable for the whole stream, so fragments of one call share
+                // it and parallel calls stay apart.
                 if let Some(delta) = json.get("delta").and_then(|v| v.as_str()) {
-                    let index = self.call_index_for(&item_id);
-                    return Ok(Some(MessageStreamEvent::ToolCallDelta(
+                    let index = json
+                        .get("output_index")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as usize;
+                    events.push(MessageStreamEvent::ToolCallDelta(
                         llm_suite_types::llm::MessageStreamToolCallDelta {
                             index,
                             id: None,
+                            call_id: None,
                             name: None,
                             arguments: Some(delta.to_string()),
                             is_snapshot: false,
                         },
-                    )));
+                    ));
                 }
             }
             Some("response.function_call_arguments.done") => {
-                // Complete snapshot: name + full arguments, replacing the
-                // accumulated fragments on the same index. The official event
-                // name is `function_call_arguments.done` (not
-                // `function_call.done`).
-                let item = json.get("item");
-                let item_id = item
-                    .and_then(|i| i.get("id"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let index = self.call_index_for(&item_id);
-                let name = item
-                    .and_then(|i| i.get("name"))
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-                let arguments = item
-                    .and_then(|i| i.get("arguments"))
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-                return Ok(Some(MessageStreamEvent::ToolCallDelta(
-                    llm_suite_types::llm::MessageStreamToolCallDelta {
-                        index,
-                        id: Some(item_id),
-                        name,
-                        arguments,
-                        is_snapshot: true,
-                    },
-                )));
+                // The event carries the complete argument string and the call
+                // identity at its top level; the name was announced by the
+                // output item event.
+                if let Some(arguments) = json.get("arguments").and_then(|v| v.as_str()) {
+                    let index = json
+                        .get("output_index")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as usize;
+                    let id = json
+                        .get("item_id")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    events.push(MessageStreamEvent::ToolCallDelta(
+                        llm_suite_types::llm::MessageStreamToolCallDelta {
+                            index,
+                            id,
+                            call_id: None,
+                            name: None,
+                            arguments: Some(arguments.to_string()),
+                            is_snapshot: true,
+                        },
+                    ));
+                }
             }
-            Some("response.failed") | Some("response.error") => {
+            Some("response.failed") | Some("error") => {
                 let message = json
                     .get("error")
                     .and_then(|e| match e {
@@ -543,14 +471,14 @@ impl LlmCodec for OpenaiResponseCodec {
                     event = event_type.unwrap_or(""),
                     "Responses stream ended with failure/error event",
                 );
-                return Ok(Some(MessageStreamEvent::Error(
+                events.push(MessageStreamEvent::Error(
                     llm_suite_types::llm::MessageStreamError { error: message },
-                )));
+                ));
             }
             Some("response.completed") | Some("response.incomplete") => {
-                // The completed event carries the final usage summary.
+                // The terminal event carries the final usage summary.
                 if let Some(usage) = json.get("usage") {
-                    return Ok(Some(MessageStreamEvent::Usage(
+                    events.push(MessageStreamEvent::Usage(
                         llm_suite_types::llm::MessageStreamUsage {
                             usage: llm_suite_types::llm::TokenUsageStats {
                                 prompt_tokens: usage
@@ -588,11 +516,11 @@ impl LlmCodec for OpenaiResponseCodec {
                                 total_cost: None,
                             },
                         },
-                    )));
+                    ));
                 }
-                return Ok(Some(MessageStreamEvent::End(
+                events.push(MessageStreamEvent::End(
                     llm_suite_types::llm::MessageStreamEnd {},
-                )));
+                ));
             }
             other => {
                 tracing::debug!(
@@ -602,7 +530,116 @@ impl LlmCodec for OpenaiResponseCodec {
             }
         }
 
-        Ok(None)
+        Ok(events)
+    }
+}
+
+impl LlmCodec for OpenaiResponseCodec {
+    fn build_request(
+        &self,
+        request: &LlmRequest,
+        profile: &LlmProfile,
+    ) -> LlmResult<reqwest::Request> {
+        let url = super::shared::endpoint_url(
+            profile.base_url.as_deref().unwrap_or(&self.base_url),
+            "responses",
+        );
+
+        let use_text_mode = super::shared::is_text_mode(request);
+
+        let mut body = serde_json::json!({
+            "model": profile.model,
+            "input": self.convert_messages(&request.messages),
+        });
+
+        if use_text_mode {
+            let history = super::shared::convert_history_for_text_mode(&request.messages, request);
+            body["input"] = serde_json::json!(self.convert_messages(&history));
+            let system = super::shared::text_mode_system_content(request);
+            if !system.is_empty() {
+                let mut input = body["input"].take();
+                if let Some(arr) = input.as_array_mut() {
+                    arr.insert(0, serde_json::json!({"role": "system", "content": system}));
+                }
+                body["input"] = input;
+            }
+        }
+
+        if request.stream == Some(true) {
+            body["stream"] = serde_json::json!(true);
+        }
+
+        let generation = super::shared::resolve_generation(request, profile)?;
+        crate::generation::apply_openai_responses(&mut body, &generation)?;
+        super::shared::merge_and_apply_params(&mut body, profile, &request.parameters);
+
+        if !use_text_mode {
+            if let Some(tools) = &request.tools {
+                body["tools"] = serde_json::json!(Self::response_tool_defs(tools));
+            }
+        }
+
+        super::shared::apply_custom_body(&mut body, profile);
+
+        let mut req_builder = self
+            .client
+            .request(Method::POST, &url)
+            .header("Content-Type", "application/json")
+            .json(&body);
+
+        req_builder = super::shared::apply_auth_and_headers(req_builder, profile, "bearer");
+
+        req_builder
+            .build()
+            .map_err(crate::error::LlmError::HttpError)
+    }
+
+    fn build_count_tokens_request(
+        &self,
+        request: &LlmRequest,
+        profile: &LlmProfile,
+    ) -> LlmResult<Option<reqwest::Request>> {
+        let url = super::shared::endpoint_url(
+            profile.base_url.as_deref().unwrap_or(&self.base_url),
+            "responses/input_tokens",
+        );
+
+        let body = self.build_count_tokens_body(request, profile)?;
+
+        let mut req_builder = self
+            .client
+            .request(Method::POST, &url)
+            .header("Content-Type", "application/json")
+            .json(&body);
+
+        req_builder = super::shared::apply_auth_and_headers(req_builder, profile, "bearer");
+
+        req_builder
+            .build()
+            .map(Some)
+            .map_err(crate::error::LlmError::HttpError)
+    }
+
+    fn parse_response(&self, body: &str, request: &LlmRequest) -> LlmResult<LlmResponseType> {
+        let mut result = self.parse_response_inner(body)?;
+        if super::shared::is_text_mode(request) {
+            if let Some(content) = result.content.clone() {
+                let calls = super::shared::parse_text_tool_calls(request, &content);
+                if !calls.is_empty() {
+                    result.tool_calls = Some(calls.clone());
+                    result.message.tool_calls = Some(calls);
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    fn parse_stream_chunk(&self, data: &str) -> LlmResult<Option<MessageStreamEvent>> {
+        Ok(self.parse_stream_events(data)?.into_iter().next())
+    }
+
+    fn parse_stream_chunk_events(&self, data: &str) -> LlmResult<Vec<MessageStreamEvent>> {
+        self.parse_stream_events(data)
     }
 
     fn convert_tools(&self, tools: &[Tool]) -> LlmResult<Vec<serde_json::Value>> {
@@ -799,10 +836,121 @@ mod tests {
     use super::*;
 
     #[test]
+    fn function_call_and_output_share_the_provider_call_id() {
+        let codec = OpenaiResponseCodec::new();
+        let mut assistant = llm_suite_types::message::Message {
+            id: llm_suite_types::Id::new(),
+            role: llm_suite_types::message::MessageRole::Assistant,
+            content: llm_suite_types::message::MessageContentValue::Text(String::new()),
+            timestamp: 0,
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: Some(vec![llm_suite_types::message::LlmToolCall {
+                id: "fc_1".to_string(),
+                r#type: "function".to_string(),
+                call_id: Some("call_1".to_string()),
+                function: llm_suite_types::message::LlmFunctionCall {
+                    name: "get_weather".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            }]),
+            thinking: None,
+            thinking_signature: None,
+            metadata: None,
+        };
+        // The result references the call by its item id.
+        let mut result = llm_suite_types::message::Message {
+            id: llm_suite_types::Id::new(),
+            role: llm_suite_types::message::MessageRole::Tool,
+            content: llm_suite_types::message::MessageContentValue::Text("sunny".to_string()),
+            timestamp: 0,
+            tool_call_id: Some("fc_1".to_string()),
+            tool_name: Some("get_weather".to_string()),
+            tool_calls: None,
+            thinking: None,
+            thinking_signature: None,
+            metadata: None,
+        };
+        assistant.timestamp = 0;
+        result.timestamp = 0;
+
+        let items = codec.convert_messages(&[assistant, result]);
+        let call = items
+            .iter()
+            .find(|item| item["type"] == serde_json::json!("function_call"))
+            .expect("function call item present");
+        let output = items
+            .iter()
+            .find(|item| item["type"] == serde_json::json!("function_call_output"))
+            .expect("function call output item present");
+        assert_eq!(call["call_id"], serde_json::json!("call_1"));
+        assert_eq!(
+            output["call_id"], call["call_id"],
+            "the output must reference the same call"
+        );
+    }
+
+    #[test]
+    fn streamed_tool_call_carries_the_provider_call_id() {
+        let codec = OpenaiResponseCodec::new();
+        let added = r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"get_weather","arguments":""}}"#;
+        match codec.parse_stream_chunk(added).expect("chunk must parse") {
+            Some(MessageStreamEvent::ToolCallDelta(d)) => {
+                assert_eq!(d.id.as_deref(), Some("fc_1"));
+                assert_eq!(d.call_id.as_deref(), Some("call_1"));
+                assert_eq!(d.name.as_deref(), Some("get_weather"));
+            }
+            other => panic!("expected ToolCallDelta, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_declaration_is_flat() {        let codec = OpenaiResponseCodec::new();
+        let tools = vec![serde_json::from_value(serde_json::json!({
+            "name": "get_weather",
+            "description": "Get weather",
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }))
+        .unwrap()];
+        let shape = codec.convert_tools(&tools).unwrap();
+        assert_eq!(shape[0]["type"], serde_json::json!("function"));
+        assert_eq!(shape[0]["name"], serde_json::json!("get_weather"));
+        assert_eq!(shape[0]["description"], serde_json::json!("Get weather"));
+        assert!(
+            shape[0].get("function").is_none(),
+            "Responses declares function tools flat"
+        );
+    }
+
+    #[test]
+    fn named_tool_choice_is_flat() {
+        use llm_suite_types::llm::generation::{LlmToolChoice, ToolChoiceMode};
+
+        let mut body = serde_json::json!({"model": "gpt-4o"});
+        crate::generation::apply_openai_responses(
+            &mut body,
+            &llm_suite_types::llm::generation::LlmGenerationParams {
+                tool_choice: Some(LlmToolChoice {
+                    mode: Some(ToolChoiceMode::Required),
+                    tool_name: Some("get_weather".to_string()),
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("tool choice must be accepted");
+        assert_eq!(body["tool_choice"]["type"], serde_json::json!("function"));
+        assert_eq!(body["tool_choice"]["name"], serde_json::json!("get_weather"));
+        assert!(
+            body["tool_choice"].get("function").is_none(),
+            "Responses names a function flat"
+        );
+    }
+
+    #[test]
     fn function_call_arguments_delta_and_done_share_index() {
         let codec = OpenaiResponseCodec::new();
 
-        let delta = r#"{"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"city\":"}"#;
+        let delta = r#"{"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":0,"delta":"{\"city\":"}"#;
         match codec.parse_stream_chunk(delta).expect("chunk must parse") {
             Some(MessageStreamEvent::ToolCallDelta(d)) => {
                 assert_eq!(d.index, 0);
@@ -812,12 +960,11 @@ mod tests {
             other => panic!("expected ToolCallDelta, got {:?}", other),
         }
 
-        let done = r#"{"type":"response.function_call_arguments.done","item":{"type":"function_call","id":"fc_1","name":"get_weather","arguments":"{\"city\":\"Beijing\"}"}}"#;
+        let done = r#"{"type":"response.function_call_arguments.done","item_id":"fc_1","output_index":0,"arguments":"{\"city\":\"Beijing\"}"}"#;
         match codec.parse_stream_chunk(done).expect("chunk must parse") {
             Some(MessageStreamEvent::ToolCallDelta(d)) => {
                 assert_eq!(d.index, 0, "fragments must land on the same call");
                 assert_eq!(d.id.as_deref(), Some("fc_1"));
-                assert_eq!(d.name.as_deref(), Some("get_weather"));
                 assert_eq!(d.arguments.as_deref(), Some(r#"{"city":"Beijing"}"#));
                 assert!(d.is_snapshot);
             }
@@ -826,24 +973,32 @@ mod tests {
     }
 
     #[test]
-    fn stream_chunks_cover_text_completion_and_usage() {
+    fn output_item_added_announces_the_function_name() {
+        let codec = OpenaiResponseCodec::new();
+        let added = r#"{"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"get_weather","arguments":""}}"#;
+        match codec.parse_stream_chunk(added).expect("chunk must parse") {
+            Some(MessageStreamEvent::ToolCallDelta(d)) => {
+                assert_eq!(d.index, 1);
+                assert_eq!(d.id.as_deref(), Some("fc_1"));
+                assert_eq!(d.name.as_deref(), Some("get_weather"));
+                assert_eq!(d.arguments, None);
+                assert!(!d.is_snapshot);
+            }
+            other => panic!("expected ToolCallDelta, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn terminal_event_emits_usage_and_ends_the_turn() {
         let codec = OpenaiResponseCodec::new();
 
-        match codec
-            .parse_stream_chunk(r#"{"type":"response.output_text.delta","delta":"Hello "}"#)
-            .expect("text chunk parses")
-        {
-            Some(MessageStreamEvent::Text(t)) => assert_eq!(t.text, "Hello "),
-            other => panic!("expected Text, got {other:?}"),
-        }
-
-        match codec
-            .parse_stream_chunk(
-                r#"{"type":"response.completed","response":{"status":"completed"},"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15,"output_tokens_details":{"reasoning_tokens":2},"input_tokens_details":{"cached_tokens":3,"cache_write_tokens":4}}}"#,
-            )
-            .expect("completed chunk parses")
-        {
-            Some(MessageStreamEvent::Usage(u)) => {
+        let completed = r#"{"type":"response.completed","response":{"status":"completed"},"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15,"output_tokens_details":{"reasoning_tokens":2},"input_tokens_details":{"cached_tokens":3,"cache_write_tokens":4}}}"#;
+        let events = codec
+            .parse_stream_chunk_events(completed)
+            .expect("completed chunk parses");
+        assert_eq!(events.len(), 2, "usage and terminal event");
+        match &events[0] {
+            MessageStreamEvent::Usage(u) => {
                 assert_eq!(u.usage.prompt_tokens, 10);
                 assert_eq!(u.usage.completion_tokens, 5);
                 assert_eq!(u.usage.total_tokens, 15);
@@ -853,20 +1008,15 @@ mod tests {
             }
             other => panic!("expected Usage, got {other:?}"),
         }
+        assert!(
+            matches!(events[1], MessageStreamEvent::End(_)),
+            "the turn must end even when usage is present"
+        );
 
-        match codec
-            .parse_stream_chunk(r#"{"type":"response.completed"}"#)
-            .expect("completed without usage parses")
-        {
-            Some(MessageStreamEvent::End(_)) => {}
-            other => panic!("expected End, got {other:?}"),
-        }
-
-        assert!(codec.parse_stream_chunk("").unwrap().is_none());
-        assert!(codec
-            .parse_stream_chunk(r#"{"type":"unknown"}"#)
-            .unwrap()
-            .is_none());
+        let without_usage = codec
+            .parse_stream_chunk_events(r#"{"type":"response.completed"}"#)
+            .expect("completed without usage parses");
+        assert!(matches!(without_usage[0], MessageStreamEvent::End(_)));
     }
 
     #[test]
@@ -889,22 +1039,22 @@ mod tests {
     #[test]
     fn multiple_call_deltas_get_distinct_indices() {
         let codec = OpenaiResponseCodec::new();
-        let chunk = |id: &str| {
+        let chunk = |index: usize| {
             format!(
-                r#"{{"type":"response.function_call_arguments.delta","item_id":"{id}","delta":"x"}}"#
+                r#"{{"type":"response.function_call_arguments.delta","item_id":"fc_{index}","output_index":{index},"delta":"x"}}"#
             )
         };
-        let i1 = match codec.parse_stream_chunk(&chunk("fc_a")).unwrap().unwrap() {
+        let i1 = match codec.parse_stream_chunk(&chunk(0)).unwrap().unwrap() {
             MessageStreamEvent::ToolCallDelta(d) => d.index,
             other => panic!("expected ToolCallDelta, got {other:?}"),
         };
-        let i2 = match codec.parse_stream_chunk(&chunk("fc_b")).unwrap().unwrap() {
+        let i2 = match codec.parse_stream_chunk(&chunk(1)).unwrap().unwrap() {
             MessageStreamEvent::ToolCallDelta(d) => d.index,
             other => panic!("expected ToolCallDelta, got {other:?}"),
         };
         assert_ne!(i1, i2);
-        // Repeating the same item_id keeps its index.
-        let again = match codec.parse_stream_chunk(&chunk("fc_a")).unwrap().unwrap() {
+        // The same output index always identifies the same call.
+        let again = match codec.parse_stream_chunk(&chunk(0)).unwrap().unwrap() {
             MessageStreamEvent::ToolCallDelta(d) => d.index,
             other => panic!("expected ToolCallDelta, got {other:?}"),
         };
@@ -1234,10 +1384,8 @@ mod tests {
         let body = codec
             .build_count_tokens_body(&req, &count_profile())
             .unwrap();
-        assert_eq!(
-            body["tools"][0]["function"]["name"],
-            serde_json::json!("get_weather")
-        );
+        assert_eq!(body["tools"][0]["name"], serde_json::json!("get_weather"));
+        assert_eq!(body["tools"][0]["type"], serde_json::json!("function"));
     }
 
     #[test]
@@ -1443,10 +1591,10 @@ mod tests {
     }
 
     #[test]
-    fn stream_text_delta_carries_accumulated_snapshot() {
+    fn stream_text_delta_emits_the_increment() {
         let codec = OpenaiResponseCodec::new();
-        // created resets the snapshot (no identity present -> None, which is fine)
-        let _ = codec.parse_stream_chunk(r#"{"type":"response.created"}"#);
+        // The running snapshot is owned by the stream accumulator, not by the
+        // codec: the codec reports the raw increment only.
         match codec
             .parse_stream_chunk(r#"{"type":"response.output_text.delta","delta":"Hello "}"#)
             .unwrap()
@@ -1454,18 +1602,7 @@ mod tests {
         {
             MessageStreamEvent::Text(t) => {
                 assert_eq!(t.text, "Hello ");
-                assert_eq!(t.snapshot, "Hello ");
-            }
-            other => panic!("expected Text, got {other:?}"),
-        }
-        match codec
-            .parse_stream_chunk(r#"{"type":"response.output_text.delta","delta":"world"}"#)
-            .unwrap()
-            .unwrap()
-        {
-            MessageStreamEvent::Text(t) => {
-                assert_eq!(t.text, "world");
-                assert_eq!(t.snapshot, "Hello world");
+                assert_eq!(t.snapshot, "");
             }
             other => panic!("expected Text, got {other:?}"),
         }
@@ -1481,35 +1618,35 @@ mod tests {
         {
             MessageStreamEvent::ReasoningText(r) => {
                 assert_eq!(r.reasoning, "thinking");
-                assert_eq!(r.snapshot, "thinking");
+                assert_eq!(r.snapshot, "");
             }
             other => panic!("expected ReasoningText, got {other:?}"),
         }
     }
 
     #[test]
-    fn stream_refusal_delta_emits_text() {
+    fn stream_refusal_delta_emits_refusal() {
         let codec = OpenaiResponseCodec::new();
         match codec
             .parse_stream_chunk(r#"{"type":"response.refusal.delta","delta":"I cannot."}"#)
             .unwrap()
             .unwrap()
         {
-            MessageStreamEvent::Text(t) => assert_eq!(t.text, "I cannot."),
-            other => panic!("expected Text, got {other:?}"),
+            MessageStreamEvent::Refusal(r) => assert_eq!(r.refusal, "I cannot."),
+            other => panic!("expected Refusal, got {other:?}"),
         }
     }
 
     #[test]
     fn stream_function_call_arguments_done_emits_snapshot() {
         let codec = OpenaiResponseCodec::new();
-        let delta = r#"{"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"city\":"}"#;
+        let delta = r#"{"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":0,"delta":"{\"city\":"}"#;
         codec.parse_stream_chunk(delta).unwrap();
-        let done = r#"{"type":"response.function_call_arguments.done","item":{"type":"function_call","id":"fc_1","name":"get_weather","arguments":"{\"city\":\"Beijing\"}"}}"#;
+        let done = r#"{"type":"response.function_call_arguments.done","item_id":"fc_1","output_index":0,"arguments":"{\"city\":\"Beijing\"}"}"#;
         match codec.parse_stream_chunk(done).unwrap().unwrap() {
             MessageStreamEvent::ToolCallDelta(d) => {
                 assert!(d.is_snapshot, "done must emit a full snapshot");
-                assert_eq!(d.name.as_deref(), Some("get_weather"));
+                assert_eq!(d.id.as_deref(), Some("fc_1"));
                 assert_eq!(d.arguments.as_deref(), Some(r#"{"city":"Beijing"}"#));
             }
             other => panic!("expected ToolCallDelta, got {other:?}"),

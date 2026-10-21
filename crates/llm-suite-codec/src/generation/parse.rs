@@ -125,10 +125,6 @@ fn parse_tool_choice(value: &serde_json::Value) -> Option<LlmToolChoice> {
                 "none" => ToolChoiceMode::None,
                 _ => return None,
             };
-            let disable_parallel = map
-                .get("disable_parallel_tool_use")
-                .and_then(|v| v.as_bool());
-            let _ = disable_parallel;
             Some(LlmToolChoice {
                 mode: Some(mode),
                 tool_name: None,
@@ -166,15 +162,27 @@ fn parse_response_format(value: &serde_json::Value) -> Option<LlmResponseFormat>
                 "json_object" => ResponseFormatKind::JsonObject,
                 _ => ResponseFormatKind::JsonSchema,
             };
+            // Chat Completions nests the schema definition under
+            // `json_schema`; the Responses API keeps name, schema and strict
+            // next to the type.
+            let definition = map.get("json_schema").and_then(|v| v.as_object());
+            let (name, schema, strict) = match definition {
+                Some(inner) => (
+                    inner.get("name").and_then(|v| v.as_str()).map(String::from),
+                    inner.get("schema").cloned(),
+                    inner.get("strict").and_then(|v| v.as_bool()),
+                ),
+                None => (
+                    map.get("name").and_then(|v| v.as_str()).map(String::from),
+                    map.get("schema").cloned(),
+                    map.get("strict").and_then(|v| v.as_bool()),
+                ),
+            };
             Some(LlmResponseFormat {
                 kind: Some(kind),
-                name: map.get("name").and_then(|v| v.as_str()).map(String::from),
-                schema: map
-                    .get("schema")
-                    .or_else(|| map.get("json_schema"))
-                    .or_else(|| map.get("response_schema"))
-                    .cloned(),
-                strict: map.get("strict").and_then(|v| v.as_bool()),
+                name,
+                schema,
+                strict,
             })
         }
         _ => None,
@@ -190,6 +198,7 @@ fn parse_service_tier(value: &serde_json::Value) -> Option<LlmServiceTier> {
         "scale" => Some(LlmServiceTier::Scale),
         "priority" => Some(LlmServiceTier::Priority),
         "fast" => Some(LlmServiceTier::Fast),
+        "ultrafast" => Some(LlmServiceTier::Ultrafast),
         "standard_only" | "standard-only" | "standardonly" => Some(LlmServiceTier::StandardOnly),
         _ => None,
     }
@@ -272,10 +281,7 @@ pub fn parse_legacy_generation(value: &serde_json::Value) -> LlmGenerationParams
             out.max_tokens = Some(max_tokens);
         }
     }
-    if let Some(v) = get_key(
-        map,
-        &["stop", "stop_sequences", "stopSequences", "stop_sequences"],
-    ) {
+    if let Some(v) = get_key(map, &["stop", "stop_sequences", "stopSequences"]) {
         if let Some(stop) = as_string_list(v) {
             out.stop = Some(stop);
         }
@@ -321,6 +327,10 @@ pub fn parse_legacy_generation(value: &serde_json::Value) -> LlmGenerationParams
     if let Some(v) = get_key(map, &["tool_choice", "toolChoice"]) {
         if let Some(choice) = parse_tool_choice(v) {
             out.tool_choice = Some(choice);
+        }
+        // Anthropic carries the parallel-tool flag inside the tool choice.
+        if let Some(disabled) = v.get("disable_parallel_tool_use").and_then(|x| x.as_bool()) {
+            out.parallel_tool_calls = Some(!disabled);
         }
     }
     if let Some(v) = get_key(map, &["response_format", "responseFormat"]) {

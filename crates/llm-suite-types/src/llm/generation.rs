@@ -175,6 +175,7 @@ pub enum LlmServiceTier {
     Scale,
     Priority,
     Fast,
+    Ultrafast,
     #[serde(alias = "standardOnly")]
     StandardOnly,
 }
@@ -188,6 +189,7 @@ impl LlmServiceTier {
             LlmServiceTier::Scale => "scale",
             LlmServiceTier::Priority => "priority",
             LlmServiceTier::Fast => "fast",
+            LlmServiceTier::Ultrafast => "ultrafast",
             LlmServiceTier::StandardOnly => "standard_only",
         }
     }
@@ -195,26 +197,26 @@ impl LlmServiceTier {
 
 /// Which wire field `max_tokens` is emitted as on the OpenAI Chat API.
 ///
-/// This is an explicit per-profile configuration decision, not a heuristic:
-/// OpenAI reasoning models require `max_completion_tokens` while most other
-/// OpenAI-compatible servers (Ollama, LM Studio, older vLLM, many gateways)
-/// only accept `max_tokens`. The caller decides; the codec never inspects the
-/// model name.
+/// The official API deprecated `max_tokens` in favour of
+/// `max_completion_tokens` and rejects the old field on reasoning models, so
+/// the modern field is the default. Services that only accept the old field
+/// select it explicitly per profile; the codec never inspects the model name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum LlmMaxTokenField {
-    /// Emit `max_tokens` (legacy field, widest OpenAI-compatible support).
+    /// Emit `max_completion_tokens` (the field the official API recommends).
     #[default]
-    MaxTokens,
-    /// Emit `max_completion_tokens` (required by OpenAI reasoning models).
     MaxCompletionTokens,
+    /// Emit `max_tokens` (the legacy field, still required by some
+    /// OpenAI-compatible servers).
+    MaxTokens,
 }
 
 impl LlmMaxTokenField {
     pub fn as_str(&self) -> &'static str {
         match self {
-            LlmMaxTokenField::MaxTokens => "max_tokens",
             LlmMaxTokenField::MaxCompletionTokens => "max_completion_tokens",
+            LlmMaxTokenField::MaxTokens => "max_tokens",
         }
     }
 }

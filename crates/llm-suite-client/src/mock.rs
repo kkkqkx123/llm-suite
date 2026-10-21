@@ -162,12 +162,23 @@ impl LlmResponseSpec {
                 }));
             }
         }
+        if let Some(refusal) = &result.refusal {
+            if !refusal.is_empty() {
+                events.push(MessageStreamEvent::Refusal(
+                    llm_suite_types::llm::MessageStreamRefusal {
+                        refusal: refusal.clone(),
+                        snapshot: refusal.clone(),
+                    },
+                ));
+            }
+        }
         events.push(MessageStreamEvent::FinalMessage(MessageStreamFinal {
             message: result.message.clone(),
             usage: result.usage.clone(),
             stream_stats: None,
             id: result.id.clone(),
             model: Some(result.model.clone()),
+            refusal: result.refusal.clone(),
         }));
         events.push(MessageStreamEvent::End(MessageStreamEnd {}));
         events

@@ -148,6 +148,7 @@ pub struct MessageAccumulator {
     text_snapshot: String,
     reasoning_snapshot: String,
     reasoning_signature_snapshot: String,
+    refusal_snapshot: String,
     stream_id: Option<String>,
     stream_model: Option<String>,
     start_emitted: bool,
@@ -161,6 +162,7 @@ pub struct MessageAccumulator {
 #[derive(Debug, Clone)]
 struct PartialToolCall {
     id: Option<String>,
+    call_id: Option<String>,
     name: Option<String>,
     arguments: String,
     index: usize,
@@ -173,6 +175,7 @@ impl MessageAccumulator {
             text_snapshot: String::new(),
             reasoning_snapshot: String::new(),
             reasoning_signature_snapshot: String::new(),
+            refusal_snapshot: String::new(),
             stream_id: None,
             stream_model: None,
             start_emitted: false,
@@ -249,6 +252,7 @@ impl MessageAccumulator {
                         .entry(index)
                         .or_insert_with(|| PartialToolCall {
                             id: None,
+                            call_id: None,
                             name: None,
                             arguments: String::new(),
                             index,
@@ -277,10 +281,15 @@ impl MessageAccumulator {
                         .entry(delta.index)
                         .or_insert_with(|| PartialToolCall {
                             id: None,
+                            call_id: None,
                             name: None,
                             arguments: String::new(),
                             index: delta.index,
                         });
+
+                if let Some(call_id) = delta.call_id.clone() {
+                    partial.call_id = Some(call_id);
+                }
 
                 if delta.is_snapshot {
                     // Complete snapshot (Gemini functionCall, OpenAI response
@@ -308,6 +317,15 @@ impl MessageAccumulator {
 
                 // Return the delta for consumers that want incremental updates
                 Some(MessageStreamEvent::ToolCallDelta(delta))
+            }
+            MessageStreamEvent::Refusal(refusal_event) => {
+                self.refusal_snapshot.push_str(&refusal_event.refusal);
+                Some(MessageStreamEvent::Refusal(
+                    llm_suite_types::llm::MessageStreamRefusal {
+                        refusal: refusal_event.refusal.clone(),
+                        snapshot: self.refusal_snapshot.clone(),
+                    },
+                ))
             }
             MessageStreamEvent::Usage(usage_event) => {
                 // Field-wise merge: providers deliver usage across several
@@ -401,6 +419,11 @@ impl MessageAccumulator {
                     stream_stats: None, // Filled by the gateway stream wrapper
                     id: self.stream_id.clone(),
                     model: self.stream_model.clone(),
+                    refusal: if self.refusal_snapshot.is_empty() {
+                        None
+                    } else {
+                        Some(self.refusal_snapshot.clone())
+                    },
                 }))
             }
             // Pass through other events unchanged
@@ -424,7 +447,7 @@ impl MessageAccumulator {
                 Some(LlmToolCall {
                     id,
                     r#type: "function".to_string(),
-                    call_id: None,
+                    call_id: partial.call_id.clone(),
                     function: LlmFunctionCall { name, arguments },
                 })
             })
@@ -518,6 +541,7 @@ mod tests {
             MessageStreamToolCallDelta {
                 index: 0,
                 id: Some("call_1".to_string()),
+                call_id: None,
                 name: Some("get_weather".to_string()),
                 arguments: Some(r#"{"city":"Bei"#.to_string()),
                 is_snapshot: false,
@@ -527,6 +551,7 @@ mod tests {
             MessageStreamToolCallDelta {
                 index: 0,
                 id: None,
+                call_id: None,
                 name: None,
                 arguments: Some(r#"jing"}"#.to_string()),
                 is_snapshot: false,
@@ -536,6 +561,7 @@ mod tests {
             MessageStreamToolCallDelta {
                 index: 1,
                 id: Some("call_2".to_string()),
+                call_id: None,
                 name: Some("get_time".to_string()),
                 arguments: Some("{}".to_string()),
                 is_snapshot: false,
@@ -564,6 +590,7 @@ mod tests {
             MessageStreamToolCallDelta {
                 index: 0,
                 id: Some("fc_1".to_string()),
+                call_id: None,
                 name: None,
                 arguments: Some(r#"{"a":"#.to_string()),
                 is_snapshot: false,
@@ -573,6 +600,7 @@ mod tests {
             MessageStreamToolCallDelta {
                 index: 0,
                 id: Some("fc_1".to_string()),
+                call_id: None,
                 name: Some("get_weather".to_string()),
                 arguments: Some(r#"{"city":"Beijing"}"#.to_string()),
                 is_snapshot: true,

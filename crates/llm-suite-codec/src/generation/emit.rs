@@ -5,7 +5,8 @@ use llm_suite_types::llm::generation::{
     ThinkingLevel, ToolChoiceMode,
 };
 
-fn emit_tool_choice_openai(choice: &LlmToolChoice) -> serde_json::Value {
+/// Chat Completions names a function through a nested `function` object.
+fn emit_tool_choice_openai_chat(choice: &LlmToolChoice) -> serde_json::Value {
     if let Some(ref name) = choice.tool_name {
         return serde_json::json!({
             "type": "function",
@@ -20,6 +21,24 @@ fn emit_tool_choice_openai(choice: &LlmToolChoice) -> serde_json::Value {
     }
 }
 
+/// Responses names a function through a flat `name` field next to `type`.
+fn emit_tool_choice_openai_responses(choice: &LlmToolChoice) -> serde_json::Value {
+    if let Some(ref name) = choice.tool_name {
+        return serde_json::json!({
+            "type": "function",
+            "name": name
+        });
+    }
+    match choice.mode {
+        Some(ToolChoiceMode::Auto) => serde_json::json!("auto"),
+        Some(ToolChoiceMode::Any) | Some(ToolChoiceMode::Required) => serde_json::json!("required"),
+        Some(ToolChoiceMode::None) => serde_json::json!("none"),
+        None => serde_json::json!("auto"),
+    }
+}
+
+/// Anthropic accepts `auto`, `any`, `tool` (named) and `none`. The `none`
+/// variant carries no parallel-tool flag.
 fn emit_tool_choice_anthropic(
     choice: &LlmToolChoice,
     parallel_tool_calls: Option<bool>,
@@ -34,14 +53,44 @@ fn emit_tool_choice_anthropic(
     }
     let kind = match choice.mode {
         Some(ToolChoiceMode::Any) | Some(ToolChoiceMode::Required) => "any",
-        Some(ToolChoiceMode::None) => "auto",
+        Some(ToolChoiceMode::None) => "none",
         _ => "auto",
     };
     let mut obj = serde_json::json!({"type": kind});
-    if disable_parallel {
+    if kind != "none" && disable_parallel {
         obj["disable_parallel_tool_use"] = serde_json::json!(true);
     }
     obj
+}
+
+/// Service tiers the OpenAI APIs accept. A tier outside the set is a
+/// configuration mistake and fails fast instead of being sent to the API.
+fn openai_service_tier(tier: LlmServiceTier) -> LlmResult<&'static str> {
+    match tier {
+        LlmServiceTier::Auto => Ok("auto"),
+        LlmServiceTier::Default => Ok("default"),
+        LlmServiceTier::Flex => Ok("flex"),
+        LlmServiceTier::Scale => Ok("scale"),
+        LlmServiceTier::Priority => Ok("priority"),
+        LlmServiceTier::Fast => Ok("fast"),
+        LlmServiceTier::Ultrafast => Ok("ultrafast"),
+        LlmServiceTier::StandardOnly => Err(LlmError::ConfigError(
+            "service tier `standard_only` is an Anthropic tier; OpenAI accepts auto, default, flex, scale, priority and fast"
+                .to_string(),
+        )),
+    }
+}
+
+/// Service tiers the Anthropic Messages API accepts.
+fn anthropic_service_tier(tier: LlmServiceTier) -> LlmResult<&'static str> {
+    match tier {
+        LlmServiceTier::Auto => Ok("auto"),
+        LlmServiceTier::StandardOnly => Ok("standard_only"),
+        other => Err(LlmError::ConfigError(format!(
+            "service tier `{}` is not supported by Anthropic; use auto or standard_only",
+            other.as_str()
+        ))),
+    }
 }
 
 /// Emit the OpenAI Chat generation parameters.
@@ -51,7 +100,7 @@ fn emit_tool_choice_anthropic(
 /// configuration (defaulting to `max_tokens`). The model name is never
 /// inspected: which field a backend accepts is a deployment decision that
 /// belongs to profile configuration.
-pub fn apply_openai_chat(body: &mut serde_json::Value, gen: &LlmGenerationParams) {
+pub fn apply_openai_chat(body: &mut serde_json::Value, gen: &LlmGenerationParams) -> LlmResult<()> {
     if let Some(max_tokens) = gen.max_tokens {
         let key = gen.max_token_field.unwrap_or_default().as_str();
         body[key] = serde_json::json!(max_tokens);
@@ -75,7 +124,7 @@ pub fn apply_openai_chat(body: &mut serde_json::Value, gen: &LlmGenerationParams
         body["presence_penalty"] = serde_json::json!(penalty);
     }
     if let Some(ref tier) = gen.service_tier {
-        body["service_tier"] = serde_json::json!(tier.as_str());
+        body["service_tier"] = serde_json::json!(openai_service_tier(*tier)?);
     }
     if let Some(store) = gen.store {
         body["store"] = serde_json::json!(store);
@@ -92,7 +141,7 @@ pub fn apply_openai_chat(body: &mut serde_json::Value, gen: &LlmGenerationParams
         body["verbosity"] = serde_json::json!(verbosity.as_str());
     }
     if let Some(ref choice) = gen.tool_choice {
-        body["tool_choice"] = emit_tool_choice_openai(choice);
+        body["tool_choice"] = emit_tool_choice_openai_chat(choice);
     }
     if let Some(parallel) = gen.parallel_tool_calls {
         body["parallel_tool_calls"] = serde_json::json!(parallel);
@@ -127,9 +176,13 @@ pub fn apply_openai_chat(body: &mut serde_json::Value, gen: &LlmGenerationParams
     if gen.top_k.is_some() {
         tracing::warn!("top_k is not supported by the OpenAI Chat API and was ignored");
     }
+    Ok(())
 }
 
-pub fn apply_openai_responses(body: &mut serde_json::Value, gen: &LlmGenerationParams) {
+pub fn apply_openai_responses(
+    body: &mut serde_json::Value,
+    gen: &LlmGenerationParams,
+) -> LlmResult<()> {
     if let Some(max_tokens) = gen.max_tokens {
         body["max_output_tokens"] = serde_json::json!(max_tokens);
     }
@@ -143,7 +196,7 @@ pub fn apply_openai_responses(body: &mut serde_json::Value, gen: &LlmGenerationP
         body["seed"] = serde_json::json!(seed);
     }
     if let Some(ref tier) = gen.service_tier {
-        body["service_tier"] = serde_json::json!(tier.as_str());
+        body["service_tier"] = serde_json::json!(openai_service_tier(*tier)?);
     }
     if let Some(store) = gen.store {
         body["store"] = serde_json::json!(store);
@@ -209,7 +262,7 @@ pub fn apply_openai_responses(body: &mut serde_json::Value, gen: &LlmGenerationP
         body["text"] = serde_json::Value::Object(text);
     }
     if let Some(ref choice) = gen.tool_choice {
-        body["tool_choice"] = emit_tool_choice_openai(choice);
+        body["tool_choice"] = emit_tool_choice_openai_responses(choice);
     }
     if let Some(parallel) = gen.parallel_tool_calls {
         body["parallel_tool_calls"] = serde_json::json!(parallel);
@@ -225,49 +278,17 @@ pub fn apply_openai_responses(body: &mut serde_json::Value, gen: &LlmGenerationP
     if gen.frequency_penalty.is_some() || gen.presence_penalty.is_some() {
         tracing::warn!("frequency/presence penalties are not supported by the OpenAI Responses API mapping and were ignored");
     }
+    Ok(())
 }
 
 pub fn apply_anthropic(body: &mut serde_json::Value, gen: &LlmGenerationParams) -> LlmResult<()> {
     let max_tokens = gen.max_tokens.unwrap_or(ANTHROPIC_DEFAULT_MAX_TOKENS);
     body["max_tokens"] = serde_json::json!(max_tokens);
-    // Anthropic only accepts `temperature` / `top_p` within [0, 1]; clamp
-    // instead of letting the API reject the whole request with a 400.
-    if let Some(temperature) = gen.temperature {
-        let clamped = temperature.clamp(0.0, 1.0);
-        if clamped != temperature {
-            tracing::warn!(
-                temperature,
-                "Anthropic temperature must be within [0, 1]; clamped"
-            );
-        }
-        body["temperature"] = serde_json::json!(clamped);
-    }
-    if let Some(top_p) = gen.top_p {
-        let clamped = top_p.clamp(0.0, 1.0);
-        if clamped != top_p {
-            tracing::warn!(top_p, "Anthropic top_p must be within [0, 1]; clamped");
-        }
-        body["top_p"] = serde_json::json!(clamped);
-    }
-    if let Some(top_k) = gen.top_k {
-        body["top_k"] = serde_json::json!(top_k);
-    }
     if let Some(ref stop) = gen.stop {
         body["stop_sequences"] = serde_json::json!(stop);
     }
     if let Some(ref tier) = gen.service_tier {
-        let tier_text = match tier {
-            LlmServiceTier::Auto => "auto",
-            LlmServiceTier::StandardOnly => "standard_only",
-            _ => {
-                tracing::warn!(
-                    tier = tier.as_str(),
-                    "service tier is not supported by Anthropic; mapped to auto"
-                );
-                "auto"
-            }
-        };
-        body["service_tier"] = serde_json::json!(tier_text);
+        body["service_tier"] = serde_json::json!(anthropic_service_tier(*tier)?);
     }
     if let Some(ref user_id) = gen.user_id {
         body["metadata"] = serde_json::json!({"user_id": user_id});
@@ -335,6 +356,11 @@ pub fn apply_anthropic(body: &mut serde_json::Value, gen: &LlmGenerationParams) 
     if gen.seed.is_some() {
         tracing::warn!("seed is not supported by Anthropic and was ignored");
     }
+    if gen.temperature.is_some() || gen.top_p.is_some() || gen.top_k.is_some() {
+        tracing::warn!(
+            "sampling parameters are not supported by the Anthropic Messages API and were ignored"
+        );
+    }
     if gen.frequency_penalty.is_some() || gen.presence_penalty.is_some() {
         tracing::warn!(
             "frequency/presence penalties are not supported by Anthropic and were ignored"
@@ -351,10 +377,13 @@ fn apply_anthropic_thinking(
     thinking: &LlmThinkingConfig,
     max_tokens: u32,
 ) -> LlmResult<()> {
+    // Thinking is switched off explicitly: the official API has a `disabled`
+    // variant, and omitting the field leaves the model default in place.
     if thinking.level == Some(ThinkingLevel::None)
         && thinking.budget_tokens.is_none()
         && !thinking.adaptive.unwrap_or(false)
     {
+        body["thinking"] = serde_json::json!({"type": "disabled"});
         return Ok(());
     }
     if let Some(budget) = thinking.budget_tokens {
@@ -391,6 +420,68 @@ fn apply_anthropic_thinking(
     Ok(())
 }
 
+/// Gemini's `Schema.type` is an uppercase enum; the internal JSON-Schema
+/// model carries lowercase type names. Map the known type names and leave
+/// every other value untouched.
+fn gemini_schema_type(value: &str) -> Option<&'static str> {
+    match value.to_ascii_lowercase().as_str() {
+        "string" => Some("STRING"),
+        "number" => Some("NUMBER"),
+        "integer" => Some("INTEGER"),
+        "boolean" => Some("BOOLEAN"),
+        "array" => Some("ARRAY"),
+        "object" => Some("OBJECT"),
+        "null" => Some("NULL"),
+        _ => None,
+    }
+}
+
+/// Rewrite a JSON Schema value into Gemini's dialect: every `type` field
+/// holding a known type name becomes the uppercase enum member. Nested
+/// schemas (`items`, `properties`, `anyOf`, …) are rewritten recursively.
+pub fn gemini_schema_value(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (key, item) in map {
+                let rewritten = if key == "type" {
+                    match item.as_str().and_then(gemini_schema_type) {
+                        Some(mapped) => serde_json::json!(mapped),
+                        None => gemini_schema_value(item),
+                    }
+                } else {
+                    gemini_schema_value(item)
+                };
+                out.insert(key.clone(), rewritten);
+            }
+            serde_json::Value::Object(out)
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(gemini_schema_value).collect())
+        }
+        other => other.clone(),
+    }
+}
+
+/// Gemini's `thinkingLevel` enum. `None` has no member: thinking is switched
+/// off through the thinking budget instead.
+fn gemini_thinking_level(level: ThinkingLevel) -> LlmResult<&'static str> {
+    match level {
+        ThinkingLevel::Minimal => Ok("MINIMAL"),
+        ThinkingLevel::Low => Ok("LOW"),
+        ThinkingLevel::Medium => Ok("MEDIUM"),
+        ThinkingLevel::High => Ok("HIGH"),
+        ThinkingLevel::Xhigh | ThinkingLevel::Max => Err(LlmError::ConfigError(format!(
+            "Gemini thinkingLevel has no `{}` member; supported levels are minimal, low, medium and high",
+            level.as_str()
+        ))),
+        ThinkingLevel::None => Err(LlmError::ConfigError(
+            "Gemini thinkingLevel has no `none` member; switch thinking off through the thinking budget"
+                .to_string(),
+        )),
+    }
+}
+
 pub fn apply_gemini_generation_config(
     generation_config: &mut serde_json::Value,
     gen: &LlmGenerationParams,
@@ -420,13 +511,12 @@ pub fn apply_gemini_generation_config(
         let mut thinking_config = serde_json::Map::new();
         if let Some(level) = thinking.level {
             if level == ThinkingLevel::None {
-                tracing::warn!(
-                    "Gemini 3 Pro and Flash cannot fully disable thinking; level none was ignored"
-                );
+                // Gemini switches thinking off through the budget.
+                thinking_config.insert("thinkingBudget".to_string(), serde_json::json!(0));
             } else {
                 thinking_config.insert(
                     "thinkingLevel".to_string(),
-                    serde_json::json!(level.as_str()),
+                    serde_json::json!(gemini_thinking_level(level)?),
                 );
             }
         }
@@ -450,31 +540,40 @@ pub fn apply_gemini_generation_config(
             Some(ResponseFormatKind::JsonObject) => {
                 generation_config["responseMimeType"] = serde_json::json!("application/json");
                 if let Some(ref schema) = format.schema {
-                    generation_config["responseSchema"] = schema.clone();
+                    generation_config["responseSchema"] = gemini_schema_value(schema);
                 }
             }
             Some(ResponseFormatKind::JsonSchema) => {
                 generation_config["responseMimeType"] = serde_json::json!("application/json");
                 if let Some(ref schema) = format.schema {
-                    generation_config["responseSchema"] = schema.clone();
+                    generation_config["responseSchema"] = gemini_schema_value(schema);
                 }
             }
             _ => {}
         }
     }
     if let Some(ref choice) = gen.tool_choice {
-        let mode = if choice.tool_name.is_some() {
-            "ANY"
+        let mut function_calling_config = serde_json::Map::new();
+        if let Some(ref name) = choice.tool_name {
+            // A named function restricts the model to that function; the
+            // mode alone would still allow any tool.
+            function_calling_config.insert("mode".to_string(), serde_json::json!("ANY"));
+            function_calling_config.insert(
+                "allowedFunctionNames".to_string(),
+                serde_json::json!([name]),
+            );
         } else {
-            match choice.mode {
+            let mode = match choice.mode {
                 Some(ToolChoiceMode::Auto) => "AUTO",
                 Some(ToolChoiceMode::Any) | Some(ToolChoiceMode::Required) => "ANY",
                 Some(ToolChoiceMode::None) => "NONE",
                 None => "AUTO",
-            }
-        };
-        generation_config["toolConfig"] =
-            serde_json::json!({"functionCallingConfig": {"mode": mode}});
+            };
+            function_calling_config.insert("mode".to_string(), serde_json::json!(mode));
+        }
+        generation_config["toolConfig"] = serde_json::json!({
+            "functionCallingConfig": serde_json::Value::Object(function_calling_config),
+        });
     }
     if gen.verbosity.is_some() {
         tracing::warn!(

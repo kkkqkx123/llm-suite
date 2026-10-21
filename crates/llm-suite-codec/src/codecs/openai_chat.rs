@@ -63,7 +63,7 @@ impl OpenaiChatCodec {
         });
 
         let generation = shared::resolve_generation(request, profile)?;
-        crate::generation::apply_openai_chat(&mut body, &generation);
+        crate::generation::apply_openai_chat(&mut body, &generation)?;
         shared::merge_and_apply_params(&mut body, profile, &request.parameters);
 
         if !use_text_mode {
@@ -76,12 +76,14 @@ impl OpenaiChatCodec {
 
         if request.stream == Some(true) {
             body["stream"] = serde_json::json!(true);
-            let include_usage = profile
-                .stream_options
-                .as_ref()
-                .and_then(|s| s.include_usage)
-                .unwrap_or(true);
-            body["stream_options"] = serde_json::json!({"include_usage": include_usage});
+            // The usage block of a stream is opt-in: sending `stream_options`
+            // to a server that does not know the field makes it reject the
+            // whole request.
+            if let Some(options) = &profile.stream_options {
+                if let Some(include_usage) = options.include_usage {
+                    body["stream_options"] = serde_json::json!({"include_usage": include_usage});
+                }
+            }
         }
 
         shared::apply_custom_body(&mut body, profile);
@@ -99,18 +101,11 @@ impl LlmCodec for OpenaiChatCodec {
         // The profile may carry a full endpoint URL (custom path or query
         // string such as Azure `.../chat/completions?api-version=...`); in
         // that case it is used as-is, otherwise the built-in path applies.
-        // `trim_end_matches('/')` avoids a double slash when the configured
-        // base URL already ends with a slash.
         let profile_url = profile
             .base_url
             .as_deref()
-            .unwrap_or(&self.base_url)
-            .trim_end_matches('/');
-        let url = if profile_url.ends_with("/chat/completions") {
-            profile_url.to_string()
-        } else {
-            format!("{profile_url}/chat/completions")
-        };
+            .unwrap_or(&self.base_url);
+        let url = shared::endpoint_url(profile_url, "chat/completions");
 
         let body = self.build_body(request, profile)?;
 
@@ -177,7 +172,9 @@ impl LlmCodec for OpenaiChatCodec {
 mod tests {
     use super::*;
     use llm_suite_types::llm::{LlmStreamOptions, ToolCallProtocol};
-    use llm_suite_types::message::{Message, MessageContentValue, MessageRole};
+    use llm_suite_types::message::{
+        Message, MessageContent, MessageContentValue, MessageRole,
+    };
 
     fn text_msg(role: MessageRole, text: &str) -> Message {
         Message {
@@ -255,6 +252,29 @@ mod tests {
             prompt_caching: None,
             cached_content: None,
         }
+    }
+
+    #[test]
+    fn stream_options_are_only_sent_when_the_profile_asks_for_them() {
+        let codec = OpenaiChatCodec::new();
+        let mut req = request_with_format(ToolCallProtocol::Native);
+        req.stream = Some(true);
+
+        let body = codec.build_body(&req, &profile()).unwrap();
+        assert!(
+            body.get("stream_options").is_none(),
+            "the usage block must be opt-in"
+        );
+
+        let mut p = profile();
+        p.stream_options = Some(LlmStreamOptions {
+            include_usage: Some(false),
+        });
+        let body = codec.build_body(&req, &p).unwrap();
+        assert_eq!(
+            body["stream_options"]["include_usage"],
+            serde_json::json!(false)
+        );
     }
 
     #[test]
@@ -403,6 +423,91 @@ mod tests {
         assert!(
             format!("{err}").contains("tool_call_id"),
             "error must mention tool_call_id: {err}"
+        );
+    }
+
+    fn rich_tool_msg() -> Message {
+        Message {
+            id: llm_suite_types::Id::new(),
+            role: MessageRole::Assistant,
+            content: MessageContentValue::Rich(vec![
+                MessageContent::ToolUse {
+                    tool_use: llm_suite_types::message::ToolUseContent {
+                        id: "call_1".to_string(),
+                        name: "get_weather".to_string(),
+                        input: serde_json::json!({"city": "Beijing"}),
+                    },
+                },
+                MessageContent::ToolResult {
+                    tool_result: llm_suite_types::message::ToolResultContent {
+                        tool_use_id: "call_1".to_string(),
+                        content: "sunny".to_string(),
+                        is_error: Some(true),
+                    },
+                },
+            ]),
+            timestamp: 0,
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+            thinking: None,
+            thinking_signature: None,
+            metadata: None,
+        }
+    }
+
+    #[test]
+    fn rich_tool_block_becomes_a_tool_call_with_json_arguments() {
+        let codec = OpenaiChatCodec::new();
+        let mut req = request_with_format(ToolCallProtocol::Native);
+        req.messages.push(rich_tool_msg());
+        let body = codec.build_body(&req, &profile()).unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        let assistant = messages
+            .iter()
+            .find(|m| m["role"] == serde_json::json!("assistant"))
+            .expect("assistant message present");
+        assert_eq!(assistant["tool_calls"][0]["function"]["name"], "get_weather");
+        assert_eq!(
+            assistant["tool_calls"][0]["function"]["arguments"],
+            serde_json::json!(r#"{"city":"Beijing"}"#),
+            "arguments must be a JSON string"
+        );
+    }
+
+    #[test]
+    fn tool_result_block_becomes_a_tool_message_without_error_flag() {
+        let codec = OpenaiChatCodec::new();
+        let mut req = request_with_format(ToolCallProtocol::Native);
+        req.messages.push(rich_tool_msg());
+        let body = codec.build_body(&req, &profile()).unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        let tool_msg = messages
+            .iter()
+            .find(|m| m["role"] == serde_json::json!("tool"))
+            .expect("tool message present");
+        assert_eq!(tool_msg["tool_call_id"], "call_1");
+        assert_eq!(tool_msg["content"], "sunny");
+        assert!(
+            tool_msg.get("is_error").is_none(),
+            "Chat Completions tool messages carry no error flag"
+        );
+    }
+
+    #[test]
+    fn full_endpoint_with_query_string_is_used_as_is() {
+        let codec = OpenaiChatCodec::new();
+        let mut p = profile();
+        p.base_url = Some(
+            "https://example.openai.azure.com/openai/deployments/gpt4/chat/completions?api-version=2024-01"
+                .to_string(),
+        );
+        let req = codec
+            .build_request(&request_with_format(ToolCallProtocol::Native), &p)
+            .expect("request must build");
+        assert_eq!(
+            req.url().as_str(),
+            "https://example.openai.azure.com/openai/deployments/gpt4/chat/completions?api-version=2024-01"
         );
     }
 }

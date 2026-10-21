@@ -139,6 +139,7 @@ async fn stream_events_are_replayed_in_order() {
             stream_stats: None,
             id: None,
             model: None,
+            refusal: None,
         }),
         MessageStreamEvent::End(MessageStreamEnd {}),
     ]);
@@ -178,6 +179,7 @@ async fn generate_on_stream_script_synthesizes_final_result() {
             stream_stats: None,
             id: None,
             model: None,
+            refusal: None,
         }),
         MessageStreamEvent::End(MessageStreamEnd {}),
     ]);
@@ -401,6 +403,7 @@ async fn synthesize_preserves_tool_calls_from_final_message() {
             stream_stats: None,
             id: None,
             model: None,
+            refusal: None,
         }),
         MessageStreamEvent::End(MessageStreamEnd {}),
     ]);

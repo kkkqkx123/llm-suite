@@ -70,6 +70,11 @@ pub enum MessageContent {
         #[serde(skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
     },
+    /// Thinking block the provider redacted. The payload is opaque and must
+    /// be sent back verbatim in later turns.
+    RedactedThinking {
+        data: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

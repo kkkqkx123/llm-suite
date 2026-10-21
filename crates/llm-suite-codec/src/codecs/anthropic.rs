@@ -121,23 +121,37 @@ impl AnthropicCodec {
         request: &LlmRequest,
         profile: &LlmProfile,
     ) -> LlmResult<serde_json::Value> {
-        let messages = self.convert_messages(&request.messages)?;
+        let use_text_mode = super::shared::is_text_mode(request);
+        let history = if use_text_mode {
+            super::shared::convert_history_for_text_mode(&request.messages, request)
+        } else {
+            request.messages.clone()
+        };
+        let messages = self.convert_messages(&history)?;
 
         let mut body = serde_json::json!({
             "model": profile.model,
             "messages": messages,
         });
 
-        let (system_content, _) =
-            llm_suite_tool_call::tool::protocol::extract_system_message(&request.messages);
-        if let Some(system) = system_content {
+        if use_text_mode {
+            let system = super::shared::text_mode_system_content(request);
             if !system.is_empty() {
                 body["system"] = serde_json::json!(system);
             }
+        } else {
+            let (system, _) =
+                llm_suite_tool_call::tool::protocol::extract_system_message(&request.messages);
+            if let Some(system) = system {
+                if !system.is_empty() {
+                    body["system"] = serde_json::json!(system);
+                }
+            }
         }
-
-        if let Some(tools) = &request.tools {
-            body["tools"] = serde_json::json!(Self::build_tool_defs(tools));
+        if !use_text_mode {
+            if let Some(tools) = &request.tools {
+                body["tools"] = serde_json::json!(Self::build_tool_defs(tools));
+            }
         }
 
         Ok(body)
@@ -145,8 +159,8 @@ impl AnthropicCodec {
 
     /// Apply prompt-caching breakpoints (official `CacheControlEphemeralParam`
     /// shape: `{"type": "ephemeral", "ttl": "5m" | "1h"}`) on the last tool
-    /// declaration, the system block and the last message content block —
-    /// at most 3 of the 4 API-allowed breakpoints.
+    /// declaration, the system block, the first message and the last message
+    /// — the four breakpoints the API allows.
     fn apply_prompt_caching(body: &mut serde_json::Value, caching: &LlmPromptCaching) {
         let mut control = serde_json::json!({"type": "ephemeral"});
         if let Some(ttl) = &caching.ttl {
@@ -170,18 +184,25 @@ impl AnthropicCodec {
             }]);
         }
 
-        // Last content block of the last message.
-        if let Some(last_msg) = body
-            .get_mut("messages")
-            .and_then(|v| v.as_array_mut())
-            .and_then(|m| m.last_mut())
-        {
-            if let Some(last_block) = last_msg
-                .get_mut("content")
+        // First and last message: the stable prefix and the current turn.
+        let message_count = body
+            .get("messages")
+            .and_then(|v| v.as_array())
+            .map(|messages| messages.len())
+            .unwrap_or(0);
+        for index in [0, message_count.saturating_sub(1)] {
+            if message_count == 0 {
+                break;
+            }
+            if let Some(last_block) = body
+                .get_mut("messages")
+                .and_then(|v| v.as_array_mut())
+                .and_then(|m| m.get_mut(index))
+                .and_then(|m| m.get_mut("content"))
                 .and_then(|v| v.as_array_mut())
                 .and_then(|b| b.last_mut())
             {
-                last_block["cache_control"] = control;
+                last_block["cache_control"] = control.clone();
             }
         }
     }
@@ -259,7 +280,10 @@ impl AnthropicCodec {
                     if parts.iter().any(|b| matches!(b, MessageContent::ToolResult { .. }))
             );
 
-            let mut replayed_thinking = false;
+            // A message that carries thinking blocks keeps them, each with its
+            // own signature; the flat summary fields are only a fallback for
+            // messages that have none.
+            let mut saw_thinking_block = false;
             match &msg.content {
                 MessageContentValue::Text(text) => {
                     // On a tool-result message the text IS the tool output; it
@@ -299,6 +323,7 @@ impl AnthropicCodec {
                                 thinking,
                                 signature,
                             } => {
+                                saw_thinking_block = true;
                                 // Only thinking blocks with a verifiable
                                 // signature may be replayed; unsigned ones are
                                 // rejected by the API and must not be faked.
@@ -309,9 +334,16 @@ impl AnthropicCodec {
                                             "thinking": thinking,
                                             "signature": signature,
                                         }));
-                                        replayed_thinking = true;
                                     }
                                 }
+                            }
+                            MessageContent::RedactedThinking { data } => {
+                                // The redacted payload is opaque and must be
+                                // sent back verbatim.
+                                blocks.push(serde_json::json!({
+                                    "type": "redacted_thinking",
+                                    "data": data,
+                                }));
                             }
                         }
                     }
@@ -322,8 +354,9 @@ impl AnthropicCodec {
             // signature (retained from a previous reply) is re-emitted as a
             // signed thinking block so multi-turn extended thinking keeps
             // working. Unsigned thinking is never synthesized: the API
-            // rejects it.
-            if role == "assistant" && !replayed_thinking {
+            // rejects it. Messages that already carry thinking blocks keep
+            // their own blocks, each with its own signature.
+            if role == "assistant" && !saw_thinking_block {
                 if let Some(thinking) = msg.thinking.as_deref() {
                     if !thinking.is_empty() {
                         if let Some(signature) = msg.thinking_signature.as_deref() {
@@ -543,6 +576,7 @@ impl AnthropicCodec {
                             MessageStreamToolCallDelta {
                                 index,
                                 id,
+                                call_id: None,
                                 name,
                                 arguments: None,
                                 is_snapshot: false,
@@ -597,6 +631,7 @@ impl AnthropicCodec {
                                     MessageStreamToolCallDelta {
                                         index,
                                         id: None,
+                                        call_id: None,
                                         name: None,
                                         arguments: Some(partial.to_string()),
                                         is_snapshot: false,
@@ -704,9 +739,9 @@ impl LlmCodec for AnthropicCodec {
         request: &LlmRequest,
         profile: &LlmProfile,
     ) -> LlmResult<reqwest::Request> {
-        let url = format!(
-            "{}/messages",
-            profile.base_url.as_deref().unwrap_or(&self.base_url)
+        let url = super::shared::endpoint_url(
+            profile.base_url.as_deref().unwrap_or(&self.base_url),
+            "messages",
         );
 
         let body = self.build_body(request, profile)?;
@@ -730,9 +765,9 @@ impl LlmCodec for AnthropicCodec {
         request: &LlmRequest,
         profile: &LlmProfile,
     ) -> LlmResult<Option<reqwest::Request>> {
-        let url = format!(
-            "{}/messages/count_tokens",
-            profile.base_url.as_deref().unwrap_or(&self.base_url)
+        let url = super::shared::endpoint_url(
+            profile.base_url.as_deref().unwrap_or(&self.base_url),
+            "messages/count_tokens",
         );
 
         let body = self.build_count_tokens_body(request, profile)?;
@@ -828,6 +863,9 @@ impl AnthropicCodec {
         let mut thinking_content = String::new();
         let mut thinking_signature: Option<String> = None;
         let mut tool_calls = Vec::new();
+        // Content blocks are kept per block so every thinking block keeps its
+        // own signature when the message is replayed in a later turn.
+        let mut content_blocks: Vec<MessageContent> = Vec::new();
 
         if let Some(blocks) = content_arr {
             for block in blocks {
@@ -836,6 +874,9 @@ impl AnthropicCodec {
                     Some("text") => {
                         if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
                             text_content.push_str(text);
+                            content_blocks.push(MessageContent::Text {
+                                text: text.to_string(),
+                            });
                         }
                     }
                     Some("thinking") => {
@@ -845,14 +886,30 @@ impl AnthropicCodec {
                         // can be replayed in later turns.
                         if let Some(text) = block.get("thinking").and_then(|v| v.as_str()) {
                             thinking_content.push_str(text);
-                        }
-                        if thinking_signature.is_none() {
-                            if let Some(signature) = block.get("signature").and_then(|v| v.as_str())
-                            {
-                                if !signature.is_empty() {
-                                    thinking_signature = Some(signature.to_string());
+                            let signature = block
+                                .get("signature")
+                                .and_then(|v| v.as_str())
+                                .map(String::from);
+                            if thinking_signature.is_none() {
+                                if let Some(signature) = signature.as_ref() {
+                                    if !signature.is_empty() {
+                                        thinking_signature = Some(signature.clone());
+                                    }
                                 }
                             }
+                            content_blocks.push(MessageContent::Thinking {
+                                thinking: text.to_string(),
+                                signature,
+                            });
+                        }
+                    }
+                    Some("redacted_thinking") => {
+                        // The provider redacted the reasoning; the payload is
+                        // opaque and has to be sent back verbatim.
+                        if let Some(data) = block.get("data").and_then(|v| v.as_str()) {
+                            content_blocks.push(MessageContent::RedactedThinking {
+                                data: data.to_string(),
+                            });
                         }
                     }
                     Some("tool_use") => {
@@ -911,7 +968,17 @@ impl AnthropicCodec {
         let message = llm_suite_types::message::Message {
             id: llm_suite_types::Id::new(),
             role: llm_suite_types::message::MessageRole::Assistant,
-            content: llm_suite_types::message::MessageContentValue::Text(text_content.clone()),
+            // Thinking blocks carry a per-block signature and have to survive
+            // into the next turn, so the message keeps the block structure
+            // whenever the reply contains one.
+            content: if content_blocks
+                .iter()
+                .any(|block| !matches!(block, MessageContent::Text { .. }))
+            {
+                MessageContentValue::Rich(content_blocks)
+            } else {
+                MessageContentValue::Text(text_content.clone())
+            },
             timestamp: llm_suite_common::time::now(),
             tool_call_id: None,
             tool_name: None,
@@ -1150,17 +1217,43 @@ mod tests {
         );
         let body = codec.build_body(&req, &profile()).expect("must build");
 
-        assert_eq!(body["temperature"], serde_json::json!(0.2));
         assert_eq!(body["thinking"]["budget_tokens"], serde_json::json!(1024));
         assert_eq!(body["tool_choice"]["type"], serde_json::json!("auto"));
         assert_eq!(body["stop_sequences"], serde_json::json!(["END"]));
         assert!(body.get("stop").is_none(), "stop must be mapped");
         assert!(body.get("stream").is_none(), "stream controlled by caller");
+        assert!(
+            body.get("temperature").is_none(),
+            "the Anthropic Messages API has no temperature parameter"
+        );
     }
 
     #[test]
-    fn count_tokens_includes_system() {
-        let codec = AnthropicCodec::new();
+    fn tool_choice_none_uses_the_official_shape() {
+        use llm_suite_types::llm::generation::{LlmToolChoice, ToolChoiceMode};
+
+        let mut body = serde_json::json!({"model": "claude"});
+        crate::generation::apply_anthropic(
+            &mut body,
+            &llm_suite_types::llm::generation::LlmGenerationParams {
+                tool_choice: Some(LlmToolChoice {
+                    mode: Some(ToolChoiceMode::None),
+                    tool_name: None,
+                }),
+                parallel_tool_calls: Some(false),
+                ..Default::default()
+            },
+        )
+        .expect("tool choice must be accepted");
+        assert_eq!(body["tool_choice"]["type"], serde_json::json!("none"));
+        assert!(
+            body["tool_choice"].get("disable_parallel_tool_use").is_none(),
+            "the none variant carries no parallel-tool flag"
+        );
+    }
+
+    #[test]
+    fn count_tokens_includes_system() {        let codec = AnthropicCodec::new();
         let req = request(
             vec![msg(
                 llm_suite_types::message::MessageRole::System,
@@ -1609,20 +1702,70 @@ mod tests {
             .find(|b| b["type"] == "thinking")
             .expect("signed thinking must be replayed");
         assert_eq!(thinking["signature"], "sig-abc");
+        assert_eq!(thinking["thinking"], "Let me verify");
 
+        // A thinking block without a signature is never replayed.
         let mut unsigned = out.message.clone();
-        unsigned.thinking_signature = None;
+        unsigned.content = llm_suite_types::message::MessageContentValue::Rich(vec![
+            llm_suite_types::message::MessageContent::Thinking {
+                thinking: "Let me verify".to_string(),
+                signature: None,
+            },
+        ]);
         let wire = codec
             .convert_messages(std::slice::from_ref(&unsigned))
             .expect("must convert");
-        assert!(
-            !wire[0]["content"]
+        let replayed_thinking = wire.iter().any(|message| {
+            message["content"]
                 .as_array()
-                .unwrap()
-                .iter()
-                .any(|b| b["type"] == "thinking"),
+                .map(|blocks| {
+                    blocks
+                        .iter()
+                        .any(|block| block["type"] == "thinking")
+                })
+                .unwrap_or(false)
+        });
+        assert!(
+            !replayed_thinking,
             "unsigned thinking must not be replayed"
         );
+    }
+
+    #[test]
+    fn every_thinking_block_keeps_its_own_signature() {
+        let codec = AnthropicCodec::new();
+        let body = r#"{"id":"msg_3","model":"claude-sonnet","stop_reason":"end_turn","content":[{"type":"thinking","thinking":"first","signature":"sig-1"},{"type":"thinking","thinking":"second","signature":"sig-2"},{"type":"text","text":"done"}]}"#;
+        let request = request(vec![msg(MessageRole::User, "hi")], None);
+        let out = codec.parse_response(body, &request).expect("must parse");
+
+        let wire = codec
+            .convert_messages(std::slice::from_ref(&out.message))
+            .expect("must convert");
+        let blocks = wire[0]["content"].as_array().unwrap();
+        let signatures: Vec<&str> = blocks
+            .iter()
+            .filter(|b| b["type"] == "thinking")
+            .map(|b| b["signature"].as_str().unwrap())
+            .collect();
+        assert_eq!(signatures, vec!["sig-1", "sig-2"]);
+    }
+
+    #[test]
+    fn redacted_thinking_is_kept_and_replayed() {
+        let codec = AnthropicCodec::new();
+        let body = r#"{"id":"msg_4","model":"claude-sonnet","stop_reason":"end_turn","content":[{"type":"redacted_thinking","data":"c2VjcmV0"}]}"#;
+        let request = request(vec![msg(MessageRole::User, "hi")], None);
+        let out = codec.parse_response(body, &request).expect("must parse");
+
+        let wire = codec
+            .convert_messages(std::slice::from_ref(&out.message))
+            .expect("must convert");
+        let blocks = wire[0]["content"].as_array().unwrap();
+        let redacted = blocks
+            .iter()
+            .find(|b| b["type"] == "redacted_thinking")
+            .expect("redacted thinking must be replayed");
+        assert_eq!(redacted["data"], "c2VjcmV0");
     }
 
     #[test]
@@ -1767,12 +1910,14 @@ mod tests {
             }])
         );
 
-        // Only the last content block of the last message is marked.
+        // The first and the last message are marked: the stable prefix and
+        // the current turn. The API allows four breakpoints.
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 3);
         let last_blocks = messages.last().unwrap()["content"].as_array().unwrap();
         assert_eq!(last_blocks.last().unwrap()["cache_control"], control);
-        assert_eq!(messages[0]["content"][0].get("cache_control"), None);
+        let first_blocks = messages[0]["content"].as_array().unwrap();
+        assert_eq!(first_blocks.last().unwrap()["cache_control"], control);
         assert_eq!(messages[1]["content"][0].get("cache_control"), None);
     }
 

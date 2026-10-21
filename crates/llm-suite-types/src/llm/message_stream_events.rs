@@ -14,6 +14,7 @@ pub enum MessageStreamEventType {
     Abort,
     End,
     ReasoningText,
+    Refusal,
     Usage,
     ToolCallDelta,
 }
@@ -32,6 +33,7 @@ pub enum MessageStreamEvent {
     Abort(MessageStreamAbort),
     End(MessageStreamEnd),
     ReasoningText(MessageStreamReasoning),
+    Refusal(MessageStreamRefusal),
     Usage(MessageStreamUsage),
     ToolCallDelta(MessageStreamToolCallDelta),
 }
@@ -99,6 +101,9 @@ pub struct MessageStreamFinal {
     /// Provider model observed mid-stream (`None` when never sent).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Refusal text the provider produced instead of an answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -130,6 +135,17 @@ pub struct MessageStreamReasoning {
     pub signature_snapshot: Option<String>,
 }
 
+/// Refusal increment with the accumulated snapshot.
+///
+/// A refusal is the provider declining to answer. It travels on its own
+/// channel so it never mixes into the answer text.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MessageStreamRefusal {
+    pub refusal: String,
+    #[serde(default)]
+    pub snapshot: String,
+}
+
 /// Token usage reported mid-stream (e.g. OpenAI's `include_usage` chunk or
 /// Anthropic's `message_delta` usage).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -151,6 +167,11 @@ pub struct MessageStreamToolCallDelta {
     pub index: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    /// Provider-native call correlation id. The Responses API uses it to
+    /// pair a function call with its output in a follow-up turn; formats
+    /// without such an id leave it unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

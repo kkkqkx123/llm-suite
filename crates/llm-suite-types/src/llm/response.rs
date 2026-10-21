@@ -38,7 +38,8 @@ pub struct LlmResult {
     pub reasoning_tokens: Option<u32>,
     /// Model refusal text when the provider declines to answer. Distinct from
     /// `content` so callers can tell an empty answer apart from a refusal.
-    /// Populated from Responses API `refusal` output items (non-streaming).
+    /// Populated from the Chat Completions `message.refusal` field and from
+    /// Responses API `refusal` output items (non-streaming).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refusal: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

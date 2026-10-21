@@ -40,14 +40,68 @@ pub fn convert_to_text_mode(
                 convert_assistant_message(msg, format, markers)
             } else if msg.role == MessageRole::Tool && msg.tool_call_id.is_some() {
                 convert_tool_result_message(msg, format, markers)
-            } else if matches!(msg.content, MessageContentValue::Rich(ref blocks)
-                if blocks.iter().any(|b| matches!(b, llm_suite_types::message::MessageContent::ImageUrl { .. }))) {
-                convert_image_message(msg)
+            } else if let MessageContentValue::Rich(blocks) = &msg.content {
+                if blocks
+                    .iter()
+                    .any(|block| matches!(block, llm_suite_types::message::MessageContent::ToolUse { .. }))
+                {
+                    convert_tool_use_message(msg, format, markers)
+                } else if blocks.iter().any(|block| matches!(
+                    block,
+                    llm_suite_types::message::MessageContent::ImageUrl { .. }
+                )) {
+                    convert_image_message(msg)
+                } else {
+                    msg.clone()
+                }
             } else {
                 msg.clone()
             }
         })
         .collect()
+}
+
+/// Convert a message whose rich content carries tool use blocks into a
+/// text-only message: the calls are rendered in the text protocol and the
+/// blocks are dropped.
+fn convert_tool_use_message(
+    message: &Message,
+    format: &ToolCallProtocol,
+    markers: Option<&ToolCallMarkers>,
+) -> Message {
+    let mut converted = message.clone();
+    let calls: Vec<LlmToolCall> = match &message.content {
+        MessageContentValue::Rich(blocks) => blocks
+            .iter()
+            .filter_map(|block| match block {
+                llm_suite_types::message::MessageContent::ToolUse { tool_use } => {
+                    Some(LlmToolCall {
+                        id: tool_use.id.clone(),
+                        r#type: "function".to_string(),
+                        call_id: None,
+                        function: llm_suite_types::message::LlmFunctionCall {
+                            name: tool_use.name.clone(),
+                            arguments: tool_use.input.to_string(),
+                        },
+                    })
+                }
+                _ => None,
+            })
+            .collect(),
+        MessageContentValue::Text(_) => Vec::new(),
+    };
+
+    let tool_call_text = render_tool_calls(&calls, format, markers);
+    let existing = extract_text(message);
+    converted.content = MessageContentValue::Text(if existing.is_empty() {
+        tool_call_text
+    } else if tool_call_text.is_empty() {
+        existing
+    } else {
+        format!("{existing}\n\n{tool_call_text}")
+    });
+    converted.tool_calls = None;
+    converted
 }
 
 /// Text-mode protocols cannot carry images inline; render image blocks as a
@@ -272,6 +326,40 @@ mod tests {
                 other => panic!("expected Text content, got {:?}", other),
             }
         }
+    }
+
+    #[test]
+    fn rich_tool_use_blocks_are_rendered_in_text_mode() {
+        let message = Message {
+            id: llm_suite_types::Id::new(),
+            role: MessageRole::Assistant,
+            content: MessageContentValue::Rich(vec![
+                llm_suite_types::message::MessageContent::Text {
+                    text: "checking".to_string(),
+                },
+                llm_suite_types::message::MessageContent::ToolUse {
+                    tool_use: llm_suite_types::message::ToolUseContent {
+                        id: "c1".to_string(),
+                        name: "get_weather".to_string(),
+                        input: serde_json::json!({"city": "Beijing"}),
+                    },
+                },
+            ]),
+            timestamp: 0,
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+            thinking: None,
+            thinking_signature: None,
+            metadata: None,
+        };
+        let converted = convert_to_text_mode(&[message], &ToolCallProtocol::Xml, None);
+        let MessageContentValue::Text(text) = &converted[0].content else {
+            panic!("expected text");
+        };
+        assert!(text.contains("checking"), "{text}");
+        assert!(text.contains("<tool_use>"), "{text}");
+        assert!(text.contains("<tool_name>get_weather</tool_name>"), "{text}");
     }
 
     #[test]

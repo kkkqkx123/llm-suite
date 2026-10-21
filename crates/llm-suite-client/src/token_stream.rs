@@ -217,6 +217,7 @@ mod tests {
                     stream_stats: None,
                     id: None,
                     model: None,
+                    refusal: None,
                 }),
             ],
         };
@@ -307,6 +308,7 @@ mod tests {
                     stream_stats: None,
                     id: None,
                     model: None,
+                    refusal: None,
                 }),
             ],
         };

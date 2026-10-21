@@ -30,6 +30,9 @@ pub fn estimate_message_tokens(msg: &Message) -> u32 {
                         estimate_tokens(&tool_result.content) as u32
                     }
                     MessageContent::ImageUrl { image_url } => estimate_image_tokens(&image_url.url),
+                    MessageContent::RedactedThinking { data } => {
+                        estimate_tokens(data) as u32
+                    }
                 };
             }
         }

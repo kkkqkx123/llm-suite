@@ -5,11 +5,12 @@ use llm_suite_types::llm::{
 use llm_suite_types::message::{Message, MessageContent, MessageContentValue, MessageRole};
 
 /// Whether the request runs in text-based tool mode (non-native tool protocol).
+///
+/// The locked protocol wins over the requested one, so the mode branch, the
+/// protocol used for parsing and the protocol used for rendering always
+/// agree with each other.
 pub fn is_text_mode(request: &LlmRequest) -> bool {
-    matches!(
-        request.tool_call_protocol,
-        Some(ref f) if *f != ToolCallProtocol::Native
-    )
+    effective_tool_call_protocol(request) != ToolCallProtocol::Native
 }
 
 /// Effective tool call protocol: the locked protocol wins, otherwise the
@@ -139,30 +140,37 @@ pub fn convert_openai_messages(messages: &[Message]) -> Vec<serde_json::Value> {
                         }
                         // Fold ToolUse blocks into the message's `tool_calls`.
                         MessageContent::ToolUse { tool_use } => {
+                            // Chat Completions carries the call arguments as a
+                            // JSON string under `function.arguments`.
+                            let arguments =
+                                serde_json::to_string(&tool_use.input).unwrap_or_else(|_| "{}".into());
                             tool_calls.push(serde_json::json!({
                                 "id": tool_use.id,
                                 "type": "function",
                                 "function": {
                                     "name": tool_use.name,
-                                    "input": tool_use.input,
+                                    "arguments": arguments,
                                 }
                             }));
                         }
                         // Emit ToolResult blocks as standalone `tool` messages.
                         MessageContent::ToolResult { tool_result } => {
-                            let mut tmsg = serde_json::json!({
+                            tool_result_entries.push(serde_json::json!({
                                 "role": "tool",
                                 "content": tool_result.content,
                                 "tool_call_id": tool_result.tool_use_id,
-                            });
-                            if let Some(is_err) = tool_result.is_error {
-                                tmsg["is_error"] = serde_json::json!(is_err);
-                            }
-                            tool_result_entries.push(tmsg);
+                            }));
                         }
                         MessageContent::Thinking { thinking, .. } => {
                             has_content = true;
                             content.push(serde_json::json!({"type": "text", "text": thinking}));
+                        }
+                        MessageContent::RedactedThinking { data } => {
+                            // Chat Completions has no redacted-thinking part;
+                            // the opaque payload is kept as text so the block
+                            // is not silently dropped from the history.
+                            has_content = true;
+                            content.push(serde_json::json!({"type": "text", "text": data}));
                         }
                     }
                 }
@@ -189,11 +197,10 @@ pub fn convert_openai_messages(messages: &[Message]) -> Vec<serde_json::Value> {
     out
 }
 
-/// OpenAI Chat requires every `tool` role message to carry `tool_call_id` (and
-/// to follow the assistant message that produced the matching `tool_calls`).
-/// Validate the former so an invalid request fails fast locally instead of
-/// round-tripping a `400` from the server. Text mode re-renders tool results as
-/// inline blocks, so this only applies to native (non-text) requests.
+/// OpenAI Chat requires every `tool` role message to carry `tool_call_id`.
+/// Validate it so an invalid request fails fast locally instead of
+/// round-tripping a `400` from the server. Text mode re-renders tool results
+/// as inline blocks, so this only applies to native (non-text) requests.
 pub fn validate_openai_chat_messages(request: &LlmRequest) -> LlmResult<()> {
     for msg in &request.messages {
         if msg.role == llm_suite_types::message::MessageRole::Tool && msg.tool_call_id.is_none() {
@@ -317,10 +324,21 @@ pub fn parse_openai_chat_response(body: &str) -> LlmResult<LlmResponseType> {
         .map(|arr| {
             arr.iter()
                 .filter_map(|tc| {
-                    let id = tc.get("id")?.as_str()?.to_string();
                     let function = tc.get("function")?;
+                    // The function name identifies the call and is required;
+                    // a missing id or argument string is tolerated so a
+                    // compatible gateway cannot make a whole call disappear.
                     let name = function.get("name")?.as_str()?.to_string();
-                    let arguments = function.get("arguments")?.as_str()?.to_string();
+                    let arguments = function
+                        .get("arguments")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("{}")
+                        .to_string();
+                    let id = tc
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                        .unwrap_or_else(|| format!("call_{}", llm_suite_common::generate_id()));
                     Some(llm_suite_types::message::LlmToolCall {
                         id,
                         r#type: "function".to_string(),
@@ -332,6 +350,13 @@ pub fn parse_openai_chat_response(body: &str) -> LlmResult<LlmResponseType> {
         });
 
     let usage = json.get("usage").map(parse_openai_usage);
+
+    // A refusal is the provider declining to answer; it is kept apart from
+    // the answer text so an empty answer can be told from a refusal.
+    let refusal = message
+        .and_then(|m| m.get("refusal"))
+        .and_then(|r| r.as_str())
+        .map(String::from);
 
     let reasoning_tokens = usage.as_ref().and_then(|u| u.reasoning_tokens);
 
@@ -374,7 +399,7 @@ pub fn parse_openai_chat_response(body: &str) -> LlmResult<LlmResponseType> {
         reasoning_signature: None,
         reasoning_tokens,
         metadata,
-        refusal: None,
+        refusal,
         stream_stats: None,
     })
 }
@@ -450,6 +475,16 @@ pub fn parse_openai_stream_chunk(data: &str) -> LlmResult<Vec<MessageStreamEvent
                     },
                 ));
             }
+            // A refusal is the provider declining to answer; it travels on
+            // its own channel instead of mixing into the answer text.
+            if let Some(refusal) = delta.get("refusal").and_then(|r| r.as_str()) {
+                events.push(MessageStreamEvent::Refusal(
+                    llm_suite_types::llm::MessageStreamRefusal {
+                        refusal: refusal.to_string(),
+                        snapshot: String::new(),
+                    },
+                ));
+            }
             // Emit one ToolCallDelta per tool call so parallel calls packed
             // into a single delta array are all forwarded (previously only the
             // first was kept).
@@ -470,6 +505,7 @@ pub fn parse_openai_stream_chunk(data: &str) -> LlmResult<Vec<MessageStreamEvent
                         llm_suite_types::llm::MessageStreamToolCallDelta {
                             index,
                             id,
+                            call_id: None,
                             name,
                             arguments,
                             is_snapshot: false,
@@ -513,6 +549,29 @@ pub fn convert_openai_tools(
         })
         .collect();
     Ok(tool_defs)
+}
+
+/// Build the endpoint URL for a provider path.
+///
+/// A base URL that already ends with the path is used as-is, so a profile can
+/// carry a full endpoint including a query string (deployment-style
+/// endpoints). Otherwise the path is appended. A trailing slash on the base
+/// URL never produces a double slash.
+pub fn endpoint_url(base_url: &str, path: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    let (without_query, query) = match trimmed.split_once('?') {
+        Some((base, query)) => (base, Some(query)),
+        None => (trimmed, None),
+    };
+    let url = if without_query.ends_with(&format!("/{path}")) {
+        without_query.to_string()
+    } else {
+        format!("{trimmed}/{path}")
+    };
+    match query {
+        Some(query) => format!("{url}?{query}"),
+        None => url,
+    }
 }
 
 /// Apply authentication, custom headers and query parameters to the request.
@@ -591,8 +650,52 @@ mod tests {
     use llm_suite_types::llm::MessageStreamEvent;
 
     #[test]
-    fn stream_usage_chunk_is_extracted() {
-        let chunk = r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#;
+    fn endpoint_url_appends_the_path_only_once() {
+        assert_eq!(
+            super::endpoint_url("https://api.openai.com/v1", "chat/completions"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+        assert_eq!(
+            super::endpoint_url("https://api.openai.com/v1/", "chat/completions"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn endpoint_url_keeps_a_full_endpoint() {
+        assert_eq!(
+            super::endpoint_url(
+                "https://example.openai.azure.com/openai/deployments/gpt4/chat/completions?api-version=2024-01",
+                "chat/completions"
+            ),
+            "https://example.openai.azure.com/openai/deployments/gpt4/chat/completions?api-version=2024-01"
+        );
+    }
+
+    #[test]
+    fn refusal_is_parsed_and_kept_out_of_the_content() {
+        let body = r#"{"id":"1","model":"gpt-4o","choices":[{"message":{"role":"assistant","content":null,"refusal":"I cannot help with that."},"finish_reason":"stop"}]}"#;
+        let result = parse_openai_chat_response(body).expect("must parse");
+        assert_eq!(result.content, None);
+        assert_eq!(
+            result.refusal.as_deref(),
+            Some("I cannot help with that.")
+        );
+    }
+
+    #[test]
+    fn tool_call_without_arguments_keeps_the_call() {
+        let body = r#"{"id":"1","model":"gpt-4o","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather"}}]},"finish_reason":"tool_calls"}]}"#;
+        let result = parse_openai_chat_response(body).expect("must parse");
+        let calls = result.tool_calls.expect("tool calls present");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[0].function.arguments, "{}");
+    }
+
+    #[test]
+    fn stream_usage_chunk_is_extracted() {        let chunk = r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#;
         let events = parse_openai_stream_chunk(chunk).expect("chunk must parse");
         match events
             .into_iter()
