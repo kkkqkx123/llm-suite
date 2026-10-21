@@ -13,7 +13,7 @@ pub mod http_mock;
 pub mod mock;
 
 pub use circuit::{CircuitBreaker, CircuitBreakerConfig};
-pub use client::LlmClient;
+pub use client::{LlmClient, RetryObserver};
 pub use dead_loop_detector::{DeadLoopDetectionResult, DeadLoopDetector, DeadLoopDetectorConfig};
 #[cfg(feature = "mock")]
 pub use mock::{LlmResponseSpec, MockLlmClient, MockMessageStream};

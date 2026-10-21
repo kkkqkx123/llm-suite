@@ -7,7 +7,7 @@ use llm_suite_codec::error::{LlmError, LlmResult};
 use llm_suite_codec::LlmCodec;
 use llm_suite_common::exec::{execute_with_timeout, TimeoutError};
 use llm_suite_common::parse_retry_after_ms;
-use llm_suite_common::retry::RetryPolicy;
+use llm_suite_common::retry::{RetryAttemptDescriptor, RetryPolicy};
 use llm_suite_types::llm::{LlmProfile, LlmRequest, LlmResult as LlmResponseType};
 use reqwest::Client as ReqwestClient;
 use tokio_util::sync::CancellationToken;
@@ -34,7 +34,14 @@ pub struct LlmClientImpl {
     client: ReqwestClient,
     codec: Arc<dyn LlmCodec>,
     profile: LlmProfile,
+    /// Notified whenever a retry attempt is scheduled. The transport stays
+    /// leaf: the observer is a plain callback the gateway wires to its own
+    /// metrics sink.
+    retry_observer: Option<RetryObserver>,
 }
+
+/// Callback invoked with the descriptor of every scheduled retry attempt.
+pub type RetryObserver = Arc<dyn Fn(&RetryAttemptDescriptor) + Send + Sync>;
 
 impl LlmClientImpl {
     pub fn new(client: ReqwestClient, codec: Arc<dyn LlmCodec>, profile: LlmProfile) -> Self {
@@ -42,6 +49,20 @@ impl LlmClientImpl {
             client,
             codec,
             profile,
+            retry_observer: None,
+        }
+    }
+
+    /// Attach an observer notified on every scheduled retry attempt.
+    pub fn with_retry_observer(mut self, observer: RetryObserver) -> Self {
+        self.retry_observer = Some(observer);
+        self
+    }
+
+    /// Notify the observer about a scheduled retry attempt.
+    fn notify_retry(&self, descriptor: &RetryAttemptDescriptor) {
+        if let Some(observer) = &self.retry_observer {
+            observer(descriptor);
         }
     }
 
@@ -320,6 +341,7 @@ impl LlmClient for LlmClientImpl {
                     reason = %descriptor.reason,
                     "LLM request failed, scheduling retry"
                 );
+                self.notify_retry(descriptor);
             }),
             cancel_token,
             || self.generate_inner(request, cancel.clone()),
@@ -349,6 +371,7 @@ impl LlmClient for LlmClientImpl {
                     reason = %descriptor.reason,
                     "LLM stream request failed, scheduling retry"
                 );
+                self.notify_retry(descriptor);
             }),
             cancel_token,
             || self.generate_stream_inner(request, cancel.clone()),

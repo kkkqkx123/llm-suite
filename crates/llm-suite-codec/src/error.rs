@@ -91,6 +91,32 @@ impl LlmError {
         }
     }
 
+    /// Low-cardinality label of the error, used as a metrics series label.
+    ///
+    /// The label set is closed on purpose: it must stay bounded so the
+    /// error series never multiply by request-specific detail.
+    pub fn metric_class(&self) -> &'static str {
+        match self {
+            LlmError::HttpError(_) => "http_error",
+            LlmError::SerializationError(_) => "serialization_error",
+            LlmError::ProviderError { .. } => "provider_error",
+            LlmError::ContextLengthExceeded(_) => "context_length_exceeded",
+            LlmError::ConfigError(_) => "config_error",
+            LlmError::StreamError(_) => "stream_error",
+            LlmError::ProfileNotFound(_) => "profile_not_found",
+            LlmError::UnsupportedFormat(_) => "unsupported_format",
+            LlmError::CodecNotFound(_) => "codec_not_found",
+            LlmError::Timeout(_) => "timeout",
+            LlmError::AuthError(_) => "auth_error",
+            LlmError::ToolNotFound(_) => "tool_not_found",
+            LlmError::InvalidResponse(_) => "invalid_response",
+            LlmError::Cancelled => "cancelled",
+            LlmError::RateLimited { .. } => "rate_limited",
+            LlmError::CircuitOpen => "circuit_open",
+            LlmError::ProxyError(_) => "proxy_error",
+        }
+    }
+
     /// Classify an error as a context-length-exceeded rejection of the
     /// *actual* request payload. Matches the format error codes across the
     /// supported formats (anthropic `context_length_exceeded`, openai
@@ -281,5 +307,18 @@ mod tests {
         assert!(!err.is_context_length_exceeded());
         assert!(!LlmError::Timeout(100).is_context_length_exceeded());
         assert!(!LlmError::AuthError("denied".to_string()).is_context_length_exceeded());
+    }
+
+    #[test]
+    fn metric_class_is_low_cardinality() {
+        assert_eq!(LlmError::Timeout(1).metric_class(), "timeout");
+        assert_eq!(
+            LlmError::StreamError("boom".to_string()).metric_class(),
+            "stream_error"
+        );
+        assert_eq!(
+            LlmError::CircuitOpen.metric_class(),
+            "circuit_open"
+        );
     }
 }

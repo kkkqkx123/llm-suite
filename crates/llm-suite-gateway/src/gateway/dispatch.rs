@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use llm_suite_client::client::LlmClient;
+use llm_suite_client::token_stream::SharedTokenUsageSink;
 use llm_suite_client::MessageStream;
 use llm_suite_codec::error::LlmResult;
 use llm_suite_types::llm::{LlmRequest, LlmResult as LlmResponseType};
@@ -31,13 +32,14 @@ impl LlmGateway {
         .await;
         Self::record_breaker(prepared.breaker.as_ref(), &result);
         let duration_ms = start.elapsed().as_millis() as f64;
+        let context = self.call_context(&prepared);
         match &result {
             Ok(response) => {
-                self.record_token_usage(response, &prepared.profile);
-                self.record_request(duration_ms, true, None, &prepared.profile);
+                self.record_token_usage(response, &prepared, &context);
+                self.record_request(duration_ms, true, None, &context);
             }
             Err(error) => {
-                self.record_request(duration_ms, false, Some(error), &prepared.profile);
+                self.record_request(duration_ms, false, Some(error), &context);
             }
         }
         result
@@ -69,25 +71,30 @@ impl LlmGateway {
         .await;
         Self::record_breaker(prepared.breaker.as_ref(), &stream);
         let duration_ms = start.elapsed().as_millis() as f64;
+        let context = self.call_context(&prepared);
         match &stream {
             Ok(_) => {
-                self.record_request(duration_ms, true, None, &prepared.profile);
+                // The stream is not consumed yet: only the establishment
+                // latency is known here. The end-to-end request duration is
+                // recorded when the stream wrapper observes the final
+                // message.
                 if let Some(metrics) = self.token_metrics.as_ref() {
-                    metrics.record_first_byte(duration_ms, Some(&prepared.profile.model));
+                    metrics.record_first_byte(duration_ms, &context);
                 }
             }
-            Err(error) => self.record_request(duration_ms, false, Some(error), &prepared.profile),
+            Err(error) => self.record_request(duration_ms, false, Some(error), &context),
         }
         let stream = stream?;
-        let usage_sink = self
-            .token_metrics
-            .as_ref()
-            .map(|m| Arc::clone(m) as llm_suite_client::SharedTokenUsageSink);
+        let usage_sink: Option<SharedTokenUsageSink> = self.token_metrics.as_ref().map(|m| {
+            self.cost_enriching_sink(Arc::clone(m), &prepared.profile) as SharedTokenUsageSink
+        });
+        let fallback_usage = self.estimated_usage(&prepared.effective);
         Ok(Box::new(
             llm_suite_client::TokenRecordingStream::new(
                 stream,
                 usage_sink,
-                prepared.profile.model.clone(),
+                context,
+                fallback_usage,
             )
             .with_metrics_sink(self.token_metrics.clone()),
         ))

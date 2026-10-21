@@ -6,6 +6,19 @@ pub struct StreamStats {
     pub time_to_first_chunk: i64,
     pub stream_duration: i64,
     pub total_duration: i64,
+    /// Accumulated length of the reasoning text streamed for the turn.
+    ///
+    /// Providers that report reasoning token counts do not need this, but
+    /// several of them stream the reasoning text without ever reporting a
+    /// token count for it: the character length is the only size signal
+    /// available for those.
+    #[serde(default)]
+    pub reasoning_chars: u32,
+    /// Time from the start of the stream to the first reasoning chunk.
+    ///
+    /// `None` when the turn produced no reasoning at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_to_first_reasoning: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

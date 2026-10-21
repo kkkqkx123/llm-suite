@@ -57,9 +57,43 @@ impl LlmGateway {
         )
         .map_err(|err| LlmError::ProxyError(err.to_string()))?;
 
-        let client_impl = Arc::new(LlmClientImpl::new(client, codec, profile.clone()));
+        let client_impl = Arc::new(self.build_client(client, codec, profile));
         self.clients.insert(key, client_impl.clone());
         Ok(client_impl)
+    }
+
+    /// Build the transport client for a profile and wire the retry
+    /// observation into the metrics sink.
+    ///
+    /// The observer reports every scheduled retry attempt, so the retry
+    /// count reflects what the transport actually did instead of a proxy
+    /// derived from the final outcome.
+    fn build_client(
+        &self,
+        client: reqwest::Client,
+        codec: Arc<dyn llm_suite_codec::LlmCodec>,
+        profile: &LlmProfile,
+    ) -> LlmClientImpl {
+        let impl_client = LlmClientImpl::new(client, codec, profile.clone());
+        let Some(metrics) = self.token_metrics.as_ref() else {
+            return impl_client;
+        };
+        let metrics = Arc::clone(metrics);
+        let model = profile.model.clone();
+        let profile_id = profile.id.clone();
+        let provider_id = profile.provider_id.clone();
+        let format = profile.format.clone();
+        let accounting = llm_token::token_accounting(&format);
+        impl_client.with_retry_observer(Arc::new(move |_descriptor| {
+            metrics.record_retry(&llm_token::LlmCallContext {
+                model: Some(model.clone()),
+                profile_id: Some(profile_id.clone()),
+                provider_id: provider_id.clone(),
+                format: Some(format.as_str().to_string()),
+                execution_id: None,
+                accounting,
+            });
+        }))
     }
 
     /// Drop every cached client that belongs to the given profile id.

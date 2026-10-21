@@ -112,6 +112,45 @@ pub fn compute_cost(
     }
 }
 
+/// Cost the request would have carried if every input token were billed at
+/// the base input rate.
+///
+/// This is the baseline the cache discount is measured against: the cache
+/// only saves money when the cache rate is below the base input rate, so a
+/// price table without a cache rate yields a baseline equal to the actual
+/// cost.
+pub fn compute_baseline_cost(
+    usage: &TokenUsageStats,
+    pricing: &TokenPricing,
+    scope: CacheTokenScope,
+) -> f64 {
+    let cache_read = usage.cache_read_tokens.unwrap_or(0) as f64;
+    let cache_write = usage.cache_write_tokens.unwrap_or(0) as f64;
+    let baseline_input = match scope {
+        CacheTokenScope::IncludedInPrompt => usage.prompt_tokens as f64,
+        CacheTokenScope::SeparateFromPrompt => {
+            usage.prompt_tokens as f64 + cache_read + cache_write
+        }
+    };
+    let per_mtok = 1_000_000.0;
+    baseline_input * pricing.input_per_mtok / per_mtok
+        + usage.completion_tokens as f64 * pricing.output_per_mtok / per_mtok
+}
+
+/// Amount the cache saved against the baseline cost.
+///
+/// Zero when the cache rates are not below the base input rate, so the
+/// value never goes negative.
+pub fn compute_cache_savings(
+    usage: &TokenUsageStats,
+    pricing: &TokenPricing,
+    scope: CacheTokenScope,
+) -> f64 {
+    let baseline = compute_baseline_cost(usage, pricing, scope);
+    let actual = compute_cost(usage, pricing, scope).total_cost;
+    (baseline - actual).max(0.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,5 +272,52 @@ mod tests {
         assert_eq!(stats.completion_tokens_cost, Some(5.0 / 1e6));
         let total = stats.total_cost.expect("total_cost must be set");
         assert!((total - 15.0 / 1e6).abs() < 1e-15);
+    }
+
+    #[test]
+    fn cache_savings_measure_the_discount_against_the_base_rate() {
+        let pricing = TokenPricing {
+            input_per_mtok: 1.0,
+            output_per_mtok: 2.0,
+            cache_read_per_mtok: Some(0.1),
+            cache_write_5m_per_mtok: None,
+            cache_write_1h_per_mtok: None,
+        };
+        // 1000 prompt tokens of which 800 are cached, 100 output tokens.
+        let stats = usage(1000, 100, Some(800), None);
+        let savings = compute_cache_savings(&stats, &pricing, CacheTokenScope::IncludedInPrompt);
+        // Baseline: 1000 input at 1.0 plus 100 output at 2.0.
+        // Actual: 200 input at 1.0 plus 800 cached at 0.1 plus 100 output at 2.0.
+        let expected = (800.0 * 1.0 - 800.0 * 0.1) / 1e6;
+        assert!((savings - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn cache_savings_are_zero_without_a_cache_discount() {
+        let pricing = TokenPricing {
+            input_per_mtok: 1.0,
+            output_per_mtok: 2.0,
+            cache_read_per_mtok: None,
+            cache_write_5m_per_mtok: None,
+            cache_write_1h_per_mtok: None,
+        };
+        let stats = usage(1000, 100, Some(800), None);
+        let savings = compute_cache_savings(&stats, &pricing, CacheTokenScope::IncludedInPrompt);
+        assert!(savings.abs() < 1e-12);
+    }
+
+    #[test]
+    fn anthropic_baseline_counts_the_cache_next_to_the_prompt() {
+        let pricing = TokenPricing {
+            input_per_mtok: 3.0,
+            output_per_mtok: 15.0,
+            cache_read_per_mtok: Some(0.3),
+            cache_write_5m_per_mtok: Some(3.75),
+            cache_write_1h_per_mtok: Some(6.0),
+        };
+        let stats = usage(10, 20, Some(80), Some(15));
+        let baseline = compute_baseline_cost(&stats, &pricing, CacheTokenScope::SeparateFromPrompt);
+        // 10 uncached + 80 cached read + 15 cached write at the input rate.
+        assert!((baseline - (105.0 * 3.0 / 1e6 + 20.0 * 15.0 / 1e6)).abs() < 1e-12);
     }
 }

@@ -1,7 +1,5 @@
 //! The mock clients used for test injection.
 
-use std::sync::Arc;
-
 use super::LlmGateway;
 
 impl LlmGateway {
@@ -11,13 +9,16 @@ impl LlmGateway {
     pub fn register_mock(
         &self,
         id: impl Into<String>,
-        client: Arc<llm_suite_client::MockLlmClient>,
+        client: std::sync::Arc<llm_suite_client::MockLlmClient>,
     ) {
         self.mock_clients.insert(id.into(), client);
     }
 
     #[cfg(feature = "mock")]
-    pub(super) fn mock_client(&self, id: &str) -> Option<Arc<llm_suite_client::MockLlmClient>> {
+    pub(super) fn mock_client(
+        &self,
+        id: &str,
+    ) -> Option<std::sync::Arc<llm_suite_client::MockLlmClient>> {
         self.mock_clients.get(id).map(|c| c.clone())
     }
 }
