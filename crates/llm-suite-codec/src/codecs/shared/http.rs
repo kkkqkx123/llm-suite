@@ -1,6 +1,7 @@
 //! Provider-agnostic HTTP plumbing: endpoint URL composition, authentication
 //! headers, query parameters and the custom body merge.
 
+use crate::error::LlmResult;
 use llm_suite_types::llm::LlmProfile;
 
 /// Build the endpoint URL for a provider path.
@@ -41,6 +42,32 @@ pub fn endpoint_url(base_url: &str, path: &str) -> String {
     } else {
         format!("{url}?{}", query_parts.join("&"))
     }
+}
+
+/// Assemble the POST JSON request shared by a codec's inference and
+/// count-tokens endpoints, so header handling cannot drift apart between
+/// the two. `fixed_headers` carries format-specific constants (e.g. the
+/// Anthropic `anthropic-version` header); auth, profile headers and query
+/// parameters go through `apply_auth_and_headers`.
+pub fn build_post_json_request(
+    client: &reqwest::Client,
+    url: &str,
+    body: &serde_json::Value,
+    profile: &LlmProfile,
+    default_auth: &str,
+    fixed_headers: &[(&str, &str)],
+) -> LlmResult<reqwest::Request> {
+    let mut req_builder = client
+        .request(reqwest::Method::POST, url)
+        .header("Content-Type", "application/json");
+    for (name, value) in fixed_headers {
+        req_builder = req_builder.header(*name, *value);
+    }
+    let req_builder = req_builder.json(body);
+
+    apply_auth_and_headers(req_builder, profile, default_auth)
+        .build()
+        .map_err(crate::error::LlmError::HttpError)
 }
 
 /// Apply authentication, custom headers and query parameters to the request.

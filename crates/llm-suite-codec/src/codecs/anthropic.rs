@@ -4,7 +4,6 @@ use super::LlmCodec;
 use crate::error::LlmResult;
 use llm_suite_types::llm::{LlmProfile, LlmRequest, LlmResult as LlmResponseType, MessageStreamEvent};
 use llm_suite_types::tool::Tool;
-use reqwest::Method;
 
 pub(crate) mod caching;
 pub(crate) mod messages;
@@ -56,21 +55,14 @@ impl LlmCodec for AnthropicCodec {
             profile.base_url.as_deref().unwrap_or(&self.base_url),
             "messages",
         );
-
-        let body = request::build_body(request, profile)?;
-
-        let mut req_builder = self
-            .client
-            .request(Method::POST, &url)
-            .header("Content-Type", "application/json")
-            .header("anthropic-version", "2023-06-01")
-            .json(&body);
-
-        req_builder = super::shared::apply_auth_and_headers(req_builder, profile, "x-api-key");
-
-        req_builder
-            .build()
-            .map_err(crate::error::LlmError::HttpError)
+        super::shared::build_post_json_request(
+            &self.client,
+            &url,
+            &request::build_body(request, profile)?,
+            profile,
+            "x-api-key",
+            &[("anthropic-version", "2023-06-01")],
+        )
     }
 
     fn build_count_tokens_request(
@@ -82,24 +74,15 @@ impl LlmCodec for AnthropicCodec {
             profile.base_url.as_deref().unwrap_or(&self.base_url),
             "messages/count_tokens",
         );
-
-        let body = request::build_count_tokens_body(request, profile)?;
-
-        let mut req_builder = self
-            .client
-            .request(Method::POST, &url)
-            .header("Content-Type", "application/json")
-            .header("anthropic-version", "2023-06-01")
-            .json(&body);
-
-        // Same auth handling as `build_request` so bearer/custom headers and
-        // query params are not silently dropped for count_tokens.
-        req_builder = super::shared::apply_auth_and_headers(req_builder, profile, "x-api-key");
-
-        req_builder
-            .build()
-            .map(Some)
-            .map_err(crate::error::LlmError::HttpError)
+        super::shared::build_post_json_request(
+            &self.client,
+            &url,
+            &request::build_count_tokens_body(request, profile)?,
+            profile,
+            "x-api-key",
+            &[("anthropic-version", "2023-06-01")],
+        )
+        .map(Some)
     }
 
     fn parse_response(&self, body: &str, request: &LlmRequest) -> LlmResult<LlmResponseType> {

@@ -4,7 +4,6 @@ use super::LlmCodec;
 use crate::error::LlmResult;
 use llm_suite_types::llm::{LlmProfile, LlmRequest, LlmResult as LlmResponseType, MessageStreamEvent};
 use llm_suite_types::tool::Tool;
-use reqwest::Method;
 
 pub(crate) mod messages;
 pub(crate) mod request;
@@ -55,20 +54,14 @@ impl LlmCodec for OpenaiResponseCodec {
             profile.base_url.as_deref().unwrap_or(&self.base_url),
             "responses",
         );
-
-        let body = request::build_body(request, profile)?;
-
-        let mut req_builder = self
-            .client
-            .request(Method::POST, &url)
-            .header("Content-Type", "application/json")
-            .json(&body);
-
-        req_builder = super::shared::apply_auth_and_headers(req_builder, profile, "bearer");
-
-        req_builder
-            .build()
-            .map_err(crate::error::LlmError::HttpError)
+        super::shared::build_post_json_request(
+            &self.client,
+            &url,
+            &request::build_body(request, profile)?,
+            profile,
+            "bearer",
+            &[],
+        )
     }
 
     fn build_count_tokens_request(
@@ -80,21 +73,15 @@ impl LlmCodec for OpenaiResponseCodec {
             profile.base_url.as_deref().unwrap_or(&self.base_url),
             "responses/input_tokens",
         );
-
-        let body = request::build_count_tokens_body(request, profile)?;
-
-        let mut req_builder = self
-            .client
-            .request(Method::POST, &url)
-            .header("Content-Type", "application/json")
-            .json(&body);
-
-        req_builder = super::shared::apply_auth_and_headers(req_builder, profile, "bearer");
-
-        req_builder
-            .build()
-            .map(Some)
-            .map_err(crate::error::LlmError::HttpError)
+        super::shared::build_post_json_request(
+            &self.client,
+            &url,
+            &request::build_count_tokens_body(request, profile)?,
+            profile,
+            "bearer",
+            &[],
+        )
+        .map(Some)
     }
 
     fn parse_response(&self, body: &str, request: &LlmRequest) -> LlmResult<LlmResponseType> {
