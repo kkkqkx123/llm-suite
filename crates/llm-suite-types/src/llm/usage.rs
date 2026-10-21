@@ -2,8 +2,17 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TokenUsageStats {
+    /// Input tokens of the request.
+    ///
+    /// The scope follows the provider: the OpenAI family counts the cached
+    /// input into the prompt (`cached_tokens` is a subset of
+    /// `prompt_tokens`), Anthropic reports the uncached input next to the
+    /// cache counters. `total_tokens` always covers the whole request, so
+    /// the two scopes are resolved where the money is counted
+    /// (`CacheTokenScope` in the pricing layer).
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
+    /// Every token the request consumed, input and output.
     pub total_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u32>,

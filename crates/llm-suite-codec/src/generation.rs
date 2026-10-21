@@ -319,4 +319,101 @@ mod tests {
             .expect("json_schema present");
         assert_eq!(rf.get("strict"), Some(&serde_json::json!(false)));
     }
+
+    #[test]
+    fn openai_chat_json_schema_without_a_schema_stays_valid() {
+        use llm_suite_types::llm::generation::LlmResponseFormat;
+        use llm_suite_types::llm::generation::ResponseFormatKind;
+        let mut body = serde_json::json!({"model": "gpt-4o"});
+        apply_openai_chat(
+            &mut body,
+            &LlmGenerationParams {
+                response_format: Some(LlmResponseFormat {
+                    kind: Some(ResponseFormatKind::JsonSchema),
+                    name: Some("resp".to_string()),
+                    schema: None,
+                    strict: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("generation must apply");
+        // The definition lives under `json_schema`; a bare `name` next to
+        // the type is not read by the API.
+        assert_eq!(
+            body["response_format"]["type"],
+            serde_json::json!("json_schema")
+        );
+        assert_eq!(
+            body["response_format"]["json_schema"]["name"],
+            serde_json::json!("resp")
+        );
+        assert_eq!(
+            body["response_format"]["json_schema"]["schema"],
+            serde_json::json!({"type": "object"})
+        );
+        assert!(body["response_format"].get("name").is_none());
+    }
+
+    #[test]
+    fn the_anthropic_sampling_parameters_reach_the_request_body() {
+        // The official SDK no longer types them, but the API still accepts
+        // them for the models that use them.
+        let mut body = serde_json::json!({"model": "claude"});
+        apply_anthropic(
+            &mut body,
+            &LlmGenerationParams {
+                temperature: Some(0.2),
+                top_p: Some(0.9),
+                top_k: Some(40),
+                ..Default::default()
+            },
+        )
+        .expect("generation must apply");
+        assert_eq!(body["temperature"], serde_json::json!(0.2));
+        assert_eq!(body["top_p"], serde_json::json!(0.9));
+        assert_eq!(body["top_k"], serde_json::json!(40));
+    }
+
+    #[test]
+    fn the_gemini_generation_config_block_is_read() {
+        let legacy = serde_json::json!({
+            "generationConfig": {
+                "temperature": 0.4,
+                "topP": 0.8,
+                "topK": 20,
+                "maxOutputTokens": 256,
+                "stopSequences": ["END"],
+                "thinkingConfig": {"thinkingBudget": 1024, "includeThoughts": true},
+                "responseMimeType": "application/json",
+                "responseSchema": {"type": "object"}
+            }
+        });
+        let parsed = parse_legacy_generation(&legacy);
+        assert_eq!(parsed.temperature, Some(0.4));
+        assert_eq!(parsed.top_p, Some(0.8));
+        assert_eq!(parsed.top_k, Some(20));
+        assert_eq!(parsed.max_tokens, Some(256));
+        assert_eq!(parsed.stop, Some(vec!["END".to_string()]));
+        let thinking = parsed.thinking.expect("thinking must be read");
+        assert_eq!(thinking.budget_tokens, Some(1024));
+        assert_eq!(thinking.include_thoughts, Some(true));
+        let format = parsed.response_format.expect("format must be read");
+        assert_eq!(
+            format.kind,
+            Some(llm_suite_types::llm::generation::ResponseFormatKind::JsonSchema)
+        );
+        assert_eq!(format.schema, Some(serde_json::json!({"type": "object"})));
+    }
+
+    #[test]
+    fn the_outer_keys_win_over_the_gemini_generation_config_block() {
+        let legacy = serde_json::json!({
+            "temperature": 0.9,
+            "generationConfig": {"temperature": 0.4, "maxOutputTokens": 256}
+        });
+        let parsed = parse_legacy_generation(&legacy);
+        assert_eq!(parsed.temperature, Some(0.9));
+        assert_eq!(parsed.max_tokens, Some(256));
+    }
 }

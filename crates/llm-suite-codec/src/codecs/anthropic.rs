@@ -4,7 +4,7 @@ use crate::error::{LlmError, LlmResult};
 use llm_suite_types::llm::{
     LlmProfile, LlmPromptCaching, LlmRequest, LlmResult as LlmResponseType, MessageStreamEnd,
     MessageStreamError, MessageStreamEvent, MessageStreamInputJson, MessageStreamReasoning,
-    MessageStreamRedactedThinking, MessageStreamStart, MessageStreamText,
+    MessageStreamRedactedThinking, MessageStreamRefusal, MessageStreamStart, MessageStreamText,
     MessageStreamToolCallDelta, MessageStreamUsage, TokenUsageStats,
 };
 use llm_suite_types::message::{Message, MessageContent, MessageContentValue, MessageRole};
@@ -440,6 +440,13 @@ impl AnthropicCodec {
             let mut message_blocks = tool_result_blocks;
             message_blocks.extend(blocks);
 
+            // The thinking blocks must lead the assistant turn: the API
+            // rejects a thinking block that follows the text or the tool
+            // calls of its turn.
+            if role == "assistant" {
+                message_blocks = Self::thinking_blocks_first(message_blocks);
+            }
+
             if message_blocks.is_empty() {
                 continue;
             }
@@ -487,6 +494,25 @@ impl AnthropicCodec {
         }
 
         Ok(result)
+    }
+
+    /// Move the thinking blocks of an assistant turn in front of the other
+    /// blocks.
+    ///
+    /// The Messages API requires the thinking blocks to be the first blocks of
+    /// the assistant turn; a history that stores the text before the thinking
+    /// would otherwise be rejected.
+    fn thinking_blocks_first(blocks: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+        let is_thinking = |block: &serde_json::Value| {
+            matches!(
+                block.get("type").and_then(|v| v.as_str()),
+                Some("thinking") | Some("redacted_thinking")
+            )
+        };
+        let mut ordered: Vec<serde_json::Value> = Vec::with_capacity(blocks.len());
+        ordered.extend(blocks.iter().filter(|b| is_thinking(b)).cloned());
+        ordered.extend(blocks.iter().filter(|b| !is_thinking(b)).cloned());
+        ordered
     }
 
     fn tool_result_block(
@@ -606,6 +632,22 @@ impl AnthropicCodec {
                                 )]);
                             }
                         }
+                        // A thinking block may open with the first part of
+                        // its text; the signature arrives later, in a
+                        // `signature_delta`.
+                        Some("thinking") => {
+                            let thinking = b.get("thinking").and_then(|v| v.as_str()).unwrap_or("");
+                            if !thinking.is_empty() {
+                                return Ok(vec![MessageStreamEvent::ReasoningText(
+                                    MessageStreamReasoning {
+                                        reasoning: thinking.to_string(),
+                                        snapshot: String::new(),
+                                        signature: None,
+                                        signature_snapshot: None,
+                                    },
+                                )]);
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -666,6 +708,17 @@ impl AnthropicCodec {
                                 )]);
                             }
                         }
+                        // The sources of a grounded answer travel on their
+                        // own channel so they never mix into the answer text.
+                        Some("citations_delta") => {
+                            if let Some(citation) = d.get("citation") {
+                                return Ok(vec![MessageStreamEvent::Annotation(
+                                    llm_suite_types::llm::MessageStreamAnnotation {
+                                        annotation: citation.clone(),
+                                    },
+                                )]);
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -676,6 +729,26 @@ impl AnthropicCodec {
                 if let Some(usage) = json.get("usage") {
                     if let Some(event) = Self::stream_usage(usage) {
                         events.push(MessageStreamEvent::Usage(event));
+                    }
+                }
+                // A refusal reports the reason of the refusal in the
+                // official `stop_details` object; it travels on the refusal
+                // channel, like the Chat Completions refusal delta.
+                if json.pointer("/delta/stop_reason").and_then(|v| v.as_str()) == Some("refusal") {
+                    let refusal = json
+                        .pointer("/delta/stop_details/explanation")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                        .or_else(|| {
+                            json.pointer("/delta/stop_details/category")
+                                .and_then(|v| v.as_str())
+                                .map(|category| format!("refused: {category}"))
+                        });
+                    if let Some(refusal) = refusal {
+                        events.push(MessageStreamEvent::Refusal(MessageStreamRefusal {
+                            refusal,
+                            snapshot: String::new(),
+                        }));
                     }
                 }
                 if let Some(stop_reason) =
@@ -1048,8 +1121,33 @@ impl AnthropicCodec {
             metadata.insert("stop_sequence".to_string(), serde_json::json!(seq));
         }
         if !citations.is_empty() {
-            metadata.insert("citations".to_string(), serde_json::json!(citations));
+            metadata.insert(
+                llm_suite_types::llm::ANNOTATIONS_KEY.to_string(),
+                serde_json::json!(citations),
+            );
         }
+        // A refusal carries the reason of the refusal in the official
+        // `stop_details` object; it is the Anthropic counterpart of the
+        // Chat Completions `message.refusal` field.
+        let stop_details = json.get("stop_details").filter(|v| !v.is_null());
+        if let Some(details) = stop_details {
+            metadata.insert("stop_details".to_string(), details.clone());
+        }
+        let refusal = match stop_reason.as_deref() {
+            Some("refusal") => stop_details
+                .and_then(|d| d.get("explanation"))
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .or_else(|| {
+                    // The refusal has no explanation; the category names the
+                    // policy that triggered it.
+                    stop_details
+                        .and_then(|d| d.get("category"))
+                        .and_then(|v| v.as_str())
+                        .map(|category| format!("refused: {category}"))
+                }),
+            _ => None,
+        };
         let metadata = if metadata.is_empty() {
             None
         } else {
@@ -1083,7 +1181,7 @@ impl AnthropicCodec {
             reasoning_signature: thinking_signature,
             reasoning_tokens,
             metadata,
-            refusal: None,
+            refusal,
             stream_stats: None,
         })
     }
@@ -1225,9 +1323,9 @@ mod tests {
         let out = codec
             .parse_response(body, &request(vec![], None))
             .expect("must parse");
-        let citations = out.metadata.expect("metadata must be present");
+        let metadata = out.metadata.expect("metadata must be present");
         assert_eq!(
-            citations["citations"][0]["type"],
+            metadata["annotations"][0]["type"],
             serde_json::json!("char_location")
         );
     }
@@ -1324,9 +1422,10 @@ mod tests {
         assert_eq!(body["stop_sequences"], serde_json::json!(["END"]));
         assert!(body.get("stop").is_none(), "stop must be mapped");
         assert!(body.get("stream").is_none(), "stream controlled by caller");
-        assert!(
-            body.get("temperature").is_none(),
-            "the Anthropic Messages API has no temperature parameter"
+        assert_eq!(
+            body["temperature"],
+            serde_json::json!(0.2),
+            "the sampling parameters are still accepted by the API"
         );
     }
 
@@ -2177,6 +2276,128 @@ mod tests {
                 assert!(e.error.contains("overloaded_error"));
             }
             other => panic!("expected Error event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_stored_thinking_block_comes_before_the_text() {
+        // The API requires the thinking blocks to lead the assistant turn,
+        // no matter where the history stored them.
+        let codec = AnthropicCodec::new();
+        let assistant = llm_suite_types::message::Message {
+            id: llm_suite_types::Id::new(),
+            role: llm_suite_types::message::MessageRole::Assistant,
+            content: llm_suite_types::message::MessageContentValue::Rich(vec![
+                llm_suite_types::message::MessageContent::Text {
+                    text: "the answer".to_string(),
+                },
+                llm_suite_types::message::MessageContent::Thinking {
+                    thinking: "Let me verify".to_string(),
+                    signature: Some("sig-abc".to_string()),
+                },
+            ]),
+            timestamp: 0,
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+            thinking: None,
+            thinking_signature: None,
+            metadata: None,
+        };
+
+        let body = codec
+            .build_body(
+                &request(
+                    vec![
+                        msg(llm_suite_types::message::MessageRole::User, "hi"),
+                        assistant,
+                    ],
+                    None,
+                ),
+                &profile(),
+            )
+            .expect("must build");
+        let content = body["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], serde_json::json!("thinking"));
+        assert_eq!(content[0]["signature"], serde_json::json!("sig-abc"));
+        assert_eq!(content[1]["type"], serde_json::json!("text"));
+        assert_eq!(content[1]["text"], serde_json::json!("the answer"));
+    }
+
+    #[test]
+    fn a_refusal_is_reported_on_the_refusal_channel() {
+        let codec = AnthropicCodec::new();
+        let body = r#"{"id":"m","model":"claude","stop_reason":"refusal","content":[{"type":"text","text":"I cannot help with that."}],"stop_details":{"type":"refusal","category":"general_harms","explanation":"policy"}}"#;
+        let out = codec
+            .parse_response(body, &request(vec![], None))
+            .expect("must parse");
+        assert_eq!(out.refusal.as_deref(), Some("policy"));
+        let metadata = out.metadata.expect("metadata must be present");
+        assert_eq!(
+            metadata["stop_details"]["category"],
+            serde_json::json!("general_harms")
+        );
+    }
+
+    #[test]
+    fn a_refusal_without_an_explanation_names_the_category() {
+        let codec = AnthropicCodec::new();
+        let body = r#"{"id":"m","model":"claude","stop_reason":"refusal","content":[],"stop_details":{"type":"refusal","category":"cyber"}}"#;
+        let out = codec
+            .parse_response(body, &request(vec![], None))
+            .expect("must parse");
+        assert_eq!(out.refusal.as_deref(), Some("refused: cyber"));
+    }
+
+    #[test]
+    fn the_stream_reports_the_sources_of_a_grounded_answer() {
+        let codec = AnthropicCodec::new();
+        let chunk = r#"{"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":{"type":"char_location","cited_text":"x","document_index":0}}}"#;
+        match codec
+            .parse_stream_chunk_events(chunk)
+            .expect("chunk must parse")
+            .into_iter()
+            .next()
+        {
+            Some(MessageStreamEvent::Annotation(annotation)) => {
+                assert_eq!(
+                    annotation.annotation["type"],
+                    serde_json::json!("char_location")
+                );
+            }
+            other => panic!("expected Annotation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_stream_reports_a_refusal() {
+        let codec = AnthropicCodec::new();
+        let chunk = r#"{"type":"message_delta","delta":{"stop_reason":"refusal","stop_details":{"type":"refusal","explanation":"policy"}},"usage":{"output_tokens":3}}"#;
+        let events = codec.parse_stream_chunk_events(chunk).expect("must parse");
+        let refusal = events
+            .iter()
+            .find_map(|e| match e {
+                MessageStreamEvent::Refusal(r) => Some(r.refusal.clone()),
+                _ => None,
+            })
+            .expect("the refusal must be reported");
+        assert_eq!(refusal, "policy");
+    }
+
+    #[test]
+    fn the_thinking_block_start_text_is_not_dropped() {
+        let codec = AnthropicCodec::new();
+        let chunk = r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"Let me verify"}}"#;
+        match codec
+            .parse_stream_chunk_events(chunk)
+            .expect("chunk must parse")
+            .into_iter()
+            .next()
+        {
+            Some(MessageStreamEvent::ReasoningText(reasoning)) => {
+                assert_eq!(reasoning.reasoning, "Let me verify");
+            }
+            other => panic!("expected ReasoningText, got {other:?}"),
         }
     }
 }

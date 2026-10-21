@@ -192,14 +192,19 @@ fn the_system_content_is_carried_once() {
                 assert_eq!(systems[0]["content"], serde_json::json!(SYSTEM));
             }
             LlmFormat::OpenaiResponse => {
-                let systems: Vec<&serde_json::Value> = body["input"]
+                // The Responses API reserves `instructions` for the system
+                // prompt; it is not an input item.
+                assert_eq!(body["instructions"], serde_json::json!(SYSTEM));
+                let roles: Vec<&str> = body["input"]
                     .as_array()
                     .expect("input")
                     .iter()
-                    .filter(|m| m["role"] == serde_json::json!("system"))
+                    .filter_map(|m| m["role"].as_str())
                     .collect();
-                assert_eq!(systems.len(), 1, "{body}");
-                assert_eq!(systems[0]["content"], serde_json::json!(SYSTEM));
+                assert!(
+                    !roles.contains(&"system"),
+                    "the system message must not stay in the input: {body}"
+                );
             }
             LlmFormat::Custom(name) => panic!("unexpected format {name}"),
         }
@@ -332,6 +337,343 @@ fn a_tool_without_parameters_declares_an_object_schema() {
         assert!(
             !text.contains("\"parameters\":null"),
             "a null schema is rejected by the providers: {body}"
+        );
+    }
+}
+
+/// A request without messages; used by the checks that only look at the
+/// response side.
+fn empty_request() -> LlmRequest {
+    LlmRequest {
+        profile_id: "p1".to_string(),
+        messages: Vec::new(),
+        parameters: None,
+        generation: None,
+        tools: None,
+        tool_call_protocol: None,
+        locked_tool_call_protocol: None,
+        violation_policy: None,
+        execution_id: None,
+        stream: None,
+        dead_loop_detection: None,
+        protocol_auto_converted: None,
+        timeout_ms: None,
+        prompt_caching: None,
+        cached_content: None,
+    }
+}
+
+/// The codec of a format, without a profile.
+fn codec_of(format: &LlmFormat) -> Arc<dyn LlmCodec> {
+    match format {
+        LlmFormat::OpenaiChat => Arc::new(OpenaiChatCodec::new()),
+        LlmFormat::OpenaiResponse => Arc::new(OpenaiResponseCodec::new()),
+        LlmFormat::Anthropic => Arc::new(AnthropicCodec::new()),
+        LlmFormat::GeminiNative => Arc::new(GeminiNativeCodec::new()),
+        LlmFormat::Custom(name) => panic!("unexpected format {name}"),
+    }
+}
+
+/// The OpenAI formats and Gemini report the same stop vocabulary; Anthropic
+/// reports the official `stop_reason` set of its own.
+#[test]
+fn the_stop_vocabulary_is_the_same_for_every_format() {
+    let bodies = [
+        (
+            LlmFormat::OpenaiChat,
+            r#"{"id":"1","model":"gpt-4o","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"f","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#,
+            Some("tool_calls"),
+        ),
+        (
+            LlmFormat::OpenaiResponse,
+            r#"{"id":"resp_1","model":"gpt-4o","status":"completed","output":[{"type":"function_call","id":"fc_1","call_id":"call_1","name":"f","arguments":"{}"}]}"#,
+            Some("tool_calls"),
+        ),
+        (
+            LlmFormat::GeminiNative,
+            r#"{"responseId":"resp_1","modelVersion":"gemini-2.5-pro","candidates":[{"content":{"parts":[{"functionCall":{"name":"f","args":{}}}]},"finishReason":"STOP"}]}"#,
+            Some("tool_calls"),
+        ),
+        // The content filter is the same value everywhere.
+        (
+            LlmFormat::OpenaiChat,
+            r#"{"id":"1","model":"gpt-4o","choices":[{"message":{"role":"assistant","content":null},"finish_reason":"content_filter"}]}"#,
+            Some("content_filter"),
+        ),
+        (
+            LlmFormat::OpenaiResponse,
+            r#"{"id":"resp_1","model":"gpt-4o","status":"incomplete","incomplete_details":{"reason":"content_filter"},"output":[]}"#,
+            Some("content_filter"),
+        ),
+        (
+            LlmFormat::GeminiNative,
+            r#"{"responseId":"resp_1","modelVersion":"gemini-2.5-pro","candidates":[{"content":{"parts":[{"text":"x"}]},"finishReason":"IMAGE_SAFETY"}]}"#,
+            Some("content_filter"),
+        ),
+    ];
+
+    for (format, body, expected) in bodies {
+        let result = codec_of(&format)
+            .parse_response(body, &empty_request())
+            .expect("must parse");
+        assert_eq!(
+            result.finish_reason.as_deref(),
+            expected,
+            "{format:?} must report {expected:?}"
+        );
+    }
+}
+
+/// A refusal is reported on the same channel by every format that has one.
+#[test]
+fn the_refusal_is_reported_on_the_same_channel() {
+    let bodies = [
+        (
+            LlmFormat::OpenaiChat,
+            r#"{"id":"1","model":"gpt-4o","choices":[{"message":{"role":"assistant","content":null,"refusal":"I cannot help with that."},"finish_reason":"stop"}]}"#,
+        ),
+        (
+            LlmFormat::OpenaiResponse,
+            r#"{"id":"resp_1","model":"gpt-4o","status":"completed","output":[{"type":"message","content":[{"type":"refusal","refusal":"I cannot help with that."}]}]}"#,
+        ),
+        (
+            LlmFormat::Anthropic,
+            r#"{"id":"msg_1","model":"claude","stop_reason":"refusal","content":[],"stop_details":{"type":"refusal","category":"general_harms","explanation":"I cannot help with that."}}"#,
+        ),
+    ];
+
+    for (format, body) in bodies {
+        let result = codec_of(&format)
+            .parse_response(body, &empty_request())
+            .expect("must parse");
+        assert_eq!(
+            result.refusal.as_deref(),
+            Some("I cannot help with that."),
+            "{format:?} must report the refusal"
+        );
+    }
+}
+
+/// The sources of a grounded answer are reported under the same metadata key
+/// by every format that has them.
+#[test]
+fn the_sources_of_a_grounded_answer_share_one_metadata_key() {
+    let bodies = [
+        (
+            LlmFormat::OpenaiChat,
+            r#"{"id":"1","model":"gpt-4o","choices":[{"message":{"role":"assistant","content":"grounded","annotations":[{"type":"url_citation","url":"https://example.com"}]},"finish_reason":"stop"}]}"#,
+        ),
+        (
+            LlmFormat::OpenaiResponse,
+            r#"{"id":"resp_1","model":"gpt-4o","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"grounded","annotations":[{"type":"url_citation","url":"https://example.com"}]}]}]}"#,
+        ),
+        (
+            LlmFormat::Anthropic,
+            r#"{"id":"msg_1","model":"claude","stop_reason":"end_turn","content":[{"type":"text","text":"grounded","citations":[{"type":"char_location","cited_text":"x"}]}]}"#,
+        ),
+    ];
+
+    for (format, body) in bodies {
+        let result = codec_of(&format)
+            .parse_response(body, &empty_request())
+            .expect("must parse");
+        let metadata = result.metadata.expect("metadata must be present");
+        let annotations = metadata
+            .get("annotations")
+            .and_then(|v| v.as_array())
+            .unwrap_or_else(|| panic!("{format:?} must report the sources"));
+        assert_eq!(annotations.len(), 1, "{format:?}");
+    }
+}
+
+/// The token counters carry the same meaning for every format, read from the
+/// official usage object of each provider.
+///
+/// The fixtures describe the same request: 100 input tokens of which 80 were
+/// served from the cache, 20 output tokens of which 6 were spent on
+/// reasoning, 120 tokens in total.
+#[test]
+fn the_token_counters_carry_the_same_meaning() {
+    let bodies = [
+        (
+            LlmFormat::OpenaiChat,
+            r#"{"id":"1","model":"gpt-4o","choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120,"completion_tokens_details":{"reasoning_tokens":6},"prompt_tokens_details":{"cached_tokens":80}}}"#,
+        ),
+        (
+            LlmFormat::OpenaiResponse,
+            r#"{"id":"resp_1","model":"gpt-4o","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"hi"}]}],"usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120,"output_tokens_details":{"reasoning_tokens":6},"input_tokens_details":{"cached_tokens":80}}}"#,
+        ),
+        (
+            LlmFormat::Anthropic,
+            r#"{"id":"msg_1","model":"claude","stop_reason":"end_turn","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":20,"output_tokens":20,"output_tokens_details":{"thinking_tokens":6},"cache_read_input_tokens":80}}"#,
+        ),
+        (
+            LlmFormat::GeminiNative,
+            r#"{"responseId":"resp_1","modelVersion":"gemini-2.5-pro","candidates":[{"content":{"parts":[{"text":"hi"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":20,"totalTokenCount":120,"thoughtsTokenCount":6,"cachedContentTokenCount":80}}"#,
+        ),
+    ];
+
+    for (format, body) in bodies {
+        let result = codec_of(&format)
+            .parse_response(body, &empty_request())
+            .expect("must parse");
+        let usage = result.usage.expect("usage must be present");
+        assert_eq!(usage.completion_tokens, 20, "{format:?}");
+        assert_eq!(usage.total_tokens, 120, "{format:?}");
+        assert_eq!(usage.reasoning_tokens, Some(6), "{format:?}");
+        assert_eq!(usage.cache_read_tokens, Some(80), "{format:?}");
+        // `prompt_tokens` keeps the scope of the provider: the OpenAI
+        // family counts the cached input into the prompt, Anthropic
+        // reports it next to it. The pricing layer resolves the
+        // difference through `CacheTokenScope`.
+        let prompt = if matches!(format, LlmFormat::Anthropic) {
+            20
+        } else {
+            100
+        };
+        assert_eq!(usage.prompt_tokens, prompt, "{format:?}");
+    }
+}
+
+/// Every format names a function tool with the shape its API defines.
+#[test]
+fn the_tool_choice_uses_the_shape_of_its_api() {
+    use llm_suite_types::llm::generation::{LlmGenerationParams, LlmToolChoice};
+
+    let generation = LlmGenerationParams {
+        tool_choice: Some(LlmToolChoice {
+            mode: None,
+            tool_name: Some("get_weather".to_string()),
+        }),
+        ..Default::default()
+    };
+
+    for (codec, mut profile) in codecs() {
+        let format = profile.format.clone();
+        profile.generation = Some(generation.clone());
+        let request = codec
+            .build_request(&conversation(), &profile)
+            .expect("must build");
+        let body = body_of(&request);
+
+        match format {
+            LlmFormat::OpenaiChat => {
+                // The Chat API nests the name under `function`.
+                assert_eq!(
+                    body["tool_choice"]["type"],
+                    serde_json::json!("function"),
+                    "{body}"
+                );
+                assert_eq!(
+                    body["tool_choice"]["function"]["name"],
+                    serde_json::json!("get_weather"),
+                    "{body}"
+                );
+            }
+            LlmFormat::OpenaiResponse => {
+                // The Responses API names the function flat.
+                assert_eq!(
+                    body["tool_choice"]["type"],
+                    serde_json::json!("function"),
+                    "{body}"
+                );
+                assert_eq!(
+                    body["tool_choice"]["name"],
+                    serde_json::json!("get_weather"),
+                    "{body}"
+                );
+                assert!(body["tool_choice"].get("function").is_none(), "{body}");
+            }
+            LlmFormat::Anthropic => {
+                assert_eq!(
+                    body["tool_choice"]["type"],
+                    serde_json::json!("tool"),
+                    "{body}"
+                );
+                assert_eq!(
+                    body["tool_choice"]["name"],
+                    serde_json::json!("get_weather"),
+                    "{body}"
+                );
+            }
+            LlmFormat::GeminiNative => {
+                let config = &body["toolConfig"]["functionCallingConfig"];
+                assert_eq!(config["mode"], serde_json::json!("ANY"), "{body}");
+                assert_eq!(
+                    config["allowedFunctionNames"],
+                    serde_json::json!(["get_weather"]),
+                    "{body}"
+                );
+            }
+            LlmFormat::Custom(name) => panic!("unexpected format {name}"),
+        }
+    }
+}
+
+/// Every format that offers a counting endpoint uses the official one and
+/// reads the official response field.
+#[test]
+fn the_count_tokens_endpoints_match_the_official_apis() {
+    for (codec, profile) in codecs() {
+        let format = profile.format.clone();
+        let request = codec
+            .build_count_tokens_request(&conversation(), &profile)
+            .expect("must not fail");
+        if matches!(format, LlmFormat::OpenaiChat) {
+            assert!(
+                request.is_none(),
+                "the Chat Completions API has no counting endpoint"
+            );
+            continue;
+        }
+        let request = request.expect("the format has a counting endpoint");
+        let url = request.url().to_string();
+        match format {
+            LlmFormat::Anthropic => assert!(url.ends_with("/messages/count_tokens"), "{url}"),
+            LlmFormat::OpenaiResponse => assert!(url.ends_with("/responses/input_tokens"), "{url}"),
+            LlmFormat::GeminiNative => assert!(url.ends_with(":countTokens"), "{url}"),
+            _ => {}
+        }
+    }
+}
+
+/// The counting response is read from the field the provider uses.
+#[test]
+fn the_count_tokens_response_is_read_from_the_official_field() {
+    let anthropic = AnthropicCodec::new();
+    let body: serde_json::Value = serde_json::from_str(r#"{"input_tokens":13}"#).unwrap();
+    assert_eq!(anthropic.parse_count_tokens_response(&body).unwrap(), 13);
+
+    let responses = OpenaiResponseCodec::new();
+    let body: serde_json::Value =
+        serde_json::from_str(r#"{"object":"response.input_tokens","input_tokens":13}"#).unwrap();
+    assert_eq!(responses.parse_count_tokens_response(&body).unwrap(), 13);
+
+    let gemini = GeminiNativeCodec::new();
+    let body: serde_json::Value = serde_json::from_str(r#"{"totalTokens":13}"#).unwrap();
+    assert_eq!(gemini.parse_count_tokens_response(&body).unwrap(), 13);
+}
+
+/// Untyped provider options reach the request body in every format.
+#[test]
+fn the_untyped_options_reach_the_request_body() {
+    let cases = [
+        (LlmFormat::OpenaiChat, "logprobs"),
+        (LlmFormat::OpenaiResponse, "truncation"),
+        (LlmFormat::Anthropic, "container"),
+        (LlmFormat::GeminiNative, "safetySettings"),
+    ];
+
+    for (format, key) in cases {
+        let mut profile = profile(format.clone(), "model-x");
+        profile.parameters = Some(serde_json::json!({ key: "value" }));
+        let request = codec_of(&format)
+            .build_request(&conversation(), &profile)
+            .expect("must build");
+        let body = body_of(&request);
+        assert!(
+            body.get(key).is_some(),
+            "{format:?} must forward the untyped option `{key}`: {body}"
         );
     }
 }

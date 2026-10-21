@@ -258,6 +258,11 @@ pub fn resolve_generation(
 }
 
 /// Parse an OpenAI-style usage object into token usage stats.
+///
+/// The cached input tokens are a subset of `prompt_tokens` in this family
+/// (`CacheTokenScope::IncludedInPrompt`), so the total is the sum of the
+/// prompt and the completion. The provider's own total wins when it is
+/// present.
 pub fn parse_openai_usage(u: &serde_json::Value) -> llm_suite_types::llm::TokenUsageStats {
     let reasoning_tokens = u
         .get("completion_tokens_details")
@@ -274,13 +279,21 @@ pub fn parse_openai_usage(u: &serde_json::Value) -> llm_suite_types::llm::TokenU
         .and_then(|d| d.get("cache_write_tokens"))
         .and_then(|r| r.as_u64())
         .map(|r| r as u32);
+    let prompt_tokens = u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let completion_tokens = u
+        .get("completion_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
     llm_suite_types::llm::TokenUsageStats {
-        prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-        completion_tokens: u
-            .get("completion_tokens")
+        prompt_tokens,
+        completion_tokens,
+        // The provider owns the total; without one it is the sum of the
+        // two counters. The cached tokens are already part of the prompt.
+        total_tokens: u
+            .get("total_tokens")
             .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32,
-        total_tokens: u.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            .unwrap_or(u64::from(prompt_tokens) + u64::from(completion_tokens))
+            as u32,
         reasoning_tokens,
         cache_read_tokens,
         cache_write_tokens,
@@ -402,7 +415,10 @@ pub fn parse_openai_chat_response(body: &str) -> LlmResult<LlmResponseType> {
         .and_then(|a| a.as_array())
         .filter(|a| !a.is_empty())
     {
-        metadata.insert("annotations".to_string(), serde_json::json!(annotations));
+        metadata.insert(
+            llm_suite_types::llm::ANNOTATIONS_KEY.to_string(),
+            serde_json::json!(annotations),
+        );
     }
     let metadata = if metadata.is_empty() {
         None
@@ -463,20 +479,9 @@ pub fn parse_openai_stream_chunk(data: &str) -> LlmResult<Vec<MessageStreamEvent
         .get("choices")
         .and_then(|v| v.as_array())
         .unwrap_or(&empty_choices);
+    let choice = choices.first();
 
-    // A chunk without choices carries only usage (stream_options.include_usage).
-    if choices.is_empty() {
-        if let Some(usage) = json.get("usage") {
-            events.push(MessageStreamEvent::Usage(
-                llm_suite_types::llm::MessageStreamUsage {
-                    usage: parse_openai_usage(usage),
-                },
-            ));
-        }
-        return Ok(events);
-    }
-
-    if let Some(choice) = choices.first() {
+    if let Some(choice) = choice {
         if let Some(delta) = choice.get("delta") {
             if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
                 events.push(MessageStreamEvent::Text(
@@ -539,6 +544,22 @@ pub fn parse_openai_stream_chunk(data: &str) -> LlmResult<Vec<MessageStreamEvent
                 }
             }
         }
+    }
+
+    // The usage block may ride on any chunk. OpenAI sends it in a chunk
+    // without choices, but compatible gateways attach it to the last chunk
+    // that also carries the finish reason; reading it only from the
+    // choice-less chunk would lose the counters there. It is emitted before
+    // the terminal event so the accumulator sees the numbers in time.
+    if let Some(usage) = json.get("usage") {
+        events.push(MessageStreamEvent::Usage(
+            llm_suite_types::llm::MessageStreamUsage {
+                usage: parse_openai_usage(usage),
+            },
+        ));
+    }
+
+    if let Some(choice) = choice {
         // Provider-native terminal values passed through untouched; any other
         // value (including a missing one) leaves the stream open. The set is
         // the official `FinishReason` enumeration.
@@ -799,6 +820,43 @@ mod tests {
             }
             other => panic!("expected Usage event, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn stream_usage_next_to_the_choices_is_not_dropped() {
+        // Compatible gateways attach the usage to the last chunk that also
+        // carries the finish reason; the counters must survive that.
+        let chunk = r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#;
+        let events = parse_openai_stream_chunk(chunk).expect("chunk must parse");
+        let usage = events
+            .iter()
+            .find_map(|e| match e {
+                MessageStreamEvent::Usage(u) => Some(&u.usage),
+                _ => None,
+            })
+            .expect("the usage must not be dropped");
+        assert_eq!(usage.prompt_tokens, 10);
+        assert_eq!(usage.completion_tokens, 5);
+        assert_eq!(usage.total_tokens, 15);
+        assert!(
+            matches!(events.last(), Some(MessageStreamEvent::End(_))),
+            "the usage must arrive before the terminal event"
+        );
+    }
+
+    #[test]
+    fn usage_without_a_provider_total_is_summed() {
+        // The cached tokens are already part of the prompt in this family,
+        // so the total is the sum of the two counters.
+        let usage = parse_openai_usage(&serde_json::json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "prompt_tokens_details": {"cached_tokens": 80}
+        }));
+        assert_eq!(usage.prompt_tokens, 100);
+        assert_eq!(usage.completion_tokens, 20);
+        assert_eq!(usage.total_tokens, 120);
+        assert_eq!(usage.cache_read_tokens, Some(80));
     }
 
     #[test]

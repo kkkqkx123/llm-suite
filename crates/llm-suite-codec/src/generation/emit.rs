@@ -119,9 +119,10 @@ fn anthropic_service_tier(tier: LlmServiceTier) -> LlmResult<&'static str> {
 ///
 /// The `max_tokens` value is emitted as `max_tokens` or
 /// `max_completion_tokens` according to the explicit `max_token_field`
-/// configuration (defaulting to `max_tokens`). The model name is never
-/// inspected: which field a backend accepts is a deployment decision that
-/// belongs to profile configuration.
+/// configuration (defaulting to `max_completion_tokens`, the field the
+/// official API recommends). The model name is never inspected: which field
+/// a backend accepts is a deployment decision that belongs to profile
+/// configuration.
 pub fn apply_openai_chat(body: &mut serde_json::Value, gen: &LlmGenerationParams) -> LlmResult<()> {
     if let Some(max_tokens) = gen.max_tokens {
         let key = gen.max_token_field.unwrap_or_default().as_str();
@@ -178,21 +179,17 @@ pub fn apply_openai_chat(body: &mut serde_json::Value, gen: &LlmGenerationParams
                 body["response_format"] = serde_json::json!({"type": "json_object"});
             }
             Some(ResponseFormatKind::JsonSchema) | None => {
-                let mut obj = serde_json::Map::new();
-                obj.insert("type".to_string(), serde_json::json!("json_schema"));
-                if let Some(ref schema) = format.schema {
-                    obj.insert(
-                        "json_schema".to_string(),
-                        serde_json::json!({
-                            "name": format.name.clone().unwrap_or_else(|| "response".to_string()),
-                            "schema": schema,
-                            "strict": format.strict.unwrap_or(false),
-                        }),
-                    );
-                } else if let Some(ref name) = format.name {
-                    obj.insert("name".to_string(), serde_json::json!(name));
-                }
-                body["response_format"] = serde_json::Value::Object(obj);
+                // The official shape nests the definition under
+                // `json_schema`; `name` and `schema` are both required
+                // there, a bare `name` next to the type is not read.
+                body["response_format"] = serde_json::json!({
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": format.name.clone().unwrap_or_else(|| "response".to_string()),
+                        "schema": format.schema.clone().unwrap_or_else(|| serde_json::json!({"type": "object"})),
+                        "strict": format.strict.unwrap_or(false),
+                    }
+                });
             }
         }
     }
@@ -312,6 +309,19 @@ pub fn apply_anthropic(body: &mut serde_json::Value, gen: &LlmGenerationParams) 
     if let Some(ref stop) = gen.stop {
         body["stop_sequences"] = serde_json::json!(stop);
     }
+    // The official SDK no longer types the sampling parameters, but the API
+    // still accepts them for the models that use them; the SDK sends them
+    // through the request body. They are therefore sent here as well
+    // instead of being dropped.
+    if let Some(temperature) = gen.temperature {
+        body["temperature"] = serde_json::json!(temperature);
+    }
+    if let Some(top_p) = gen.top_p {
+        body["top_p"] = serde_json::json!(top_p);
+    }
+    if let Some(top_k) = gen.top_k {
+        body["top_k"] = serde_json::json!(top_k);
+    }
     if let Some(ref tier) = gen.service_tier {
         body["service_tier"] = serde_json::json!(anthropic_service_tier(*tier)?);
     }
@@ -380,11 +390,6 @@ pub fn apply_anthropic(body: &mut serde_json::Value, gen: &LlmGenerationParams) 
     }
     if gen.seed.is_some() {
         tracing::warn!("seed is not supported by Anthropic and was ignored");
-    }
-    if gen.temperature.is_some() || gen.top_p.is_some() || gen.top_k.is_some() {
-        tracing::warn!(
-            "sampling parameters are not supported by the Anthropic Messages API and were ignored"
-        );
     }
     if gen.frequency_penalty.is_some() || gen.presence_penalty.is_some() {
         tracing::warn!(

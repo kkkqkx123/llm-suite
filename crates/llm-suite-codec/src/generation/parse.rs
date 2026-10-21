@@ -246,10 +246,31 @@ fn parse_thinking_object(value: &serde_json::Value, out: &mut LlmThinkingConfig)
 }
 
 pub fn parse_legacy_generation(value: &serde_json::Value) -> LlmGenerationParams {
-    let mut out = LlmGenerationParams::default();
     let Some(map) = value.as_object() else {
-        return out;
+        return LlmGenerationParams::default();
     };
+    let mut out = parse_generation_map(map);
+    // The Gemini request envelope carries the generation parameters inside
+    // `generationConfig`. The same keys are read from there, so one
+    // parameter set describes a request for every format.
+    if let Some(config) =
+        get_key(map, &["generationConfig", "generation_config"]).and_then(|v| v.as_object())
+    {
+        let mut nested = parse_generation_map(config);
+        // The outer keys win over the nested ones.
+        nested.merge_over(&out);
+        out = nested;
+    }
+    out
+}
+
+/// Read the generation parameters of one parameter map.
+///
+/// The same keys are used by every format; the map may be the parameter
+/// object itself or a provider block inside it (the Gemini
+/// `generationConfig`).
+fn parse_generation_map(map: &serde_json::Map<String, serde_json::Value>) -> LlmGenerationParams {
+    let mut out = LlmGenerationParams::default();
 
     if let Some(v) = get_key(map, &["temperature"]) {
         if let Some(temp) = as_f64(v) {
@@ -336,6 +357,21 @@ pub fn parse_legacy_generation(value: &serde_json::Value) -> LlmGenerationParams
     if let Some(v) = get_key(map, &["response_format", "responseFormat"]) {
         if let Some(format) = parse_response_format(v) {
             out.response_format = Some(format);
+        }
+    }
+    // The Gemini request block names the structured-output settings
+    // `responseMimeType` and `responseSchema`.
+    if out.response_format.is_none() {
+        if let Some(v) = get_key(map, &["responseMimeType", "response_mime_type"]) {
+            if v.as_str() == Some("application/json") {
+                let schema = get_key(map, &["responseSchema", "response_schema"]).cloned();
+                out.response_format = Some(LlmResponseFormat {
+                    kind: Some(ResponseFormatKind::JsonSchema),
+                    name: None,
+                    schema,
+                    strict: None,
+                });
+            }
         }
     }
     if let Some(v) = get_key(
@@ -614,5 +650,31 @@ pub fn is_typed_param_key(key: &str) -> bool {
             | "budgetTokens"
             | "include_thoughts"
             | "includeThoughts"
+            // The Gemini generation block is read by the resolver; it never
+            // reaches the request body as an untyped key.
+            | "generationConfig"
+            | "generation_config"
+            // Members of the Gemini generation block. They belong inside
+            // that block; at the top level of a request body the providers
+            // reject them as unknown fields. The ones the unified parameter
+            // model can express are read by the resolver.
+            | "responseMimeType"
+            | "response_mime_type"
+            | "responseSchema"
+            | "response_schema"
+            | "responseJsonSchema"
+            | "response_json_schema"
+            | "candidateCount"
+            | "candidate_count"
+            | "responseLogprobs"
+            | "response_logprobs"
+            | "responseModalities"
+            | "response_modalities"
+            | "mediaResolution"
+            | "media_resolution"
+            | "speechConfig"
+            | "speech_config"
+            | "imageConfig"
+            | "image_config"
     )
 }

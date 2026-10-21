@@ -6,7 +6,7 @@ use llm_suite_codec::error::LlmError;
 use llm_suite_codec::LlmCodec;
 use llm_suite_types::llm::{
     MessageStreamEvent, MessageStreamFinal, MessageStreamInputJson, MessageStreamReasoning,
-    MessageStreamStart, MessageStreamText, TokenUsageStats,
+    MessageStreamStart, MessageStreamText, TokenUsageStats, ANNOTATIONS_KEY,
 };
 use llm_suite_types::message::{
     LlmFunctionCall, LlmToolCall, Message, MessageContent, MessageContentValue, MessageRole,
@@ -154,6 +154,7 @@ pub struct MessageAccumulator {
     start_emitted: bool,
     tool_calls: BTreeMap<usize, PartialToolCall>,
     content_blocks: Vec<MessageContent>,
+    annotations: Vec<serde_json::Value>,
     usage: Option<TokenUsageStats>,
     dead_loop_detector: Option<DeadLoopDetector>,
     final_emitted: bool,
@@ -184,6 +185,7 @@ impl MessageAccumulator {
             start_emitted: false,
             tool_calls: BTreeMap::new(),
             content_blocks: Vec::new(),
+            annotations: Vec::new(),
             usage: None,
             dead_loop_detector,
             final_emitted: false,
@@ -343,6 +345,12 @@ impl MessageAccumulator {
                 });
                 Some(MessageStreamEvent::RedactedThinking(redacted))
             }
+            MessageStreamEvent::Annotation(annotation) => {
+                // The sources of a grounded answer reach the final message
+                // under the same key the non-streaming path uses.
+                self.annotations.push(annotation.annotation.clone());
+                Some(MessageStreamEvent::Annotation(annotation))
+            }
             MessageStreamEvent::Usage(usage_event) => {
                 // Field-wise merge: providers deliver usage across several
                 // events (Anthropic's `message_start` carries input tokens,
@@ -422,7 +430,7 @@ impl MessageAccumulator {
                     }
                     MessageContentValue::Rich(blocks)
                 };
-                let metadata = self.tool_call_signatures(&call_signatures);
+                let metadata = self.message_metadata(&call_signatures);
 
                 let message = Message {
                     id: llm_suite_types::Id::new(),
@@ -465,6 +473,24 @@ impl MessageAccumulator {
             // Pass through other events unchanged
             _ => Some(event),
         }
+    }
+
+    /// The metadata of the final message: the provider signatures of the
+    /// tool calls and the sources of a grounded answer. `None` when the
+    /// turn carries neither.
+    fn message_metadata(
+        &self,
+        signatures: &[Option<String>],
+    ) -> Option<std::collections::HashMap<String, serde_json::Value>> {
+        let mut metadata = self.tool_call_signatures(signatures);
+        if self.annotations.is_empty() {
+            return metadata;
+        }
+        metadata.get_or_insert_with(Default::default).insert(
+            ANNOTATIONS_KEY.to_string(),
+            serde_json::json!(self.annotations),
+        );
+        metadata
     }
 
     /// The provider signatures of the assembled tool calls, one entry per
@@ -806,6 +832,42 @@ mod tests {
         );
         assert_eq!(usage.cache_read_tokens, Some(3));
         assert_eq!(usage.reasoning_tokens, Some(2));
+    }
+
+    #[test]
+    fn the_sources_of_a_grounded_answer_land_on_the_final_message() {
+        use llm_suite_types::llm::MessageStreamAnnotation;
+
+        let mut acc = MessageAccumulator::new(None);
+        acc.push(MessageStreamEvent::Annotation(MessageStreamAnnotation {
+            annotation: serde_json::json!({"type": "url_citation", "url": "https://a.example"}),
+        }));
+        acc.push(MessageStreamEvent::Annotation(MessageStreamAnnotation {
+            annotation: serde_json::json!({"type": "url_citation", "url": "https://b.example"}),
+        }));
+        acc.push(MessageStreamEvent::Text(MessageStreamText {
+            text: "grounded".to_string(),
+            snapshot: String::new(),
+        }));
+
+        let final_event = acc.push(MessageStreamEvent::End(
+            llm_suite_types::llm::MessageStreamEnd {},
+        ));
+        let MessageStreamEvent::FinalMessage(final_msg) = final_event.unwrap() else {
+            panic!("expected FinalMessage");
+        };
+        let metadata = final_msg
+            .message
+            .metadata
+            .expect("the sources must reach the final message");
+        let annotations = metadata["annotations"]
+            .as_array()
+            .expect("the sources must be a list");
+        assert_eq!(annotations.len(), 2);
+        assert_eq!(
+            annotations[0]["url"],
+            serde_json::json!("https://a.example")
+        );
     }
 
     #[test]

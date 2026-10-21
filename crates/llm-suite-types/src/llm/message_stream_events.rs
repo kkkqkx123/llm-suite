@@ -18,6 +18,7 @@ pub enum MessageStreamEventType {
     Refusal,
     Usage,
     ToolCallDelta,
+    Annotation,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -38,6 +39,7 @@ pub enum MessageStreamEvent {
     Refusal(MessageStreamRefusal),
     Usage(MessageStreamUsage),
     ToolCallDelta(MessageStreamToolCallDelta),
+    Annotation(MessageStreamAnnotation),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -201,3 +203,19 @@ pub struct MessageStreamToolCallDelta {
 /// Metadata key holding the provider signatures attached to the tool calls
 /// of a reply, one entry per tool call in the order the calls are reported.
 pub const THOUGHT_SIGNATURES_KEY: &str = "thought_signatures";
+
+/// Metadata key holding the sources of a grounded answer (web-search
+/// citations, file citations). Every format reports them under this key so
+/// the sources are reachable the same way regardless of the provider.
+pub const ANNOTATIONS_KEY: &str = "annotations";
+
+/// A source of a grounded answer, reported while the answer is streamed.
+///
+/// Providers name the concept differently (OpenAI: `annotations`, Anthropic:
+/// `citations`), but they carry the same thing: where the generated text
+/// came from. The payload is kept provider-native so no information is lost
+/// on the way through.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MessageStreamAnnotation {
+    pub annotation: serde_json::Value,
+}

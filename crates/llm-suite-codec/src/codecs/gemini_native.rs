@@ -336,13 +336,24 @@ impl GeminiNativeCodec {
 
     /// Map a raw Gemini `finishReason` onto the unified finish-reason
     /// vocabulary used across codecs.
+    ///
+    /// The whole safety family maps to `content_filter`: Gemini splits it
+    /// over many members (`SAFETY`, `IMAGE_SAFETY`, `NO_IMAGE`, …) while the
+    /// OpenAI formats report a single value for the same situation.
     fn normalize_finish_reason(raw: &str) -> String {
         match raw {
             "STOP" => "stop".to_string(),
             "MAX_TOKENS" => "length".to_string(),
-            "SAFETY" | "RECITATION" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "SPII" => {
-                "content_filter".to_string()
-            }
+            "SAFETY"
+            | "RECITATION"
+            | "BLOCKLIST"
+            | "PROHIBITED_CONTENT"
+            | "SPII"
+            | "IMAGE_SAFETY"
+            | "IMAGE_PROHIBITED_CONTENT"
+            | "NO_IMAGE"
+            | "IMAGE_RECITATION"
+            | "IMAGE_OTHER" => "content_filter".to_string(),
             other => other.to_ascii_lowercase(),
         }
     }
@@ -368,23 +379,31 @@ impl GeminiNativeCodec {
                     .unwrap_or(0);
                 (sum > 0).then_some(sum as u32)
             });
+        let prompt_tokens = u
+            .get("promptTokenCount")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+        let completion_tokens = u
+            .get("candidatesTokenCount")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+        let reasoning_tokens = u
+            .get("thoughtsTokenCount")
+            .and_then(|v| v.as_u64())
+            .map(|r| r as u32);
         llm_suite_types::llm::TokenUsageStats {
-            prompt_tokens: u
-                .get("promptTokenCount")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32,
-            completion_tokens: u
-                .get("candidatesTokenCount")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32,
-            total_tokens: u
-                .get("totalTokenCount")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32,
-            reasoning_tokens: u
-                .get("thoughtsTokenCount")
-                .and_then(|v| v.as_u64())
-                .map(|r| r as u32),
+            prompt_tokens,
+            completion_tokens,
+            // The provider owns the total; without one it is the sum of the
+            // counters it reports. The thoughts are billed on top of the
+            // candidates, and the cached tokens are already part of the
+            // prompt.
+            total_tokens: u.get("totalTokenCount").and_then(|v| v.as_u64()).unwrap_or(
+                u64::from(prompt_tokens)
+                    + u64::from(completion_tokens)
+                    + u64::from(reasoning_tokens.unwrap_or(0)),
+            ) as u32,
+            reasoning_tokens,
             cache_read_tokens,
             cache_write_tokens: None,
             prompt_tokens_cost: None,
@@ -707,6 +726,10 @@ impl GeminiNativeCodec {
             body["cachedContent"] = serde_json::json!(cached_content);
         }
 
+        // Untyped provider options (`safetySettings`, `labels`, …) reach the
+        // request body like they do in the other formats.
+        super::shared::merge_and_apply_params(&mut body, profile, &request.parameters);
+
         super::shared::apply_custom_body(&mut body, profile);
 
         Ok(body)
@@ -853,7 +876,17 @@ impl GeminiNativeCodec {
         let finish_reason = first_candidate
             .and_then(|c| c.get("finishReason"))
             .and_then(|v| v.as_str())
-            .map(Self::normalize_finish_reason);
+            .map(Self::normalize_finish_reason)
+            .map(|reason| {
+                // Gemini has no tool-call finish reason: a turn that ends
+                // with a function call is reported as `tool_calls`, the
+                // value the OpenAI formats report for the same situation.
+                if reason == "stop" && !tool_calls.is_empty() {
+                    "tool_calls".to_string()
+                } else {
+                    reason
+                }
+            });
 
         let mut metadata = std::collections::HashMap::new();
         if let Some(fr) = first_candidate
@@ -1929,6 +1962,108 @@ mod tests {
         assert_eq!(
             result.metadata.as_ref().unwrap()["thought_signatures"],
             serde_json::json!(["sig-1"])
+        );
+    }
+
+    #[test]
+    fn the_whole_safety_family_reports_the_content_filter() {
+        let codec = GeminiNativeCodec::new();
+        for raw in [
+            "SAFETY",
+            "RECITATION",
+            "BLOCKLIST",
+            "PROHIBITED_CONTENT",
+            "SPII",
+            "IMAGE_SAFETY",
+            "IMAGE_PROHIBITED_CONTENT",
+            "NO_IMAGE",
+            "IMAGE_RECITATION",
+            "IMAGE_OTHER",
+        ] {
+            let body = format!(
+                r#"{{"candidates":[{{"content":{{"parts":[{{"text":"x"}}]}},"finishReason":"{raw}"}}]}}"#
+            );
+            let result = codec
+                .parse_response(&body, &request(vec![], None))
+                .expect("must parse");
+            assert_eq!(
+                result.finish_reason.as_deref(),
+                Some("content_filter"),
+                "{raw} must report the content filter"
+            );
+        }
+
+        // The other official reasons keep their own meaning.
+        let body =
+            r#"{"candidates":[{"content":{"parts":[{"text":"x"}]},"finishReason":"MAX_TOKENS"}]}"#;
+        let result = codec
+            .parse_response(body, &request(vec![], None))
+            .expect("must parse");
+        assert_eq!(result.finish_reason.as_deref(), Some("length"));
+    }
+
+    #[test]
+    fn untyped_provider_options_reach_the_request_body() {
+        let codec = GeminiNativeCodec::new();
+        let mut req = request(vec![], None);
+        req.parameters = Some(serde_json::json!({
+            "safetySettings": [{"category": "HARM_CATEGORY_HATE_SPEECH"}]
+        }));
+        let body = codec.build_body(&req, &profile()).expect("must build");
+        assert_eq!(
+            body["safetySettings"][0]["category"],
+            serde_json::json!("HARM_CATEGORY_HATE_SPEECH")
+        );
+    }
+
+    #[test]
+    fn the_official_generation_config_block_is_parsed_not_overwritten() {
+        let codec = GeminiNativeCodec::new();
+        let mut req = request(vec![], None);
+        req.parameters = Some(serde_json::json!({
+            "generationConfig": {
+                "temperature": 0.4,
+                "maxOutputTokens": 256,
+                "stopSequences": ["END"]
+            }
+        }));
+        let body = codec.build_body(&req, &profile()).expect("must build");
+        assert_eq!(
+            body["generationConfig"]["temperature"],
+            serde_json::json!(0.4)
+        );
+        assert_eq!(
+            body["generationConfig"]["maxOutputTokens"],
+            serde_json::json!(256)
+        );
+        assert_eq!(
+            body["generationConfig"]["stopSequences"],
+            serde_json::json!(["END"])
+        );
+        assert!(
+            body.get("generationConfig").is_none() || body["generationConfig"].is_object(),
+            "the resolved configuration must survive"
+        );
+    }
+
+    #[test]
+    fn the_generation_members_never_reach_the_request_envelope() {
+        // The generation members belong inside `generationConfig`; at the
+        // top level the API rejects them as unknown fields.
+        let codec = GeminiNativeCodec::new();
+        let mut req = request(vec![], None);
+        req.parameters = Some(serde_json::json!({
+            "responseMimeType": "application/json",
+            "responseSchema": {"type": "object"},
+            "candidateCount": 2
+        }));
+        let body = codec.build_body(&req, &profile()).expect("must build");
+        for key in ["responseMimeType", "responseSchema", "candidateCount"] {
+            assert!(body.get(key).is_none(), "`{key}` must not leak: {body}");
+        }
+        assert_eq!(
+            body["generationConfig"]["responseMimeType"],
+            serde_json::json!("application/json")
         );
     }
 }
