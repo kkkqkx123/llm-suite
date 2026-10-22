@@ -93,10 +93,7 @@ pub struct NormalizedUsage {
 /// the provider bills them on top of the completion. Malformed reports
 /// (a cache count larger than the prompt) never produce a negative input:
 /// the subtraction saturates at zero.
-pub fn normalize_usage(
-    usage: &TokenUsageStats,
-    accounting: TokenAccounting,
-) -> NormalizedUsage {
+pub fn normalize_usage(usage: &TokenUsageStats, accounting: TokenAccounting) -> NormalizedUsage {
     let cache_read = u64::from(usage.cache_read_tokens.unwrap_or(0));
     let cache_write = u64::from(usage.cache_write_tokens.unwrap_or(0));
     let reasoning = u64::from(usage.reasoning_tokens.unwrap_or(0));
@@ -289,10 +286,7 @@ mod tests {
             &LlmFormat::Anthropic,
             Some("exec-1".to_string()),
         );
-        let report = LlmUsageReport::from_usage(
-            context,
-            usage(10, 20, None, Some(80), Some(15)),
-        );
+        let report = LlmUsageReport::from_usage(context, usage(10, 20, None, Some(80), Some(15)));
         assert!(!report.estimated);
         assert_eq!(report.context.format.as_deref(), Some("ANTHROPIC"));
         assert_eq!(report.normalized().total_tokens, 125);
