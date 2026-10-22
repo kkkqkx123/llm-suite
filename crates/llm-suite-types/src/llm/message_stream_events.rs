@@ -22,6 +22,9 @@ pub enum MessageStreamEventType {
     Annotation,
 }
 
+// Event payloads are plain serde DTOs deserialized once per stream item, so
+// the 200+ byte `FinalMessage` variant never sits in a hot loop buffer.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "event_type", rename_all = "snake_case")]
 pub enum MessageStreamEvent {
