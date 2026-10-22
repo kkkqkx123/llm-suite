@@ -103,6 +103,7 @@ pub(crate) fn rich_tool_msg() -> Message {
                 tool_result: llm_suite_types::message::ToolResultContent {
                     tool_use_id: "call_1".to_string(),
                     content: "sunny".to_string(),
+                    blocks: None,
                     is_error: Some(true),
                 },
             },

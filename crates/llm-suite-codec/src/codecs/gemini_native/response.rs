@@ -50,6 +50,9 @@ pub fn parse_gemini_response(body: &str) -> LlmResult<LlmResponseType> {
     let mut text_content = String::new();
     let mut reasoning_content: Option<String> = None;
     let mut tool_calls = Vec::new();
+    // Generated media parts (inlineData / fileData) preserved as rich
+    // content blocks on the assistant message.
+    let mut media_blocks: Vec<llm_suite_types::message::MessageContent> = Vec::new();
     // One entry per tool call; the signature the provider attached to the
     // function call has to travel back with that call.
     let mut thought_signatures: Vec<Option<String>> = Vec::new();
@@ -66,6 +69,40 @@ pub fn parse_gemini_response(body: &str) -> LlmResult<LlmResponseType> {
                         }
                         Part::Text { text } => {
                             text_content.push_str(&text);
+                        }
+                        Part::Inline {
+                            media_type,
+                            data,
+                            uri,
+                        } => {
+                            // Generated media (images, audio, …) comes back
+                            // as ordinary parts; keep it on the message as
+                            // rich content so it is not dropped.
+                            let block = match (data, uri) {
+                                (Some(data), _) => {
+                                    let url = format!("data:{media_type};base64,{data}");
+                                    llm_suite_types::message::MessageContent::ImageUrl {
+                                        image_url:
+                                            llm_suite_types::message::ImageUrlContent {
+                                                url,
+                                                detail: None,
+                                                file_id: None,
+                                            },
+                                    }
+                                }
+                                (None, Some(uri)) => {
+                                    llm_suite_types::message::MessageContent::ImageUrl {
+                                        image_url:
+                                            llm_suite_types::message::ImageUrlContent {
+                                                url: uri,
+                                                detail: None,
+                                                file_id: None,
+                                            },
+                                    }
+                                }
+                                (None, None) => continue,
+                            };
+                            media_blocks.push(block);
                         }
                         Part::FunctionCall {
                             name,
@@ -116,7 +153,20 @@ pub fn parse_gemini_response(body: &str) -> LlmResult<LlmResponseType> {
     let message = llm_suite_types::message::Message {
         id: llm_suite_types::Id::new(),
         role: llm_suite_types::message::MessageRole::Assistant,
-        content: llm_suite_types::message::MessageContentValue::Text(text_content.clone()),
+        // Generated media rides on the message as rich blocks; a response
+        // without media stays the plain-text shorthand.
+        content: if media_blocks.is_empty() {
+            llm_suite_types::message::MessageContentValue::Text(text_content.clone())
+        } else {
+            let mut blocks = Vec::new();
+            if !text_content.is_empty() {
+                blocks.push(llm_suite_types::message::MessageContent::Text {
+                    text: text_content.clone(),
+                });
+            }
+            blocks.extend(media_blocks);
+            llm_suite_types::message::MessageContentValue::Rich(blocks)
+        },
         timestamp: llm_suite_common::time::now(),
         tool_call_id: None,
         tool_name: None,
@@ -362,5 +412,32 @@ mod tests {
             contents[1]["parts"][0]["functionResponse"]["name"],
             serde_json::json!("get_weather")
         );
+    }
+
+    #[test]
+    fn an_inline_data_part_is_kept_as_a_media_block() {
+        let body = r#"{
+            "candidates": [{"content": {"parts": [
+                {"text": "here it is"},
+                {"inlineData": {"mimeType": "image/png", "data": "QUJD"}}
+            ]}, "finishReason": "STOP"}]
+        }"#;
+        let result = parse_gemini_response(body).expect("must parse");
+        let blocks = match &result.message.content {
+            llm_suite_types::message::MessageContentValue::Rich(blocks) => blocks,
+            other => panic!("expected rich content, got {other:?}"),
+        };
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(&blocks[0], llm_suite_types::message::MessageContent::Text { .. }));
+        match &blocks[1] {
+            llm_suite_types::message::MessageContent::ImageUrl { image_url } => {
+                assert_eq!(
+                    image_url.url,
+                    "data:image/png;base64,QUJD",
+                    "the inline blob becomes a data URI"
+                );
+            }
+            other => panic!("expected ImageUrl, got {other:?}"),
+        }
     }
 }

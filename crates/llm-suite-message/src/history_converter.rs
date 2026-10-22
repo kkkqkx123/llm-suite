@@ -293,6 +293,7 @@ mod tests {
                     image_url: llm_suite_types::message::ImageUrlContent {
                         url: "https://e.com/a.png".to_string(),
                         detail: None,
+                        file_id: None,
                     },
                 },
             ]),

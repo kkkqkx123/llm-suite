@@ -18,6 +18,6 @@ pub mod tool;
 pub use common::{Id, Metadata, Timestamp};
 pub use error::{Error, Result};
 pub use message::{
-    ImageUrlContent, LlmFunctionCall, LlmToolCall, Message, MessageContent, MessageContentValue,
-    MessageRole, ToolResultContent, ToolUseContent,
+    ImageUrlContent, InputAudioContent, FileContent, FileSource, LlmFunctionCall, LlmToolCall,
+    Message, MessageContent, MessageContentValue, MessageRole, ToolResultContent, ToolUseContent,
 };

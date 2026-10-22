@@ -56,6 +56,37 @@ pub fn resolve_image_payload(url: &str) -> LlmResult<ResolvedImage> {
     }
 }
 
+/// Validate an image `detail` hint against the values the OpenAI wire
+/// formats accept (`auto` | `low` | `high` | `original`).
+pub fn validate_detail(detail: &str) -> LlmResult<()> {
+    match detail {
+        "auto" | "low" | "high" | "original" => Ok(()),
+        other => Err(LlmError::ConfigError(format!(
+            "invalid image detail `{other}` (expected auto|low|high|original)"
+        ))),
+    }
+}
+
+/// Whether a remote reference can ride on Gemini's `fileData.fileUri`.
+///
+/// The Gemini API only accepts `gs://` URIs, Files API URIs and YouTube
+/// URLs here — an arbitrary public https URL is rejected server-side and
+/// must be inlined as a data URI (or uploaded via the Files API) instead.
+pub fn is_gemini_file_uri(url: &str) -> bool {
+    if url.starts_with("gs://") {
+        return true;
+    }
+    if url.starts_with("https://") {
+        let host_path_ok = url.contains("generativelanguage.googleapis.com")
+            && url.contains("/files/");
+        let youtube_ok = url.starts_with("https://youtube.com/")
+            || url.starts_with("https://www.youtube.com/")
+            || url.starts_with("https://youtu.be/");
+        return host_path_ok || youtube_ok;
+    }
+    false
+}
+
 /// Infer an image media type from a URL: data URI prefix first, then file
 /// extension. Falls back to `image/png`.
 pub fn guess_image_media_type(url: &str) -> String {

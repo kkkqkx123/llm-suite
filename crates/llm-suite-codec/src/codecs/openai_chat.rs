@@ -59,13 +59,13 @@ impl OpenaiChatCodec {
                 llm_suite_tool_call::tool::protocol::extract_system_message(&request.messages);
             let content = shared::text_mode_system_content(request);
             let history = shared::convert_history_for_text_mode(&filtered, request);
-            let mut converted = messages::convert_openai_messages(&history);
+            let mut converted = messages::convert_openai_messages(&history)?;
             if !content.is_empty() {
                 converted.insert(0, serde_json::json!({"role": "system", "content": content}));
             }
             converted
         } else {
-            messages::convert_openai_messages(&request.messages)
+            messages::convert_openai_messages(&request.messages)?
         };
 
         let mut body = serde_json::json!({

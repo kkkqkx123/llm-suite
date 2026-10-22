@@ -29,7 +29,7 @@ pub fn build_body(request: &LlmRequest, profile: &LlmProfile) -> LlmResult<serde
 
     let mut body = serde_json::json!({
         "model": profile.model,
-        "input": messages::convert_messages(&history),
+        "input": messages::convert_messages(&history)?,
     });
 
     if !instructions.is_empty() {
@@ -67,7 +67,7 @@ pub fn build_count_tokens_body(
 
     let mut body = serde_json::json!({
         "model": profile.model,
-        "input": messages::convert_messages(&history),
+        "input": messages::convert_messages(&history)?,
     });
 
     if !instructions.is_empty() {

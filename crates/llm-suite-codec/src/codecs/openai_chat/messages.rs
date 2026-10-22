@@ -1,5 +1,7 @@
 //! Internal message conversion into OpenAI Chat Completions `messages`.
 
+use crate::codecs::helpers::validate_detail;
+use crate::error::{LlmError, LlmResult};
 use llm_suite_types::message::{Message, MessageContent, MessageContentValue, MessageRole};
 
 /// Convert internal messages into OpenAI Chat Completions `messages`.
@@ -10,7 +12,7 @@ use llm_suite_types::message::{Message, MessageContent, MessageContentValue, Mes
 /// messages. This converter folds `ToolUse` rich blocks into `tool_calls` and
 /// emits `ToolResult` rich blocks as separate `tool` messages appended right
 /// after their source message (the canonical OpenAI ordering).
-pub fn convert_openai_messages(messages: &[Message]) -> Vec<serde_json::Value> {
+pub fn convert_openai_messages(messages: &[Message]) -> LlmResult<Vec<serde_json::Value>> {
     let mut out: Vec<serde_json::Value> = Vec::new();
 
     for msg in messages {
@@ -62,9 +64,43 @@ pub fn convert_openai_messages(messages: &[Message]) -> Vec<serde_json::Value> {
                                 "image_url": {"url": image_url.url}
                             });
                             if let Some(ref detail) = image_url.detail {
+                                validate_detail(detail)?;
                                 img["image_url"]["detail"] = serde_json::json!(detail);
                             }
                             content.push(img);
+                        }
+                        MessageContent::InputAudio { input_audio } => {
+                            has_content = true;
+                            content.push(serde_json::json!({
+                                "type": "input_audio",
+                                "input_audio": {
+                                    "data": input_audio.data,
+                                    "format": input_audio.format,
+                                }
+                            }));
+                        }
+                        MessageContent::FileInput { file } => {
+                            // Chat `file` parts carry a file_id or base64
+                            // file_data; a remote URL has no wire form here.
+                            has_content = true;
+                            let mut entry = match &file.source {
+                                llm_suite_types::message::FileSource::Base64 { data, .. } => {
+                                    serde_json::json!({"file_data": data})
+                                }
+                                llm_suite_types::message::FileSource::FileId { file_id } => {
+                                    serde_json::json!({"file_id": file_id})
+                                }
+                                llm_suite_types::message::FileSource::Url { url } => {
+                                    return Err(LlmError::ConfigError(format!(
+                                        "openai chat file parts accept only file_id or base64 \
+                                         file_data, not remote URLs; inline the file instead: {url}"
+                                    )));
+                                }
+                            };
+                            if let Some(filename) = &file.filename {
+                                entry["filename"] = serde_json::json!(filename);
+                            }
+                            content.push(serde_json::json!({"type": "file", "file": entry}));
                         }
                         // Fold ToolUse blocks into the message's `tool_calls`.
                         MessageContent::ToolUse { tool_use } => {
@@ -82,10 +118,12 @@ pub fn convert_openai_messages(messages: &[Message]) -> Vec<serde_json::Value> {
                             }));
                         }
                         // Emit ToolResult blocks as standalone `tool` messages.
+                        // Chat tool messages carry text-only content; rich
+                        // blocks flatten to their text (SDK semantics).
                         MessageContent::ToolResult { tool_result } => {
                             tool_result_entries.push(serde_json::json!({
                                 "role": "tool",
-                                "content": tool_result.content,
+                                "content": tool_result.fallback_text(),
                                 "tool_call_id": tool_result.tool_use_id,
                             }));
                         }
@@ -122,7 +160,7 @@ pub fn convert_openai_messages(messages: &[Message]) -> Vec<serde_json::Value> {
         out.extend(tool_result_entries);
     }
 
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -156,6 +194,7 @@ mod tests {
                 tool_result: llm_suite_types::message::ToolResultContent {
                     tool_use_id: "call_1".to_string(),
                     content: "sunny".to_string(),
+                    blocks: None,
                     is_error: None,
                 },
             }]),
@@ -173,7 +212,7 @@ mod tests {
         super::super::validate::validate_openai_chat_messages(&request)
             .expect("a rich tool result must not be rejected");
 
-        let converted = convert_openai_messages(&request.messages);
+        let converted = convert_openai_messages(&request.messages).expect("conversion must succeed");
         let tool_message = converted
             .iter()
             .find(|m| m["role"] == serde_json::json!("tool"))
@@ -215,6 +254,7 @@ mod tests {
                 tool_result: llm_suite_types::message::ToolResultContent {
                     tool_use_id: "call_1".to_string(),
                     content: "sunny".to_string(),
+                    blocks: None,
                     is_error: None,
                 },
             }]),
@@ -227,7 +267,7 @@ mod tests {
             metadata: None,
         };
 
-        let out = convert_openai_messages(&[assistant, tool]);
+        let out = convert_openai_messages(&[assistant, tool]).expect("conversion must succeed");
 
         // Assistant message must carry tool_calls and must NOT contain any
         // illegal `tool_use` / `tool_result` content part.
@@ -249,5 +289,134 @@ mod tests {
             .expect("tool message present");
         assert_eq!(tool_msg["tool_call_id"], "call_1");
         assert_eq!(tool_msg["content"], "sunny");
+    }
+
+    #[test]
+    fn an_input_audio_block_becomes_an_input_audio_part() {
+        let user = Message {
+            id: llm_suite_types::Id::new(),
+            role: MessageRole::User,
+            content: MessageContentValue::Rich(vec![MessageContent::InputAudio {
+                input_audio: llm_suite_types::message::InputAudioContent {
+                    data: "QUJD".to_string(),
+                    format: "wav".to_string(),
+                },
+            }]),
+            timestamp: 0,
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+            thinking: None,
+            thinking_signature: None,
+            metadata: None,
+        };
+        let out = convert_openai_messages(&[user]).expect("must convert");
+        let part = &out[0]["content"][0];
+        assert_eq!(part["type"], serde_json::json!("input_audio"));
+        assert_eq!(part["input_audio"]["format"], serde_json::json!("wav"));
+        assert_eq!(part["input_audio"]["data"], serde_json::json!("QUJD"));
+    }
+
+    #[test]
+    fn a_file_input_maps_to_file_data_or_file_id() {
+        let base64_user = Message {
+            id: llm_suite_types::Id::new(),
+            role: MessageRole::User,
+            content: MessageContentValue::Rich(vec![MessageContent::FileInput {
+                file: llm_suite_types::message::FileContent {
+                    source: llm_suite_types::message::FileSource::Base64 {
+                        media_type: "application/pdf".to_string(),
+                        data: "QUJD".to_string(),
+                    },
+                    filename: Some("doc.pdf".to_string()),
+                    detail: None,
+                },
+            }]),
+            timestamp: 0,
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+            thinking: None,
+            thinking_signature: None,
+            metadata: None,
+        };
+        let out = convert_openai_messages(&[base64_user]).expect("must convert");
+        let part = &out[0]["content"][0];
+        assert_eq!(part["type"], serde_json::json!("file"));
+        assert_eq!(part["file"]["file_data"], serde_json::json!("QUJD"));
+        assert_eq!(part["file"]["filename"], serde_json::json!("doc.pdf"));
+
+        let id_user = Message {
+            id: llm_suite_types::Id::new(),
+            role: MessageRole::User,
+            content: MessageContentValue::Rich(vec![MessageContent::FileInput {
+                file: llm_suite_types::message::FileContent {
+                    source: llm_suite_types::message::FileSource::FileId {
+                        file_id: "file_1".to_string(),
+                    },
+                    filename: None,
+                    detail: None,
+                },
+            }]),
+            timestamp: 0,
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+            thinking: None,
+            thinking_signature: None,
+            metadata: None,
+        };
+        let out = convert_openai_messages(&[id_user]).expect("must convert");
+        assert_eq!(out[0]["content"][0]["file"]["file_id"], serde_json::json!("file_1"));
+    }
+
+    #[test]
+    fn a_remote_url_file_input_is_rejected() {
+        let user = Message {
+            id: llm_suite_types::Id::new(),
+            role: MessageRole::User,
+            content: MessageContentValue::Rich(vec![MessageContent::FileInput {
+                file: llm_suite_types::message::FileContent {
+                    source: llm_suite_types::message::FileSource::Url {
+                        url: "https://example.com/a.pdf".to_string(),
+                    },
+                    filename: None,
+                    detail: None,
+                },
+            }]),
+            timestamp: 0,
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+            thinking: None,
+            thinking_signature: None,
+            metadata: None,
+        };
+        let err = convert_openai_messages(&[user]).expect_err("no URL form on chat file parts");
+        assert!(format!("{err}").contains("file_id"), "{err}");
+    }
+
+    #[test]
+    fn an_invalid_image_detail_is_rejected() {
+        let user = Message {
+            id: llm_suite_types::Id::new(),
+            role: MessageRole::User,
+            content: MessageContentValue::Rich(vec![MessageContent::ImageUrl {
+                image_url: llm_suite_types::message::ImageUrlContent {
+                    url: "https://example.com/a.png".to_string(),
+                    detail: Some("ultra".to_string()),
+                    file_id: None,
+                },
+            }]),
+            timestamp: 0,
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+            thinking: None,
+            thinking_signature: None,
+            metadata: None,
+        };
+        let err = convert_openai_messages(&[user]).expect_err("detail must be validated");
+        assert!(format!("{err}").contains("detail"), "{err}");
     }
 }

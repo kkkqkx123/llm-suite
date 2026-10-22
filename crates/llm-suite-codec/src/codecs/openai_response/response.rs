@@ -117,6 +117,9 @@ pub fn parse_response_inner(body: &str) -> LlmResult<LlmResponseType> {
     let mut reasoning_parts: Vec<String> = Vec::new();
     // The sources of a grounded answer ride on the `output_text` blocks.
     let mut annotations: Vec<serde_json::Value> = Vec::new();
+    // Generated media (image_generation_call results) preserved as rich
+    // content blocks on the assistant message.
+    let mut media_blocks: Vec<llm_suite_types::message::MessageContent> = Vec::new();
     if let Some(output) = json.get("output").and_then(|v| v.as_array()) {
         for item in output {
             match item.get("type").and_then(|v| v.as_str()).unwrap_or("") {
@@ -167,6 +170,20 @@ pub fn parse_response_inner(body: &str) -> LlmResult<LlmResponseType> {
                         }
                     }
                 }
+                "image_generation_call" => {
+                    // A generated image arrives as a base64 `result` on the
+                    // output item; keep it as rich content so it is not
+                    // dropped from the answer.
+                    if let Some(data) = item.get("result").and_then(|v| v.as_str()) {
+                        media_blocks.push(llm_suite_types::message::MessageContent::ImageUrl {
+                            image_url: llm_suite_types::message::ImageUrlContent {
+                                url: format!("data:image/png;base64,{data}"),
+                                detail: None,
+                                file_id: None,
+                            },
+                        });
+                    }
+                }
                 _ => {}
             }
         }
@@ -201,9 +218,22 @@ pub fn parse_response_inner(body: &str) -> LlmResult<LlmResponseType> {
     let message = llm_suite_types::message::Message {
         id: llm_suite_types::Id::new(),
         role: llm_suite_types::message::MessageRole::Assistant,
-        content: llm_suite_types::message::MessageContentValue::Text(
-            content.clone().unwrap_or_default(),
-        ),
+        // Generated media rides on the message as rich blocks; a response
+        // without media stays the plain-text shorthand.
+        content: if media_blocks.is_empty() {
+            llm_suite_types::message::MessageContentValue::Text(
+                content.clone().unwrap_or_default(),
+            )
+        } else {
+            let mut blocks = Vec::new();
+            if let Some(text) = &content {
+                blocks.push(llm_suite_types::message::MessageContent::Text {
+                    text: text.clone(),
+                });
+            }
+            blocks.extend(media_blocks);
+            llm_suite_types::message::MessageContentValue::Rich(blocks)
+        },
         timestamp: llm_suite_common::time::now(),
         tool_call_id: None,
         tool_name: None,
@@ -577,5 +607,30 @@ mod tests {
         let err = parse_response(body, &minimal_request())
             .expect_err("failed response must surface an error");
         assert!(format!("{err:?}").contains("rate limit exceeded"));
+    }
+
+    #[test]
+    fn an_image_generation_call_is_kept_as_a_media_block() {
+        let body = r#"{
+            "id": "resp_1",
+            "model": "gpt-5",
+            "status": "completed",
+            "output": [
+                {"type": "image_generation_call", "result": "QUJD"}
+            ],
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+        }"#;
+        let result = parse_response(body, &minimal_request()).expect("must parse");
+        let blocks = match &result.message.content {
+            llm_suite_types::message::MessageContentValue::Rich(blocks) => blocks,
+            other => panic!("expected rich content, got {other:?}"),
+        };
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            llm_suite_types::message::MessageContent::ImageUrl { image_url } => {
+                assert_eq!(image_url.url, "data:image/png;base64,QUJD");
+            }
+            other => panic!("expected ImageUrl, got {other:?}"),
+        }
     }
 }

@@ -20,6 +20,7 @@ pub fn image_url(url: impl Into<String>, detail: Option<String>) -> MessageConte
         image_url: ImageUrlContent {
             url: url.into(),
             detail,
+            file_id: None,
         },
     }
 }
@@ -126,10 +127,12 @@ mod tests {
                 ImageUrlContent {
                     url: "data:image/png;base64,AA".to_string(),
                     detail: None,
+                    file_id: None,
                 },
                 ImageUrlContent {
                     url: "https://e.com/b.jpg".to_string(),
                     detail: Some("low".to_string()),
+                    file_id: None,
                 },
             ],
         );

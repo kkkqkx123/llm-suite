@@ -27,10 +27,40 @@ pub fn estimate_message_tokens(msg: &Message) -> u32 {
                         estimate_tokens(&json) as u32
                     }
                     MessageContent::ToolResult { tool_result } => {
-                        estimate_tokens(&tool_result.content) as u32
+                        let text = match &tool_result.blocks {
+                            Some(blocks) => blocks
+                                .iter()
+                                .filter_map(|b| match b {
+                                    MessageContent::Text { text } => Some(text.clone()),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                            None => tool_result.content.clone(),
+                        };
+                        estimate_tokens(&text) as u32
                     }
-                    MessageContent::ImageUrl { image_url } => estimate_image_tokens(&image_url.url),
+                    MessageContent::ImageUrl { image_url } => {
+                        estimate_image_tokens(&image_url.url)
+                    }
                     MessageContent::RedactedThinking { data } => estimate_tokens(data) as u32,
+                    // Audio and file inputs are billed as their metadata
+                    // plus a fixed per-item overhead; the payload itself is
+                    // not text.
+                    MessageContent::InputAudio { input_audio } => {
+                        estimate_tokens(&input_audio.format) as u32 + 200
+                    }
+                    MessageContent::FileInput { file } => match &file.source {
+                        llm_suite_types::message::FileSource::Base64 { media_type, .. } => {
+                            estimate_tokens(media_type) as u32 + 200
+                        }
+                        llm_suite_types::message::FileSource::Url { url } => {
+                            estimate_tokens(url) as u32 + 200
+                        }
+                        llm_suite_types::message::FileSource::FileId { file_id } => {
+                            estimate_tokens(file_id) as u32 + 200
+                        }
+                    },
                 };
             }
         }
@@ -186,6 +216,7 @@ mod tests {
                     image_url: ImageUrlContent {
                         url: "https://example.com/img.png".to_string(),
                         detail: None,
+                        file_id: None,
                     },
                 },
             ]),
@@ -211,6 +242,7 @@ mod tests {
                 tool_result: ToolResultContent {
                     tool_use_id: "call_1".to_string(),
                     content: "the weather is sunny".to_string(),
+                    blocks: None,
                     is_error: None,
                 },
             }]),

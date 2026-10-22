@@ -21,6 +21,15 @@ pub enum Part {
         /// The thought signature that belongs to this call.
         signature: Option<String>,
     },
+    /// A media part: generated images (and audio/video) ride on
+    /// `inlineData` (base64) or `fileData` (a remote URI).
+    Inline {
+        media_type: String,
+        /// Base64 payload for `inlineData` parts.
+        data: Option<String>,
+        /// Remote URI for `fileData` parts.
+        uri: Option<String>,
+    },
 }
 
 /// Read the parts of a candidate.
@@ -81,6 +90,41 @@ pub fn read_parts(parts: &[serde_json::Value]) -> Vec<Part> {
                 provider_id,
                 signature: signature.or_else(|| pending_signature.clone()),
             });
+        }
+        if let Some(inline) = part.get("inlineData") {
+            // Generated media comes back as ordinary inline blobs; the
+            // data is base64 and the mimeType is the IANA media type.
+            let media_type = inline
+                .get("mimeType")
+                .and_then(|v| v.as_str())
+                .unwrap_or("application/octet-stream")
+                .to_string();
+            let data = inline
+                .get("data")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            if data.is_some() {
+                result.push(Part::Inline {
+                    media_type,
+                    data,
+                    uri: None,
+                });
+            }
+        }
+        if let Some(file) = part.get("fileData") {
+            let media_type = file
+                .get("mimeType")
+                .and_then(|v| v.as_str())
+                .unwrap_or("application/octet-stream")
+                .to_string();
+            let uri = file.get("fileUri").and_then(|v| v.as_str()).map(String::from);
+            if let Some(uri) = uri {
+                result.push(Part::Inline {
+                    media_type,
+                    data: None,
+                    uri: Some(uri),
+                });
+            }
         }
     }
 

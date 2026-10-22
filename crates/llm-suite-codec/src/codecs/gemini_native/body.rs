@@ -173,6 +173,7 @@ mod tests {
                     tool_result: llm_suite_types::message::ToolResultContent {
                         tool_use_id: "call_1".to_string(),
                         content: r#"{"temp":25}"#.to_string(),
+                        blocks: None,
                         is_error: None,
                     },
                 },

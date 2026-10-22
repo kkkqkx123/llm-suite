@@ -59,6 +59,24 @@ impl GeminiNativeCodec {
                                     },
                                 ));
                             }
+                            Part::Inline { media_type, data, uri } => {
+                                // Generated media arrives as a complete
+                                // part; emit it as a text snapshot so the
+                                // accumulator keeps it in the answer.
+                                let reference = match (data, uri) {
+                                    (Some(data), _) => {
+                                        format!("data:{media_type};base64,{data}")
+                                    }
+                                    (None, Some(uri)) => uri,
+                                    (None, None) => continue,
+                                };
+                                events.push(MessageStreamEvent::Text(
+                                    llm_suite_types::llm::MessageStreamText {
+                                        snapshot: String::new(),
+                                        text: reference,
+                                    },
+                                ));
+                            }
                             Part::FunctionCall {
                                 name,
                                 arguments,

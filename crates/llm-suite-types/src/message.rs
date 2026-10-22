@@ -39,14 +39,105 @@ pub struct ToolUseContent {
 pub struct ToolResultContent {
     pub tool_use_id: String,
     pub content: String,
+    /// Rich tool-result content (images, documents, …). When present it
+    /// takes precedence over the plain-text `content`; codecs that cannot
+    /// carry rich blocks fall back to `content`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocks: Option<Vec<MessageContent>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_error: Option<bool>,
+}
+
+impl ToolResultContent {
+    /// Plain-text tool result (the canonical shape).
+    pub fn text(tool_use_id: String, content: String) -> Self {
+        Self {
+            tool_use_id,
+            content,
+            blocks: None,
+            is_error: None,
+        }
+    }
+
+    /// The text a codec should fall back to: the rich blocks flattened to
+    /// text, or the plain-text content.
+    pub fn fallback_text(&self) -> String {
+        match &self.blocks {
+            None => self.content.clone(),
+            Some(blocks) => blocks
+                .iter()
+                .filter_map(|b| match b {
+                    MessageContent::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ImageUrlContent {
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Files-API reference (Anthropic `source.type=file`, OpenAI Responses
+    /// `input_image.file_id`). Mutually exclusive with `url`; codecs that
+    /// cannot carry a file reference reject the block explicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_id: Option<String>,
+}
+
+impl ImageUrlContent {
+    /// A remote-URL (or data URI) image reference.
+    pub fn url(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            detail: None,
+            file_id: None,
+        }
+    }
+
+    /// A Files-API image reference.
+    pub fn file_id(file_id: impl Into<String>) -> Self {
+        Self {
+            url: String::new(),
+            detail: None,
+            file_id: Some(file_id.into()),
+        }
+    }
+}
+
+/// Audio carried inline in a user message (OpenAI Chat `input_audio`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InputAudioContent {
+    /// Base64-encoded audio payload.
+    pub data: String,
+    /// Container format: `wav` or `mp3`.
+    pub format: String,
+}
+
+/// How a file/document input references its bytes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum FileSource {
+    /// Raw bytes, base64-encoded, with an IANA media type.
+    Base64 { media_type: String, data: String },
+    /// A remote URL (OpenAI Responses `input_file.file_url`).
+    Url { url: String },
+    /// A Files-API upload id.
+    FileId { file_id: String },
+}
+
+/// A document/file input block (OpenAI `file` / `input_file`, Anthropic
+/// `document`, Gemini `inlineData`/`fileData` for non-image media).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FileContent {
+    pub source: FileSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    /// OpenAI Responses `input_file.detail` (auto|low|high).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
 
@@ -58,6 +149,14 @@ pub enum MessageContent {
     },
     ImageUrl {
         image_url: ImageUrlContent,
+    },
+    /// Inline audio input (OpenAI Chat `input_audio`).
+    InputAudio {
+        input_audio: InputAudioContent,
+    },
+    /// A document / file input block.
+    FileInput {
+        file: FileContent,
     },
     ToolUse {
         tool_use: ToolUseContent,

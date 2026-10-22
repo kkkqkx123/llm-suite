@@ -90,7 +90,7 @@ fn convert_parts(
                 let call_id = msg.tool_call_id.clone().unwrap_or_default();
                 let name = resolve_function_name(msg, &call_id, function_names)?;
                 let provider_id = provider_call_ids.get(&call_id).map(String::as_str);
-                parts.push(function_response_part(&name, provider_id, text));
+                parts.push(function_response_part(&name, provider_id, text, None));
             } else if !text.is_empty() {
                 parts.push(serde_json::json!({"text": text}));
             }
@@ -103,33 +103,101 @@ fn convert_parts(
                         parts.push(serde_json::json!({"text": text}));
                     }
                     MessageContent::ImageUrl { image_url } => {
-                        // Inline base64 images become `inlineData`;
-                        // remote URLs become `fileData` references.
-                        // Unresolvable references are skipped rather
-                        // than silently corrupted.
-                        match super::super::helpers::resolve_image_payload(&image_url.url) {
-                            Ok(super::super::helpers::ResolvedImage::Base64 {
-                                media_type,
-                                data,
-                            }) => {
-                                parts.push(serde_json::json!({
+                        // Inline base64 images become `inlineData`. Remote
+                        // references only ride on `fileData` when they are
+                        // URIs Gemini actually accepts (gs://, Files API,
+                        // YouTube); anything else is an explicit error —
+                        // an arbitrary https URL would be rejected by the
+                        // server, and dropping the block silently would
+                        // corrupt the conversation.
+                        let url = image_url.url.as_str();
+                        let part = if url.starts_with("data:") {
+                            match super::super::helpers::resolve_image_payload(url)? {
+                                super::super::helpers::ResolvedImage::Base64 {
+                                    media_type,
+                                    data,
+                                } => serde_json::json!({
                                     "inlineData": {
                                         "mimeType": media_type,
                                         "data": data,
                                     }
-                                }))
+                                }),
+                                super::super::helpers::ResolvedImage::Url(_) => unreachable!(
+                                    "a data URI never resolves to a remote URL"
+                                ),
                             }
-                            Ok(super::super::helpers::ResolvedImage::Url(url)) => {
-                                parts.push(serde_json::json!({
-                                    "fileData": {
-                                        "mimeType":
-                                            super::super::helpers::guess_image_media_type(&url),
-                                        "fileUri": url,
+                        } else if super::super::helpers::is_gemini_file_uri(url) {
+                            serde_json::json!({
+                                "fileData": {
+                                    "mimeType":
+                                        super::super::helpers::guess_image_media_type(url),
+                                    "fileUri": url,
+                                }
+                            })
+                        } else {
+                            return Err(crate::error::LlmError::ConfigError(format!(
+                                "gemini fileData.fileUri only accepts gs://, Files API \
+                                 or YouTube URIs; inline other remote media as a data \
+                                 URI instead: {url}"
+                            )));
+                        };
+                        parts.push(part);
+                    }
+                    MessageContent::InputAudio { input_audio } => {
+                        // Audio rides on `inlineData` like any other media.
+                        let mime = match input_audio.format.as_str() {
+                            "wav" => "audio/wav",
+                            "mp3" => "audio/mp3",
+                            other => {
+                                return Err(crate::error::LlmError::ConfigError(format!(
+                                    "unsupported audio format `{other}` (expected wav|mp3)"
+                                )));
+                            }
+                        };
+                        parts.push(serde_json::json!({
+                            "inlineData": {
+                                "mimeType": mime,
+                                "data": input_audio.data,
+                            }
+                        }));
+                    }
+                    MessageContent::FileInput { file } => {
+                        // Documents carry on `inlineData` (base64) or
+                        // `fileData` (gs://, Files API, YouTube only).
+                        let part = match &file.source {
+                            llm_suite_types::message::FileSource::Base64 { media_type, data } => {
+                                serde_json::json!({
+                                    "inlineData": {
+                                        "mimeType": media_type,
+                                        "data": data,
                                     }
-                                }))
+                                })
                             }
-                            Err(_) => {}
-                        }
+                            llm_suite_types::message::FileSource::Url { url } => {
+                                if super::super::helpers::is_gemini_file_uri(url) {
+                                    serde_json::json!({
+                                        "fileData": {
+                                            "mimeType":
+                                                super::super::helpers::guess_image_media_type(url),
+                                            "fileUri": url,
+                                        }
+                                    })
+                                } else {
+                                    return Err(crate::error::LlmError::ConfigError(format!(
+                                        "gemini fileData.fileUri only accepts gs://, Files API \
+                                         or YouTube URIs; inline other remote media as a data \
+                                         URI instead: {url}"
+                                    )));
+                                }
+                            }
+                            llm_suite_types::message::FileSource::FileId { file_id } => {
+                                return Err(crate::error::LlmError::ConfigError(format!(
+                                    "gemini does not accept Files-API ids directly; upload the \
+                                     file and pass its Files API URI instead: {file_id}"
+                                )));
+                            }
+                        };
+                        parts.push(part);
                     }
                     MessageContent::ToolUse { tool_use } => {
                         let mut part = serde_json::json!({
@@ -161,6 +229,7 @@ fn convert_parts(
                             &name,
                             provider_id,
                             &tool_result.content,
+                            tool_result.blocks.as_deref(),
                         ));
                     }
                     // The reasoning text itself is not replayed; only the
@@ -233,6 +302,7 @@ fn function_response_part(
     name: &str,
     call_id: Option<&str>,
     content: &str,
+    blocks: Option<&[llm_suite_types::message::MessageContent]>,
 ) -> serde_json::Value {
     let response_value: serde_json::Value = match serde_json::from_str(content) {
         Ok(serde_json::Value::Object(object)) => serde_json::Value::Object(object),
@@ -242,6 +312,36 @@ fn function_response_part(
         "name": name,
         "response": response_value,
     });
+    // Rich tool output rides on `functionResponse.parts` as inline blobs;
+    // the `fileData` form is Vertex-only, so only inlineData is emitted.
+    if let Some(blocks) = blocks {
+        let parts: Vec<serde_json::Value> = blocks
+            .iter()
+            .filter_map(|b| match b {
+                llm_suite_types::message::MessageContent::ImageUrl { image_url } => {
+                    if image_url.file_id.is_some() {
+                        return None;
+                    }
+                    match super::super::helpers::resolve_image_payload(&image_url.url) {
+                        Ok(super::super::helpers::ResolvedImage::Base64 {
+                            media_type,
+                            data,
+                        }) => Some(serde_json::json!({
+                            "inlineData": {
+                                "mimeType": media_type,
+                                "data": data,
+                            }
+                        })),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+            .collect();
+        if !parts.is_empty() {
+            response["parts"] = serde_json::json!(parts);
+        }
+    }
     if let Some(call_id) = call_id.filter(|id| !id.is_empty()) {
         response["id"] = serde_json::json!(call_id);
     }
@@ -267,12 +367,29 @@ mod tests {
                     image_url: llm_suite_types::message::ImageUrlContent {
                         url: "data:image/png;base64,AAAA".to_string(),
                         detail: None,
+                        file_id: None,
                     },
                 },
                 MessageContent::ImageUrl {
                     image_url: llm_suite_types::message::ImageUrlContent {
-                        url: "https://example.com/a.jpg".to_string(),
+                        url: "gs://bucket/a.jpg".to_string(),
                         detail: None,
+                        file_id: None,
+                    },
+                },
+                MessageContent::ImageUrl {
+                    image_url: llm_suite_types::message::ImageUrlContent {
+                        url: "https://generativelanguage.googleapis.com/v1beta/files/abc"
+                            .to_string(),
+                        detail: None,
+                        file_id: None,
+                    },
+                },
+                MessageContent::ImageUrl {
+                    image_url: llm_suite_types::message::ImageUrlContent {
+                        url: "https://youtube.com/watch?v=abc".to_string(),
+                        detail: None,
+                        file_id: None,
                     },
                 },
             ]),
@@ -287,13 +404,46 @@ mod tests {
         let entries = convert_messages(&[image_msg]).expect("must convert");
         assert_eq!(entries.len(), 1);
         let parts = entries[0]["parts"].as_array().expect("parts array");
-        // Regression guard: none of the three blocks may be silently dropped.
-        assert_eq!(parts.len(), 3, "text + inlineData + fileData");
+        // Regression guard: none of the blocks may be silently dropped.
+        assert_eq!(parts.len(), 5, "text + inlineData + 3 fileData");
         assert_eq!(parts[0]["text"], "what is this");
         assert_eq!(parts[1]["inlineData"]["mimeType"], "image/png");
         assert_eq!(parts[1]["inlineData"]["data"], "AAAA");
-        assert_eq!(parts[2]["fileData"]["fileUri"], "https://example.com/a.jpg");
+        assert_eq!(parts[2]["fileData"]["fileUri"], "gs://bucket/a.jpg");
         assert_eq!(parts[2]["fileData"]["mimeType"], "image/jpeg");
+        assert_eq!(
+            parts[3]["fileData"]["fileUri"],
+            "https://generativelanguage.googleapis.com/v1beta/files/abc"
+        );
+        assert_eq!(
+            parts[4]["fileData"]["fileUri"],
+            "https://youtube.com/watch?v=abc"
+        );
+    }
+
+    #[test]
+    fn an_arbitrary_https_image_url_is_rejected_not_mapped_to_file_data() {
+        let image_msg = Message {
+            id: llm_suite_types::Id::new(),
+            role: MessageRole::User,
+            content: MessageContentValue::Rich(vec![MessageContent::ImageUrl {
+                image_url: llm_suite_types::message::ImageUrlContent {
+                    url: "https://example.com/a.jpg".to_string(),
+                    detail: None,
+                    file_id: None,
+                },
+            }]),
+            timestamp: 0,
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+            thinking: None,
+            thinking_signature: None,
+            metadata: None,
+        };
+        let err = convert_messages(&[image_msg])
+            .expect_err("a plain https URL must not become a fileUri");
+        assert!(format!("{err}").contains("fileData.fileUri"), "{err}");
     }
 
     #[test]
@@ -389,6 +539,7 @@ mod tests {
             tool_result: llm_suite_types::message::ToolResultContent {
                 tool_use_id: "call_1".to_string(),
                 content: "sunny".to_string(),
+                blocks: None,
                 is_error: None,
             },
         }]);
@@ -443,5 +594,128 @@ mod tests {
             "the response part uses the official name: {contents:?}"
         );
         assert!(response.get("function_response").is_none());
+    }
+
+    #[test]
+    fn an_input_audio_block_becomes_inline_data() {
+        let user = Message {
+            id: llm_suite_types::Id::new(),
+            role: MessageRole::User,
+            content: MessageContentValue::Rich(vec![MessageContent::InputAudio {
+                input_audio: llm_suite_types::message::InputAudioContent {
+                    data: "QUJD".to_string(),
+                    format: "wav".to_string(),
+                },
+            }]),
+            timestamp: 0,
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+            thinking: None,
+            thinking_signature: None,
+            metadata: None,
+        };
+        let contents = convert_messages(&[user]).expect("must convert");
+        let part = &contents[0]["parts"][0];
+        assert_eq!(part["inlineData"]["mimeType"], serde_json::json!("audio/wav"));
+        assert_eq!(part["inlineData"]["data"], serde_json::json!("QUJD"));
+    }
+
+    #[test]
+    fn a_base64_file_input_becomes_inline_data() {
+        let user = Message {
+            id: llm_suite_types::Id::new(),
+            role: MessageRole::User,
+            content: MessageContentValue::Rich(vec![MessageContent::FileInput {
+                file: llm_suite_types::message::FileContent {
+                    source: llm_suite_types::message::FileSource::Base64 {
+                        media_type: "application/pdf".to_string(),
+                        data: "QUJD".to_string(),
+                    },
+                    filename: None,
+                    detail: None,
+                },
+            }]),
+            timestamp: 0,
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+            thinking: None,
+            thinking_signature: None,
+            metadata: None,
+        };
+        let contents = convert_messages(&[user]).expect("must convert");
+        let part = &contents[0]["parts"][0];
+        assert_eq!(
+            part["inlineData"]["mimeType"],
+            serde_json::json!("application/pdf")
+        );
+        assert_eq!(part["inlineData"]["data"], serde_json::json!("QUJD"));
+    }
+
+    #[test]
+    fn a_file_id_input_is_rejected() {
+        let user = Message {
+            id: llm_suite_types::Id::new(),
+            role: MessageRole::User,
+            content: MessageContentValue::Rich(vec![MessageContent::FileInput {
+                file: llm_suite_types::message::FileContent {
+                    source: llm_suite_types::message::FileSource::FileId {
+                        file_id: "file_1".to_string(),
+                    },
+                    filename: None,
+                    detail: None,
+                },
+            }]),
+            timestamp: 0,
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+            thinking: None,
+            thinking_signature: None,
+            metadata: None,
+        };
+        let err = convert_messages(&[user]).expect_err("gemini needs a URI, not a Files-API id");
+        assert!(format!("{err}").contains("Files API"), "{err}");
+    }
+
+    #[test]
+    fn rich_tool_result_blocks_become_function_response_parts() {
+        let mut assistant = msg(MessageRole::Assistant, "");
+        assistant.tool_calls = Some(vec![llm_suite_types::message::LlmToolCall {
+            id: "call_1".to_string(),
+            r#type: "function".to_string(),
+            call_id: None,
+            function: llm_suite_types::message::LlmFunctionCall {
+                name: "screenshot".to_string(),
+                arguments: "{}".to_string(),
+            },
+        }]);
+        let mut result = msg(MessageRole::Tool, "attached");
+        result.tool_call_id = Some("call_1".to_string());
+        result.content = MessageContentValue::Rich(vec![MessageContent::ToolResult {
+            tool_result: llm_suite_types::message::ToolResultContent {
+                tool_use_id: "call_1".to_string(),
+                content: "attached".to_string(),
+                blocks: Some(vec![MessageContent::ImageUrl {
+                    image_url: llm_suite_types::message::ImageUrlContent {
+                        url: "data:image/png;base64,QUJD".to_string(),
+                        detail: None,
+                        file_id: None,
+                    },
+                }]),
+                is_error: None,
+            },
+        }]);
+
+        let contents = convert_messages(&[assistant, result]).expect("must convert");
+        let part = &contents[1]["parts"][0]["functionResponse"];
+        assert_eq!(part["response"]["output"], serde_json::json!("attached"));
+        let parts = part["parts"].as_array().expect("rich parts array");
+        assert_eq!(
+            parts[0]["inlineData"]["mimeType"],
+            serde_json::json!("image/png")
+        );
+        assert_eq!(parts[0]["inlineData"]["data"], serde_json::json!("QUJD"));
     }
 }

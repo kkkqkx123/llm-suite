@@ -62,7 +62,26 @@ pub fn convert_messages(messages: &[Message]) -> LlmResult<Vec<serde_json::Value
                             }
                         }
                         MessageContent::ImageUrl { image_url } => {
-                            blocks.push(convert_image_block(&image_url.url)?);
+                            if let Some(file_id) = &image_url.file_id {
+                                // Files-API reference: Anthropic carries it
+                                // as a `file` image source.
+                                blocks.push(serde_json::json!({
+                                    "type": "image",
+                                    "source": {"type": "file", "file_id": file_id},
+                                }));
+                            } else {
+                                blocks.push(convert_image_block(&image_url.url)?);
+                            }
+                        }
+                        // The Messages API has no audio input part.
+                        MessageContent::InputAudio { input_audio } => {
+                            return Err(LlmError::ConfigError(format!(
+                                "anthropic messages do not accept audio input (format `{}`)",
+                                input_audio.format
+                            )));
+                        }
+                        MessageContent::FileInput { file } => {
+                            blocks.push(convert_document_block(file)?);
                         }
                         MessageContent::ToolUse { tool_use } => {
                             blocks.push(serde_json::json!({
@@ -73,11 +92,7 @@ pub fn convert_messages(messages: &[Message]) -> LlmResult<Vec<serde_json::Value
                             }));
                         }
                         MessageContent::ToolResult { tool_result } => {
-                            tool_result_blocks.push(tool_result_block(
-                                &tool_result.tool_use_id,
-                                &tool_result.content,
-                                tool_result.is_error,
-                            ));
+                            tool_result_blocks.push(tool_result_block(tool_result));
                         }
                         MessageContent::Thinking {
                             thinking,
@@ -188,9 +203,12 @@ pub fn convert_messages(messages: &[Message]) -> LlmResult<Vec<serde_json::Value
                 .and_then(|m| m.get("is_error"))
                 .and_then(|v| v.as_bool());
             tool_result_blocks.push(tool_result_block(
-                msg.tool_call_id.as_deref().unwrap_or_default(),
-                &content_text,
-                is_error,
+                &llm_suite_types::message::ToolResultContent {
+                    tool_use_id: msg.tool_call_id.clone().unwrap_or_default(),
+                    content: content_text,
+                    blocks: None,
+                    is_error,
+                },
             ));
         }
 
@@ -273,22 +291,92 @@ pub fn thinking_blocks_first(blocks: Vec<serde_json::Value>) -> Vec<serde_json::
     ordered
 }
 
-pub fn tool_result_block(
-    tool_use_id: &str,
-    content: &str,
-    is_error: Option<bool>,
-) -> serde_json::Value {
+pub fn tool_result_block(tool_result: &llm_suite_types::message::ToolResultContent) -> serde_json::Value {
+    // Rich blocks (images, documents, …) ride in the `content` array;
+    // the plain-text form stays a string.
+    let content = match &tool_result.blocks {
+        Some(blocks) if !blocks.is_empty() => serde_json::json!(blocks
+            .iter()
+            .filter_map(|b| match b {
+                llm_suite_types::message::MessageContent::Text { text } => Some(
+                    serde_json::json!({"type": "text", "text": text}),
+                ),
+                llm_suite_types::message::MessageContent::ImageUrl { image_url } => {
+                    if let Some(file_id) = &image_url.file_id {
+                        return Some(serde_json::json!({
+                            "type": "image",
+                            "source": {"type": "file", "file_id": file_id},
+                        }));
+                    }
+                    convert_image_block(&image_url.url).ok()
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()),
+        _ => serde_json::json!(tool_result.fallback_text()),
+    };
     let mut block = serde_json::json!({
         "type": "tool_result",
-        "tool_use_id": tool_use_id,
+        "tool_use_id": tool_result.tool_use_id,
         "content": content,
     });
     // `is_error` is optional; only set it when true to keep the wire
     // format minimal.
-    if is_error == Some(true) {
+    if tool_result.is_error == Some(true) {
         block["is_error"] = serde_json::json!(true);
     }
     block
+}
+
+/// Media types accepted by the Anthropic Messages API for document blocks.
+const ANTHROPIC_DOCUMENT_MEDIA_TYPES: [&str; 2] = ["application/pdf", "text/plain"];
+
+/// Map a file/document input to an Anthropic `document` block.
+///
+/// Base64 PDFs become `base64` sources, plain text becomes a `text`
+/// source, remote URLs a `url` source and Files-API uploads a `file`
+/// source; anything else is rejected up front.
+pub fn convert_document_block(file: &llm_suite_types::message::FileContent) -> LlmResult<serde_json::Value> {
+    use llm_suite_types::message::FileSource;
+
+    let source = match &file.source {
+        FileSource::Base64 { media_type, data } => {
+            if !ANTHROPIC_DOCUMENT_MEDIA_TYPES.contains(&media_type.as_str()) {
+                return Err(LlmError::ConfigError(format!(
+                    "Anthropic document media type `{media_type}` is not supported (expected application/pdf or text/plain)"
+                )));
+            }
+            if media_type == "text/plain" {
+                serde_json::json!({
+                    "type": "text",
+                    "media_type": "text/plain",
+                    "data": data,
+                })
+            } else {
+                serde_json::json!({
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": data,
+                })
+            }
+        }
+        FileSource::Url { url } => serde_json::json!({
+            "type": "url",
+            "url": url,
+        }),
+        FileSource::FileId { file_id } => serde_json::json!({
+            "type": "file",
+            "file_id": file_id,
+        }),
+    };
+    let mut block = serde_json::json!({
+        "type": "document",
+        "source": source,
+    });
+    if let Some(title) = &file.filename {
+        block["title"] = serde_json::json!(title);
+    }
+    Ok(block)
 }
 
 /// Map an image reference to an Anthropic image block. Data URIs become
@@ -473,6 +561,7 @@ mod tests {
                 image_url: llm_suite_types::message::ImageUrlContent {
                     url: "https://example.com/cat.png".to_string(),
                     detail: None,
+                    file_id: None,
                 },
             }],
         );
@@ -494,6 +583,7 @@ mod tests {
                 image_url: llm_suite_types::message::ImageUrlContent {
                     url: "data:image/webp;base64,QUJD".to_string(),
                     detail: None,
+                    file_id: None,
                 },
             }],
         );
@@ -515,6 +605,7 @@ mod tests {
                 image_url: llm_suite_types::message::ImageUrlContent {
                     url: "data:image/bmp;base64,QUJD".to_string(),
                     detail: None,
+                    file_id: None,
                 },
             }],
         );
@@ -581,5 +672,119 @@ mod tests {
         assert_eq!(content[0]["signature"], serde_json::json!("sig-abc"));
         assert_eq!(content[1]["type"], serde_json::json!("text"));
         assert_eq!(content[1]["text"], serde_json::json!("the answer"));
+    }
+
+    #[test]
+    fn a_base64_pdf_file_input_becomes_a_document_block() {
+        let user = rich_msg(
+            MessageRole::User,
+            vec![MessageContent::FileInput {
+                file: llm_suite_types::message::FileContent {
+                    source: llm_suite_types::message::FileSource::Base64 {
+                        media_type: "application/pdf".to_string(),
+                        data: "AAAA".to_string(),
+                    },
+                    filename: Some("report.pdf".to_string()),
+                    detail: None,
+                },
+            }],
+        );
+        let body = build_body(&request(vec![user], None), &profile()).expect("must build");
+        let block = &body["messages"][0]["content"][0];
+        assert_eq!(block["type"], serde_json::json!("document"));
+        assert_eq!(block["source"]["type"], serde_json::json!("base64"));
+        assert_eq!(
+            block["source"]["media_type"],
+            serde_json::json!("application/pdf")
+        );
+        assert_eq!(block["title"], serde_json::json!("report.pdf"));
+    }
+
+    #[test]
+    fn a_plain_text_file_input_becomes_a_text_document_source() {
+        let user = rich_msg(
+            MessageRole::User,
+            vec![MessageContent::FileInput {
+                file: llm_suite_types::message::FileContent {
+                    source: llm_suite_types::message::FileSource::Base64 {
+                        media_type: "text/plain".to_string(),
+                        data: "hello".to_string(),
+                    },
+                    filename: None,
+                    detail: None,
+                },
+            }],
+        );
+        let body = build_body(&request(vec![user], None), &profile()).expect("must build");
+        let block = &body["messages"][0]["content"][0];
+        assert_eq!(block["source"]["type"], serde_json::json!("text"));
+        assert_eq!(block["source"]["media_type"], serde_json::json!("text/plain"));
+    }
+
+    #[test]
+    fn a_file_id_image_becomes_a_file_source() {
+        let user = rich_msg(
+            MessageRole::User,
+            vec![MessageContent::ImageUrl {
+                image_url: llm_suite_types::message::ImageUrlContent {
+                    url: String::new(),
+                    detail: None,
+                    file_id: Some("file_123".to_string()),
+                },
+            }],
+        );
+        let body = build_body(&request(vec![user], None), &profile()).expect("must build");
+        let block = &body["messages"][0]["content"][0];
+        assert_eq!(block["type"], serde_json::json!("image"));
+        assert_eq!(block["source"]["type"], serde_json::json!("file"));
+        assert_eq!(block["source"]["file_id"], serde_json::json!("file_123"));
+    }
+
+    #[test]
+    fn audio_input_is_rejected() {
+        let user = rich_msg(
+            MessageRole::User,
+            vec![MessageContent::InputAudio {
+                input_audio: llm_suite_types::message::InputAudioContent {
+                    data: "AAAA".to_string(),
+                    format: "wav".to_string(),
+                },
+            }],
+        );
+        let err = build_body(&request(vec![user], None), &profile())
+            .expect_err("anthropic has no audio input");
+        assert!(format!("{err}").contains("audio"), "{err}");
+    }
+
+    #[test]
+    fn rich_tool_result_blocks_become_a_content_array() {
+        let assistant = msg(MessageRole::Assistant, "");
+        let mut result = tool_msg("call_1", "see attached", false);
+        result.tool_call_id = Some("call_1".to_string());
+        result.content = MessageContentValue::Rich(vec![MessageContent::ToolResult {
+            tool_result: llm_suite_types::message::ToolResultContent {
+                tool_use_id: "call_1".to_string(),
+                content: "see attached".to_string(),
+                blocks: Some(vec![MessageContent::ImageUrl {
+                    image_url: llm_suite_types::message::ImageUrlContent {
+                        url: "data:image/png;base64,QUJD".to_string(),
+                        detail: None,
+                        file_id: None,
+                    },
+                }]),
+                is_error: None,
+            },
+        }]);
+
+        let body = build_body(&request(vec![assistant, result], None), &profile())
+            .expect("must build");
+        // The assistant turn has no prose, so the tool-result user message
+        // is the only wire message.
+        let messages = body["messages"].as_array().unwrap();
+        let tool_block = &messages[messages.len() - 1]["content"][0];
+        assert_eq!(tool_block["type"], serde_json::json!("tool_result"));
+        let content = tool_block["content"].as_array().expect("block array");
+        assert_eq!(content[0]["type"], serde_json::json!("image"));
+        assert_eq!(content[0]["source"]["type"], serde_json::json!("base64"));
     }
 }
