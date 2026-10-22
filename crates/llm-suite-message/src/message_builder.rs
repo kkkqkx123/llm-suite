@@ -1,4 +1,7 @@
-use llm_suite_types::message::{ImageUrlContent, Message, MessageContent, MessageContentValue};
+use llm_suite_types::message::{
+    FileContent, FileSource, ImageDetail, ImageUrlContent, InputAudioContent, Message,
+    MessageContent, MessageContentValue,
+};
 
 pub fn user_text(text: impl Into<String>) -> Message {
     Message::user_text(text.into())
@@ -15,13 +18,49 @@ pub fn assistant_text(text: impl Into<String>) -> Message {
 }
 
 /// Build a single `ImageUrl` content block.
-pub fn image_url(url: impl Into<String>, detail: Option<String>) -> MessageContent {
+pub fn image_url(url: impl Into<String>, detail: Option<ImageDetail>) -> MessageContent {
     MessageContent::ImageUrl {
         image_url: ImageUrlContent {
             url: url.into(),
             detail,
             file_id: None,
         },
+    }
+}
+
+/// Build a single inline-audio content block.
+pub fn input_audio(data: impl Into<String>, format: impl Into<String>) -> MessageContent {
+    MessageContent::InputAudio {
+        input_audio: InputAudioContent {
+            data: data.into(),
+            format: format.into(),
+        },
+    }
+}
+
+/// Build a single document content block.
+pub fn file_input(source: FileSource, filename: Option<String>) -> MessageContent {
+    MessageContent::FileInput {
+        file: FileContent {
+            source,
+            filename,
+            detail: None,
+            citations_enabled: None,
+            context: None,
+        },
+    }
+}
+
+/// Build a single provider-native content block.
+pub fn native_block(
+    provider: impl Into<String>,
+    kind: impl Into<String>,
+    payload: serde_json::Value,
+) -> MessageContent {
+    MessageContent::Native {
+        provider: provider.into(),
+        kind: kind.into(),
+        payload,
     }
 }
 
@@ -109,11 +148,17 @@ mod tests {
 
     #[test]
     fn image_url_builds_image_block() {
-        let block = image_url("https://example.com/a.png", Some("auto".to_string()));
+        let block = image_url(
+            "https://example.com/a.png",
+            Some(llm_suite_types::message::ImageDetail::Auto),
+        );
         match block {
             MessageContent::ImageUrl { image_url } => {
                 assert_eq!(image_url.url, "https://example.com/a.png");
-                assert_eq!(image_url.detail.as_deref(), Some("auto"));
+                assert_eq!(
+                    image_url.detail,
+                    Some(llm_suite_types::message::ImageDetail::Auto)
+                );
             }
             other => panic!("expected ImageUrl, got {:?}", other),
         }
@@ -131,7 +176,7 @@ mod tests {
                 },
                 ImageUrlContent {
                     url: "https://e.com/b.jpg".to_string(),
-                    detail: Some("low".to_string()),
+                    detail: Some(llm_suite_types::message::ImageDetail::Low),
                     file_id: None,
                 },
             ],

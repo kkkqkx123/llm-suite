@@ -1,7 +1,9 @@
 use llm_suite_types::llm::{
     ToolCallMarkers, ToolCallProtocol, DEFAULT_JSON_MARKER_END, DEFAULT_JSON_MARKER_START,
 };
-use llm_suite_types::message::{LlmToolCall, Message, MessageContentValue, MessageRole};
+use llm_suite_types::message::{
+    FileContent, FileSource, LlmToolCall, Message, MessageContent, MessageContentValue, MessageRole,
+};
 
 /// Default XML tags used for text-mode tool call/result rendering.
 const XML_TOOL_CALL: &str = "tool_use";
@@ -47,13 +49,8 @@ pub fn convert_to_text_mode(
                     )
                 }) {
                     convert_tool_use_message(msg, format, markers)
-                } else if blocks.iter().any(|block| {
-                    matches!(
-                        block,
-                        llm_suite_types::message::MessageContent::ImageUrl { .. }
-                    )
-                }) {
-                    convert_image_message(msg)
+                } else if blocks.iter().any(is_media_block) {
+                    convert_media_message(msg)
                 } else {
                     msg.clone()
                 }
@@ -62,6 +59,16 @@ pub fn convert_to_text_mode(
             }
         })
         .collect()
+}
+
+/// Whether a block carries media the text protocol cannot carry inline.
+fn is_media_block(block: &MessageContent) -> bool {
+    matches!(
+        block,
+        MessageContent::ImageUrl { .. }
+            | MessageContent::InputAudio { .. }
+            | MessageContent::FileInput { .. }
+    )
 }
 
 /// Convert a message whose rich content carries tool use blocks into a
@@ -86,6 +93,7 @@ fn convert_tool_use_message(
                             name: tool_use.name.clone(),
                             arguments: tool_use.input.to_string(),
                         },
+                        thought_signature: tool_use.thought_signature.clone(),
                     })
                 }
                 _ => None,
@@ -96,37 +104,96 @@ fn convert_tool_use_message(
 
     let tool_call_text = render_tool_calls(&calls, format, markers);
     let existing = extract_text(message);
-    converted.content = MessageContentValue::Text(if existing.is_empty() {
+    let content = if existing.is_empty() {
         tool_call_text
     } else if tool_call_text.is_empty() {
         existing
     } else {
         format!("{existing}\n\n{tool_call_text}")
-    });
+    };
+    converted.content = MessageContentValue::Text(with_placeholders(content, message));
     converted.tool_calls = None;
     converted
 }
 
-/// Text-mode protocols cannot carry images inline; render image blocks as a
-/// `[image: <url>]` placeholder line instead of silently dropping them.
-fn convert_image_message(message: &Message) -> Message {
+/// Text-mode protocols cannot carry media inline; render every media block
+/// as a placeholder line instead of dropping them.
+///
+/// The placeholders name the payload, they never carry it: a data URI is
+/// reduced to its media type and size so the base64 payload stays out of
+/// the prompt.
+fn convert_media_message(message: &Message) -> Message {
     let mut converted = message.clone();
-    let text = message.text_content();
-    let mut lines: Vec<String> = Vec::new();
-    if let MessageContentValue::Rich(blocks) = &message.content {
-        for block in blocks {
-            if let llm_suite_types::message::MessageContent::ImageUrl { image_url } = block {
-                lines.push(format!("[image: {}]", image_url.url));
+    converted.content =
+        MessageContentValue::Text(with_placeholders(message.text_content(), message));
+    converted
+}
+
+/// The placeholder lines of the media blocks of a message.
+fn media_placeholders(message: &Message) -> Vec<String> {
+    let MessageContentValue::Rich(blocks) = &message.content else {
+        return Vec::new();
+    };
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            MessageContent::ImageUrl { image_url } => {
+                Some(format!("[image: {}]", media_reference(&image_url.url)))
             }
-        }
-    }
-    let placeholders = lines.join("\n");
-    converted.content = MessageContentValue::Text(if text.is_empty() {
+            MessageContent::InputAudio { input_audio } => {
+                Some(format!("[audio: {}]", input_audio.format))
+            }
+            MessageContent::FileInput { file } => {
+                Some(format!("[file: {}]", file_reference(file)))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The text of a message followed by the placeholders of its media blocks.
+///
+/// No path through the text protocol loses a media block: the placeholders
+/// stand in for the payload the protocol cannot carry.
+fn with_placeholders(text: String, message: &Message) -> String {
+    let placeholders = media_placeholders(message).join("\n");
+    if placeholders.is_empty() {
+        text
+    } else if text.is_empty() {
         placeholders
     } else {
         format!("{text}\n{placeholders}")
-    });
-    converted
+    }
+}
+
+/// A short reference to a media payload.
+///
+/// A remote reference stays as it is; an inline payload is named by its
+/// media type and size, never by its content.
+fn media_reference(url: &str) -> String {
+    let Some(rest) = url.strip_prefix("data:") else {
+        return url.to_string();
+    };
+    let (meta, payload) = rest.split_once(',').unwrap_or((rest, ""));
+    let media_type = meta.trim_end_matches(";base64");
+    let media_type = if media_type.is_empty() {
+        "application/octet-stream"
+    } else {
+        media_type
+    };
+    format!("{media_type} ({} base64 chars)", payload.len())
+}
+
+/// A short reference to a document payload.
+fn file_reference(file: &FileContent) -> String {
+    match &file.source {
+        FileSource::Base64 { media_type, data } => {
+            format!("{media_type} ({} base64 chars)", data.len())
+        }
+        FileSource::Url { url } => url.clone(),
+        FileSource::FileId { file_id } => file_id.clone(),
+        FileSource::Content { blocks } => format!("{} content blocks", blocks.len()),
+    }
 }
 
 /// Convert an assistant message with tool calls into a text-only message.
@@ -140,11 +207,12 @@ pub fn convert_assistant_message(
 
     let tool_call_text = render_tool_calls(calls, format, markers);
     let existing = extract_text(message);
-    converted.content = MessageContentValue::Text(if existing.is_empty() {
+    let content = if existing.is_empty() {
         tool_call_text
     } else {
         format!("{existing}\n\n{tool_call_text}")
-    });
+    };
+    converted.content = MessageContentValue::Text(with_placeholders(content, message));
     converted.tool_calls = None;
     converted
 }
@@ -157,13 +225,9 @@ pub fn convert_tool_result_message(
 ) -> Message {
     let mut converted = message.clone();
     let id = message.tool_call_id.as_deref().unwrap_or("");
+    let rendered = render_tool_result(id, &extract_text(message), format, markers);
     converted.role = MessageRole::User;
-    converted.content = MessageContentValue::Text(render_tool_result(
-        id,
-        &extract_text(message),
-        format,
-        markers,
-    ));
+    converted.content = MessageContentValue::Text(with_placeholders(rendered, message));
     converted.tool_call_id = None;
     converted
 }
@@ -266,6 +330,7 @@ mod tests {
                 name: name.to_string(),
                 arguments: args.to_string(),
             },
+            thought_signature: None,
         }
     }
 
@@ -325,6 +390,86 @@ mod tests {
     }
 
     #[test]
+    fn a_media_message_keeps_every_media_block() {
+        let message = Message {
+            id: llm_suite_types::Id::new(),
+            role: MessageRole::User,
+            content: MessageContentValue::Rich(vec![
+                llm_suite_types::message::MessageContent::Text {
+                    text: "look at this".to_string(),
+                },
+                llm_suite_types::message::MessageContent::ImageUrl {
+                    image_url: llm_suite_types::message::ImageUrlContent {
+                        url: "https://e.com/a.png".to_string(),
+                        detail: None,
+                        file_id: None,
+                    },
+                },
+                llm_suite_types::message::MessageContent::FileInput {
+                    file: llm_suite_types::message::FileContent {
+                        source: llm_suite_types::message::FileSource::Url {
+                            url: "https://e.com/report.pdf".to_string(),
+                        },
+                        filename: Some("report.pdf".to_string()),
+                        detail: None,
+                        citations_enabled: None,
+                        context: None,
+                    },
+                },
+            ]),
+            timestamp: 0,
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+            thinking: None,
+            thinking_signature: None,
+            metadata: None,
+        };
+        let converted = convert_to_text_mode(&[message], &ToolCallProtocol::Xml, None);
+        let MessageContentValue::Text(text) = &converted[0].content else {
+            panic!("expected text");
+        };
+        assert!(text.contains("[image: https://e.com/a.png]"), "{text}");
+        assert!(
+            text.contains("[file: https://e.com/report.pdf]"),
+            "the document must not be dropped: {text}"
+        );
+    }
+
+    #[test]
+    fn an_inline_payload_never_reaches_the_prompt() {
+        let message = Message {
+            id: llm_suite_types::Id::new(),
+            role: MessageRole::User,
+            content: MessageContentValue::Rich(vec![
+                llm_suite_types::message::MessageContent::ImageUrl {
+                    image_url: llm_suite_types::message::ImageUrlContent {
+                        url: "data:image/png;base64,QUJDREVGRw==".to_string(),
+                        detail: None,
+                        file_id: None,
+                    },
+                },
+            ]),
+            timestamp: 0,
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+            thinking: None,
+            thinking_signature: None,
+            metadata: None,
+        };
+        let converted = convert_to_text_mode(&[message], &ToolCallProtocol::Xml, None);
+        let MessageContentValue::Text(text) = &converted[0].content else {
+            panic!("expected text");
+        };
+        assert!(text.contains("image/png"), "{text}");
+        assert!(
+            !text.contains("QUJDREVGRw"),
+            "the payload stays out: {text}"
+        );
+    }
+
+    #[test]
     fn rich_tool_use_blocks_are_rendered_in_text_mode() {
         let message = Message {
             id: llm_suite_types::Id::new(),
@@ -338,6 +483,7 @@ mod tests {
                         id: "c1".to_string(),
                         name: "get_weather".to_string(),
                         input: serde_json::json!({"city": "Beijing"}),
+                        thought_signature: None,
                     },
                 },
             ]),
@@ -453,5 +599,76 @@ mod tests {
         let converted = convert_to_text_mode(&messages, &ToolCallProtocol::Xml, None);
         assert_eq!(converted[0].content, messages[0].content);
         assert!(converted[0].tool_calls.is_none());
+    }
+
+    #[test]
+    fn a_tool_call_message_keeps_its_media_as_a_placeholder() {
+        let mut assistant = make_msg(MessageRole::Assistant, "");
+        assistant.content = MessageContentValue::Rich(vec![
+            MessageContent::ToolUse {
+                tool_use: llm_suite_types::message::ToolUseContent {
+                    id: "c1".to_string(),
+                    name: "screenshot".to_string(),
+                    input: serde_json::json!({}),
+                    thought_signature: None,
+                },
+            },
+            MessageContent::ImageUrl {
+                image_url: llm_suite_types::message::ImageUrlContent {
+                    url: "data:image/png;base64,QUJDREVGRw==".to_string(),
+                    detail: None,
+                    file_id: None,
+                },
+            },
+        ]);
+        let converted = convert_to_text_mode(&[assistant], &ToolCallProtocol::Xml, None);
+        let MessageContentValue::Text(text) = &converted[0].content else {
+            panic!("expected text");
+        };
+        assert!(text.contains("<tool_use>"), "{text}");
+        assert!(
+            text.contains("[image: image/png"),
+            "the picture must not be dropped: {text}"
+        );
+        assert!(
+            !text.contains("QUJDREVGRw"),
+            "the payload stays out of the prompt: {text}"
+        );
+    }
+
+    #[test]
+    fn a_tool_result_message_keeps_its_media_as_a_placeholder() {
+        let mut result = make_msg(MessageRole::Tool, "attached");
+        result.tool_call_id = Some("c1".to_string());
+        result.content = MessageContentValue::Rich(vec![
+            MessageContent::Text {
+                text: "attached".to_string(),
+            },
+            MessageContent::FileInput {
+                file: llm_suite_types::message::FileContent {
+                    source: llm_suite_types::message::FileSource::Base64 {
+                        media_type: "application/pdf".to_string(),
+                        data: "QUJDREVGRw==".to_string(),
+                    },
+                    filename: Some("report.pdf".to_string()),
+                    detail: None,
+                    citations_enabled: None,
+                    context: None,
+                },
+            },
+        ]);
+        let converted = convert_to_text_mode(&[result], &ToolCallProtocol::Xml, None);
+        let MessageContentValue::Text(text) = &converted[0].content else {
+            panic!("expected text");
+        };
+        assert!(text.contains("<tool_result>"), "{text}");
+        assert!(
+            text.contains("[file: application/pdf"),
+            "the document must not be dropped: {text}"
+        );
+        assert!(
+            !text.contains("QUJDREVGRw"),
+            "the payload stays out of the prompt: {text}"
+        );
     }
 }

@@ -73,6 +73,7 @@ pub fn parse_openai_chat_response(body: &str) -> LlmResult<LlmResponseType> {
                         r#type: "function".to_string(),
                         call_id: None,
                         function: llm_suite_types::message::LlmFunctionCall { name, arguments },
+                        thought_signature: None,
                     })
                 })
                 .collect()

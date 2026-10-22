@@ -1,7 +1,7 @@
 //! Parsing of a non-streaming Gemini native response body.
 
 use crate::error::LlmResult;
-use llm_suite_types::llm::{LlmRequest, LlmResult as LlmResponseType, THOUGHT_SIGNATURES_KEY};
+use llm_suite_types::llm::{LlmRequest, LlmResult as LlmResponseType};
 
 use super::finish_reason::normalize_finish_reason;
 use super::part::{read_parts, Part};
@@ -50,12 +50,10 @@ pub fn parse_gemini_response(body: &str) -> LlmResult<LlmResponseType> {
     let mut text_content = String::new();
     let mut reasoning_content: Option<String> = None;
     let mut tool_calls = Vec::new();
-    // Generated media parts (inlineData / fileData) preserved as rich
-    // content blocks on the assistant message.
-    let mut media_blocks: Vec<llm_suite_types::message::MessageContent> = Vec::new();
-    // One entry per tool call; the signature the provider attached to the
-    // function call has to travel back with that call.
-    let mut thought_signatures: Vec<Option<String>> = Vec::new();
+    // The parts that do not fit the plain-text form (generated media and
+    // the provider's own parts) preserved as rich content blocks on the
+    // assistant message.
+    let mut rich_blocks: Vec<llm_suite_types::message::MessageContent> = Vec::new();
 
     if let Some(candidate) = first_candidate {
         let content = candidate.get("content");
@@ -65,7 +63,9 @@ pub fn parse_gemini_response(body: &str) -> LlmResult<LlmResponseType> {
                 for part in read_parts(parts) {
                     match part {
                         Part::Thought { text } => {
-                            reasoning_content.get_or_insert_with(String::new).push_str(&text);
+                            reasoning_content
+                                .get_or_insert_with(String::new)
+                                .push_str(&text);
                         }
                         Part::Text { text } => {
                             text_content.push_str(&text);
@@ -82,27 +82,37 @@ pub fn parse_gemini_response(body: &str) -> LlmResult<LlmResponseType> {
                                 (Some(data), _) => {
                                     let url = format!("data:{media_type};base64,{data}");
                                     llm_suite_types::message::MessageContent::ImageUrl {
-                                        image_url:
-                                            llm_suite_types::message::ImageUrlContent {
-                                                url,
-                                                detail: None,
-                                                file_id: None,
-                                            },
+                                        image_url: llm_suite_types::message::ImageUrlContent {
+                                            url,
+                                            detail: None,
+                                            file_id: None,
+                                        },
                                     }
                                 }
                                 (None, Some(uri)) => {
                                     llm_suite_types::message::MessageContent::ImageUrl {
-                                        image_url:
-                                            llm_suite_types::message::ImageUrlContent {
-                                                url: uri,
-                                                detail: None,
-                                                file_id: None,
-                                            },
+                                        image_url: llm_suite_types::message::ImageUrlContent {
+                                            url: uri,
+                                            detail: None,
+                                            file_id: None,
+                                        },
                                     }
                                 }
                                 (None, None) => continue,
                             };
-                            media_blocks.push(block);
+                            rich_blocks.push(block);
+                        }
+                        Part::Native { kind, payload } => {
+                            // The part travels in the provider's own shape
+                            // so the reply can be replayed in the next
+                            // turn.
+                            rich_blocks.push(
+                                llm_suite_types::message::MessageContent::Native {
+                                    provider: "gemini".to_string(),
+                                    kind,
+                                    payload,
+                                },
+                            );
                         }
                         Part::FunctionCall {
                             name,
@@ -126,8 +136,10 @@ pub fn parse_gemini_response(body: &str) -> LlmResult<LlmResponseType> {
                                     name,
                                     arguments,
                                 },
+                                // The provider signature travels back with
+                                // the call it belongs to.
+                                thought_signature: signature,
                             });
-                            thought_signatures.push(signature);
                         }
                     }
                 }
@@ -137,25 +149,13 @@ pub fn parse_gemini_response(body: &str) -> LlmResult<LlmResponseType> {
 
     let usage = json.get("usageMetadata").map(parse_usage_metadata);
 
-    let mut message_metadata = std::collections::HashMap::new();
-    if !thought_signatures.is_empty() {
-        message_metadata.insert(
-            THOUGHT_SIGNATURES_KEY.to_string(),
-            serde_json::json!(thought_signatures),
-        );
-    }
-    let message_metadata = if message_metadata.is_empty() {
-        None
-    } else {
-        Some(message_metadata)
-    };
-
     let message = llm_suite_types::message::Message {
         id: llm_suite_types::Id::new(),
         role: llm_suite_types::message::MessageRole::Assistant,
-        // Generated media rides on the message as rich blocks; a response
-        // without media stays the plain-text shorthand.
-        content: if media_blocks.is_empty() {
+        // The parts that do not fit the plain-text form ride on the
+        // message as rich blocks; a response without them stays the
+        // plain-text shorthand.
+        content: if rich_blocks.is_empty() {
             llm_suite_types::message::MessageContentValue::Text(text_content.clone())
         } else {
             let mut blocks = Vec::new();
@@ -164,7 +164,7 @@ pub fn parse_gemini_response(body: &str) -> LlmResult<LlmResponseType> {
                     text: text_content.clone(),
                 });
             }
-            blocks.extend(media_blocks);
+            blocks.extend(rich_blocks);
             llm_suite_types::message::MessageContentValue::Rich(blocks)
         },
         timestamp: llm_suite_common::time::now(),
@@ -179,7 +179,7 @@ pub fn parse_gemini_response(body: &str) -> LlmResult<LlmResponseType> {
         // the message in a follow-up turn keeps it.
         thinking: reasoning_content.clone(),
         thinking_signature: None,
-        metadata: message_metadata,
+        metadata: None,
     };
 
     // The envelope carries the normalized stop value; the raw
@@ -206,12 +206,6 @@ pub fn parse_gemini_response(body: &str) -> LlmResult<LlmResponseType> {
         .and_then(|v| v.as_str())
     {
         metadata.insert("finish_reason_raw".to_string(), serde_json::json!(fr));
-    }
-    if !thought_signatures.is_empty() {
-        metadata.insert(
-            "thought_signatures".to_string(),
-            serde_json::json!(thought_signatures),
-        );
     }
     let metadata = if metadata.is_empty() {
         None
@@ -273,6 +267,37 @@ mod tests {
     }
 
     #[test]
+    fn an_executable_code_part_is_kept_and_replayed() {
+        // The code execution parts are the provider's own; they travel in
+        // their own shape so the code does not vanish.
+        let body = r#"{
+            "candidates": [{"content": {"parts": [
+                {"executableCode": {"language": "PYTHON", "code": "print(1)"}}
+            ]}}]
+        }"#;
+        let result = parse_response(body, &request(vec![], None)).expect("must parse");
+        let message = result.message.clone();
+        let llm_suite_types::message::MessageContentValue::Rich(blocks) = &message.content else {
+            panic!("the code part must be kept as rich content");
+        };
+        assert!(
+            matches!(
+                blocks[0],
+                llm_suite_types::message::MessageContent::Native { .. }
+            ),
+            "the code part must be a native block: {blocks:?}"
+        );
+
+        let contents = convert_messages(std::slice::from_ref(&message)).expect("must convert");
+        let parts = contents[0]["parts"].as_array().unwrap();
+        assert_eq!(
+            parts[0]["executableCode"]["code"],
+            serde_json::json!("print(1)"),
+            "the part travels verbatim"
+        );
+    }
+
+    #[test]
     fn thought_signature_travels_back_with_the_function_call() {
         let body = r#"{
             "candidates": [{"content": {"parts": [
@@ -281,13 +306,14 @@ mod tests {
         }"#;
         let result = parse_response(body, &request(vec![], None)).expect("must parse");
         let message = result.message.clone();
+        let calls = message.tool_calls.as_ref().expect("tool calls present");
         assert_eq!(
-            message.metadata.as_ref().unwrap()["thought_signatures"],
-            serde_json::json!(["sig-1"])
+            calls[0].thought_signature.as_deref(),
+            Some("sig-1"),
+            "the provider signature rides on the call it belongs to"
         );
 
-        let contents =
-            convert_messages(std::slice::from_ref(&message)).expect("must convert");
+        let contents = convert_messages(std::slice::from_ref(&message)).expect("must convert");
         let parts = contents[0]["parts"].as_array().unwrap();
         assert_eq!(parts[0]["thoughtSignature"], serde_json::json!("sig-1"));
     }
@@ -301,10 +327,12 @@ mod tests {
             ]}}]
         }"#;
         let result = parse_response(body, &request(vec![], None)).expect("must parse");
-        assert_eq!(
-            result.message.metadata.as_ref().unwrap()["thought_signatures"],
-            serde_json::json!(["sig-1"])
-        );
+        let calls = result
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("tool calls present");
+        assert_eq!(calls[0].thought_signature.as_deref(), Some("sig-1"));
     }
 
     #[test]
@@ -346,10 +374,8 @@ mod tests {
             ]}}]
         }"#;
         let result = parse_response(body, &request(vec![], None)).expect("must parse");
-        assert_eq!(
-            result.metadata.as_ref().unwrap()["thought_signatures"],
-            serde_json::json!(["sig-1"])
-        );
+        let calls = result.tool_calls.as_ref().expect("tool calls present");
+        assert_eq!(calls[0].thought_signature.as_deref(), Some("sig-1"));
     }
 
     #[test]
@@ -428,12 +454,14 @@ mod tests {
             other => panic!("expected rich content, got {other:?}"),
         };
         assert_eq!(blocks.len(), 2);
-        assert!(matches!(&blocks[0], llm_suite_types::message::MessageContent::Text { .. }));
+        assert!(matches!(
+            &blocks[0],
+            llm_suite_types::message::MessageContent::Text { .. }
+        ));
         match &blocks[1] {
             llm_suite_types::message::MessageContent::ImageUrl { image_url } => {
                 assert_eq!(
-                    image_url.url,
-                    "data:image/png;base64,QUJD",
+                    image_url.url, "data:image/png;base64,QUJD",
                     "the inline blob becomes a data URI"
                 );
             }

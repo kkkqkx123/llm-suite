@@ -22,8 +22,7 @@ pub fn build_body(request: &LlmRequest, profile: &LlmProfile) -> LlmResult<serde
     // field in both modes. Text mode injects the original system + tool
     // usage instructions + declarations; native mode keeps the original
     // system message.
-    let (system_content, _) =
-        llm_suite_tool_call::tool::protocol::extract_system_message(&request.messages);
+    let system_content = super::super::shared::system_content(request)?;
 
     let history = if use_text_mode {
         super::super::shared::convert_history_for_text_mode(&request.messages, request)
@@ -50,7 +49,7 @@ pub fn build_body(request: &LlmRequest, profile: &LlmProfile) -> LlmResult<serde
     }
 
     if use_text_mode {
-        let system = super::super::shared::text_mode_system_content(request);
+        let system = super::super::shared::text_mode_system_content(request)?;
         if !system.is_empty() {
             body["systemInstruction"] = serde_json::json!({
                 "parts": [{"text": system}],
@@ -58,13 +57,11 @@ pub fn build_body(request: &LlmRequest, profile: &LlmProfile) -> LlmResult<serde
             });
         }
     } else {
-        if let Some(system) = system_content {
-            if !system.is_empty() {
-                body["systemInstruction"] = serde_json::json!({
-                    "parts": [{"text": system}],
-                    "role": "user",
-                });
-            }
+        if !system_content.is_empty() {
+            body["systemInstruction"] = serde_json::json!({
+                "parts": [{"text": system_content}],
+                "role": "user",
+            });
         }
         if let Some(tools) = &request.tools {
             // Reuse the single `convert_tools` implementation so the body
@@ -186,10 +183,7 @@ mod tests {
             thinking_signature: None,
             metadata: None,
         };
-        let req = request(
-            vec![tool_msg, msg(MessageRole::User, "next")],
-            None,
-        );
+        let req = request(vec![tool_msg, msg(MessageRole::User, "next")], None);
         let body = build_body(&req, &profile()).expect("must build");
         let contents = body["contents"].as_array().unwrap();
         assert_eq!(
@@ -235,7 +229,8 @@ mod tests {
             serde_json::json!("get_weather")
         );
         // The trait method and the body must agree on the shape.
-        let trait_shape = super::super::tools::convert_tools(req.tools.as_deref().unwrap()).unwrap();
+        let trait_shape =
+            super::super::tools::convert_tools(req.tools.as_deref().unwrap()).unwrap();
         assert_eq!(trait_shape, body["tools"].as_array().unwrap().clone());
     }
 

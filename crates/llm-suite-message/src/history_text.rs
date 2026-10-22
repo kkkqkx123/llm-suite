@@ -88,6 +88,7 @@ mod tests {
                 name: "search".to_string(),
                 arguments: "{}".to_string(),
             },
+            thought_signature: None,
         }]);
         let history = vec![text_message(MessageRole::User, "hi"), assistant];
         assert_eq!(

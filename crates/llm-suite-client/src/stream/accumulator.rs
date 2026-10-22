@@ -126,14 +126,15 @@ impl MessageAccumulator {
             MessageStreamEvent::InputJson(input_json) => {
                 // For Anthropic-style input_json_delta, accumulate by index
                 let index = input_json.index.unwrap_or(0);
-                let arguments = self.tool_calls.append_arguments(index, &input_json.partial_json);
+                let arguments = self
+                    .tool_calls
+                    .append_arguments(index, &input_json.partial_json);
 
                 // Try to parse the accumulated JSON
-                let parsed_snapshot = llm_suite_tool_call::partial_json_parser::parse_partial_json(
-                    &arguments,
-                )
-                .as_complete()
-                .cloned();
+                let parsed_snapshot =
+                    llm_suite_tool_call::partial_json_parser::parse_partial_json(&arguments)
+                        .as_complete()
+                        .cloned();
 
                 Accumulated::Forwarded(MessageStreamEvent::InputJson(MessageStreamInputJson {
                     partial_json: input_json.partial_json,
@@ -165,6 +166,16 @@ impl MessageAccumulator {
                 });
                 Accumulated::Forwarded(MessageStreamEvent::RedactedThinking(redacted))
             }
+            MessageStreamEvent::NativeBlock(native) => {
+                // The provider block travels verbatim so the reply can be
+                // replayed in the next turn.
+                self.content_blocks.push(MessageContent::Native {
+                    provider: native.provider.clone(),
+                    kind: native.kind.clone(),
+                    payload: native.payload.clone(),
+                });
+                Accumulated::Forwarded(MessageStreamEvent::NativeBlock(native))
+            }
             MessageStreamEvent::Annotation(annotation) => {
                 // The sources of a grounded answer reach the final message
                 // under the same key the non-streaming path uses.
@@ -181,7 +192,7 @@ impl MessageAccumulator {
                 }
                 self.final_emitted = true;
 
-                let (tool_calls, call_signatures) = self.tool_calls.assemble();
+                let tool_calls = self.tool_calls.assemble();
                 let final_message = build_final_message(TurnState {
                     text: &self.text_snapshot,
                     reasoning: &self.reasoning_snapshot,
@@ -193,7 +204,6 @@ impl MessageAccumulator {
                     annotations: &self.annotations,
                     usage: self.usage.as_ref(),
                     tool_calls: &tool_calls,
-                    call_signatures: &call_signatures,
                 });
 
                 Accumulated::Finalized(MessageStreamEvent::FinalMessage(final_message))

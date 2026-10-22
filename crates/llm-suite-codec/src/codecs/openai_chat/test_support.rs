@@ -97,6 +97,7 @@ pub(crate) fn rich_tool_msg() -> Message {
                     id: "call_1".to_string(),
                     name: "get_weather".to_string(),
                     input: serde_json::json!({"city": "Beijing"}),
+                    thought_signature: None,
                 },
             },
             MessageContent::ToolResult {
@@ -242,6 +243,7 @@ mod tests {
                 name: "get_weather".to_string(),
                 arguments: r#"{"city":"Beijing"}"#.to_string(),
             },
+            thought_signature: None,
         }]);
         let mut tool_result = text_msg(MessageRole::Tool, "sunny");
         tool_result.tool_call_id = Some("call_1".to_string());

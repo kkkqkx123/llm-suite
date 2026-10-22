@@ -39,15 +39,31 @@ pub fn apply_prompt_caching(body: &mut serde_json::Value, caching: &LlmPromptCac
         if message_count == 0 {
             break;
         }
-        if let Some(last_block) = body
+        let Some(blocks) = body
             .get_mut("messages")
             .and_then(|v| v.as_array_mut())
             .and_then(|m| m.get_mut(index))
             .and_then(|m| m.get_mut("content"))
             .and_then(|v| v.as_array_mut())
-            .and_then(|b| b.last_mut())
+        else {
+            continue;
+        };
+        // The thinking blocks carry no `cache_control`; the breakpoint goes
+        // on the last block that accepts one.
+        if let Some(block) = blocks
+            .iter_mut()
+            .rev()
+            .find(|block| !is_thinking_block(block))
         {
-            last_block["cache_control"] = control.clone();
+            block["cache_control"] = control.clone();
         }
     }
+}
+
+/// Whether a block is a thinking block; those carry no cache control.
+fn is_thinking_block(block: &serde_json::Value) -> bool {
+    matches!(
+        block.get("type").and_then(|v| v.as_str()),
+        Some("thinking") | Some("redacted_thinking")
+    )
 }

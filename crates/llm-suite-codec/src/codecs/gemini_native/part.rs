@@ -30,6 +30,15 @@ pub enum Part {
         /// Remote URI for `fileData` parts.
         uri: Option<String>,
     },
+    /// A part the codec does not model: it carries a part field the
+    /// format reserves for the provider (executable code, code execution
+    /// result, video metadata).
+    Native {
+        /// The part field the payload carries.
+        kind: String,
+        /// The part as the provider sent it.
+        payload: serde_json::Value,
+    },
 }
 
 /// Read the parts of a candidate.
@@ -48,6 +57,20 @@ pub fn read_parts(parts: &[serde_json::Value]) -> Vec<Part> {
             .map(String::from);
         if let Some(signature) = &signature {
             pending_signature = Some(signature.clone());
+        }
+        // A part that carries a field the format reserves for the provider
+        // (executable code, code execution result, video metadata) is kept
+        // in the provider's own shape: the whole part travels, so the
+        // payload it accompanies is not reported twice.
+        if let Some((kind, _)) = crate::codecs::helpers::GEMINI_NATIVE_PART_FIELDS
+            .iter()
+            .find(|(_, field)| part.get(*field).is_some())
+        {
+            result.push(Part::Native {
+                kind: (*kind).to_string(),
+                payload: part.clone(),
+            });
+            continue;
         }
         // `thought` is a boolean flag on the part (official schema:
         // Part.thought: bool); a part like {"text": "...", "thought": true}

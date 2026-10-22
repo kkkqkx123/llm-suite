@@ -17,7 +17,6 @@ pub struct TurnState<'a> {
     pub annotations: &'a [serde_json::Value],
     pub usage: Option<&'a TokenUsageStats>,
     pub tool_calls: &'a [LlmToolCall],
-    pub call_signatures: &'a [Option<String>],
 }
 
 /// Build the final message of the turn.
@@ -36,7 +35,7 @@ pub fn build_final_message(state: TurnState<'_>) -> MessageStreamFinal {
         }
         MessageContentValue::Rich(blocks)
     };
-    let metadata = message_metadata(state.call_signatures, state.annotations);
+    let metadata = message_metadata(state.annotations);
 
     let message = Message {
         id: llm_suite_types::Id::new(),
@@ -77,37 +76,15 @@ pub fn build_final_message(state: TurnState<'_>) -> MessageStreamFinal {
     }
 }
 
-/// The metadata of the final message: the provider signatures of the
-/// tool calls and the sources of a grounded answer. `None` when the
-/// turn carries neither.
+/// The metadata of the final message: the sources of a grounded answer.
+/// `None` when the turn carries none.
 fn message_metadata(
-    signatures: &[Option<String>],
     annotations: &[serde_json::Value],
 ) -> Option<std::collections::HashMap<String, serde_json::Value>> {
-    let mut metadata = tool_call_signatures(signatures);
     if annotations.is_empty() {
-        return metadata;
-    }
-    metadata.get_or_insert_with(Default::default).insert(
-        ANNOTATIONS_KEY.to_string(),
-        serde_json::json!(annotations),
-    );
-    metadata
-}
-
-/// The provider signatures of the assembled tool calls, one entry per
-/// call in the order the calls are reported. `None` when no call carries
-/// a signature.
-fn tool_call_signatures(
-    signatures: &[Option<String>],
-) -> Option<std::collections::HashMap<String, serde_json::Value>> {
-    if signatures.iter().all(|signature| signature.is_none()) {
         return None;
     }
     let mut metadata = std::collections::HashMap::new();
-    metadata.insert(
-        llm_suite_types::llm::THOUGHT_SIGNATURES_KEY.to_string(),
-        serde_json::json!(signatures),
-    );
+    metadata.insert(ANNOTATIONS_KEY.to_string(), serde_json::json!(annotations));
     Some(metadata)
 }

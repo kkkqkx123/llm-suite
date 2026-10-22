@@ -84,6 +84,7 @@ async fn tool_calls_spec_builds_matching_message() {
             name: "search".to_string(),
             arguments: r#"{"q":"rust"}"#.to_string(),
         },
+        thought_signature: None,
     }]));
     let result = client.generate(&request("mock", "hi"), None).await.unwrap();
     assert_eq!(result.tool_calls.as_ref().unwrap().len(), 1);
@@ -391,6 +392,7 @@ async fn synthesize_preserves_tool_calls_from_final_message() {
                 name: "search".to_string(),
                 arguments: r#"{"q":"rust"}"#.to_string(),
             },
+            thought_signature: None,
         }]),
         thinking: None,
         thinking_signature: None,

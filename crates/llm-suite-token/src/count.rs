@@ -27,22 +27,24 @@ pub fn estimate_message_tokens(msg: &Message) -> u32 {
                         estimate_tokens(&json) as u32
                     }
                     MessageContent::ToolResult { tool_result } => {
-                        let text = match &tool_result.blocks {
-                            Some(blocks) => blocks
-                                .iter()
-                                .filter_map(|b| match b {
-                                    MessageContent::Text { text } => Some(text.clone()),
-                                    _ => None,
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n"),
-                            None => tool_result.content.clone(),
-                        };
-                        estimate_tokens(&text) as u32
+                        // The plain-text content of the result counts on
+                        // its own; the rich blocks add the media they
+                        // carry.
+                        let mut total = estimate_tokens(&tool_result.content) as u32;
+                        if let Some(blocks) = &tool_result.blocks {
+                            for block in blocks {
+                                total += match block {
+                                    MessageContent::Text { text } => estimate_tokens(text) as u32,
+                                    MessageContent::ImageUrl { image_url } => {
+                                        estimate_image_tokens(&image_url.url)
+                                    }
+                                    _ => 0,
+                                };
+                            }
+                        }
+                        total
                     }
-                    MessageContent::ImageUrl { image_url } => {
-                        estimate_image_tokens(&image_url.url)
-                    }
+                    MessageContent::ImageUrl { image_url } => estimate_image_tokens(&image_url.url),
                     MessageContent::RedactedThinking { data } => estimate_tokens(data) as u32,
                     // Audio and file inputs are billed as their metadata
                     // plus a fixed per-item overhead; the payload itself is
@@ -60,7 +62,22 @@ pub fn estimate_message_tokens(msg: &Message) -> u32 {
                         llm_suite_types::message::FileSource::FileId { file_id } => {
                             estimate_tokens(file_id) as u32 + 200
                         }
+                        llm_suite_types::message::FileSource::Content { blocks } => blocks
+                            .iter()
+                            .map(|block| match block {
+                                MessageContent::Text { text } => estimate_tokens(text) as u32,
+                                MessageContent::ImageUrl { image_url } => {
+                                    estimate_image_tokens(&image_url.url)
+                                }
+                                _ => 0,
+                            })
+                            .sum(),
                     },
+                    // A native block is provider JSON; its size is what
+                    // the provider charges for.
+                    MessageContent::Native { payload, .. } => {
+                        estimate_tokens(&payload.to_string()) as u32
+                    }
                 };
             }
         }
@@ -197,6 +214,7 @@ mod tests {
                 name: "get_weather".to_string(),
                 arguments: r#"{"city":"Beijing"}"#.to_string(),
             },
+            thought_signature: None,
         }]);
         let total = estimate_message_tokens(&msg);
         // JSON estimate + 4 overhead; must be at least overhead
@@ -242,7 +260,13 @@ mod tests {
                 tool_result: ToolResultContent {
                     tool_use_id: "call_1".to_string(),
                     content: "the weather is sunny".to_string(),
-                    blocks: None,
+                    blocks: Some(vec![MessageContent::ImageUrl {
+                        image_url: ImageUrlContent {
+                            url: "https://example.com/img.png".to_string(),
+                            detail: None,
+                            file_id: None,
+                        },
+                    }]),
                     is_error: None,
                 },
             }]),
@@ -255,7 +279,10 @@ mod tests {
             metadata: None,
         };
         let total = estimate_message_tokens(&msg);
-        assert!(total >= 4, "tokens: {}", total);
+        assert!(
+            total >= 170,
+            "the image of the result must be counted: {total}"
+        );
     }
 
     #[test]

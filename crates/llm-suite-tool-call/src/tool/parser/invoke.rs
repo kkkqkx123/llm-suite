@@ -136,6 +136,7 @@ fn convert_invoke_object(value: serde_json::Value) -> Result<LlmToolCall, String
             name: tool_name.to_string(),
             arguments: serde_json::to_string(&parameters).unwrap_or_default(),
         },
+        thought_signature: None,
     })
 }
 

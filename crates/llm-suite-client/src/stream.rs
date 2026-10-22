@@ -216,13 +216,11 @@ mod tests {
         let Accumulated::Finalized(MessageStreamEvent::FinalMessage(final_msg)) = final_event else {
             panic!("expected FinalMessage");
         };
-        let metadata = final_msg
-            .message
-            .metadata
-            .expect("metadata must be present");
+        let calls = final_msg.message.tool_calls.expect("tool calls present");
         assert_eq!(
-            metadata[llm_suite_types::llm::THOUGHT_SIGNATURES_KEY],
-            serde_json::json!(["sig-1"])
+            calls[0].thought_signature.as_deref(),
+            Some("sig-1"),
+            "the provider signature rides on the call itself"
         );
     }
 

@@ -1,5 +1,6 @@
 use crate::error::{LlmError, LlmResult};
 use llm_suite_types::llm::LlmProfile;
+use llm_suite_types::message::MessageContent;
 use std::collections::HashMap;
 
 /// An image reference resolved into a form a provider can carry on the wire.
@@ -56,13 +57,76 @@ pub fn resolve_image_payload(url: &str) -> LlmResult<ResolvedImage> {
     }
 }
 
-/// Validate an image `detail` hint against the values the OpenAI wire
-/// formats accept (`auto` | `low` | `high` | `original`).
-pub fn validate_detail(detail: &str) -> LlmResult<()> {
-    match detail {
-        "auto" | "low" | "high" | "original" => Ok(()),
-        other => Err(LlmError::ConfigError(format!(
-            "invalid image detail `{other}` (expected auto|low|high|original)"
+/// The name of a content block, used in the error messages.
+pub fn block_name(block: &MessageContent) -> &'static str {
+    match block {
+        MessageContent::Text { .. } => "text",
+        MessageContent::ImageUrl { .. } => "image_url",
+        MessageContent::InputAudio { .. } => "input_audio",
+        MessageContent::FileInput { .. } => "file_input",
+        MessageContent::ToolUse { .. } => "tool_use",
+        MessageContent::ToolResult { .. } => "tool_result",
+        MessageContent::Thinking { .. } => "thinking",
+        MessageContent::RedactedThinking { .. } => "redacted_thinking",
+        MessageContent::Native { .. } => "native",
+    }
+}
+
+/// The native blocks the Gemini format recognizes.
+///
+/// A Gemini part is identified by the field it carries, not by a `type`
+/// tag, so the list names the part field of every native block the format
+/// accepts.
+pub(crate) const GEMINI_NATIVE_PART_FIELDS: [(&str, &str); 4] = [
+    ("video_metadata", "videoMetadata"),
+    ("executable_code", "executableCode"),
+    ("code_execution_result", "codeExecutionResult"),
+    ("media_resolution", "mediaResolution"),
+];
+
+/// Validate a native block and return the payload to put on the wire.
+///
+/// The payload is the provider's own block and is used verbatim; the kind
+/// says what the block is. Two rules hold for every format: the block must
+/// belong to the family the format serves, and the payload must carry the
+/// field that identifies it — the `type` tag for the OpenAI and the
+/// Anthropic formats, the part field for Gemini. A block that breaks
+/// either rule is rejected instead of being sent as something the
+/// provider never asked for.
+pub fn native_block(
+    provider: &str,
+    format: &str,
+    kind: &str,
+    payload: &serde_json::Value,
+) -> LlmResult<serde_json::Value> {
+    if provider != format {
+        return Err(LlmError::ConfigError(format!(
+            "the native block `{kind}` belongs to the `{provider}` format; the {format} format cannot carry it"
+        )));
+    }
+    if format == "gemini" {
+        let Some((_, field)) = GEMINI_NATIVE_PART_FIELDS
+            .iter()
+            .find(|(name, _)| *name == kind)
+        else {
+            return Err(LlmError::ConfigError(format!(
+                "gemini has no native part `{kind}`"
+            )));
+        };
+        if payload.get(*field).is_none() {
+            return Err(LlmError::ConfigError(format!(
+                "the native block `{kind}` carries no `{field}` field"
+            )));
+        }
+        return Ok(payload.clone());
+    }
+    match payload.get("type").and_then(|v| v.as_str()) {
+        Some(block_type) if block_type == kind => Ok(payload.clone()),
+        Some(block_type) => Err(LlmError::ConfigError(format!(
+            "the native block `{kind}` carries the type `{block_type}`"
+        ))),
+        None => Err(LlmError::ConfigError(format!(
+            "the native block `{kind}` has no `type` field"
         ))),
     }
 }
@@ -77,8 +141,8 @@ pub fn is_gemini_file_uri(url: &str) -> bool {
         return true;
     }
     if url.starts_with("https://") {
-        let host_path_ok = url.contains("generativelanguage.googleapis.com")
-            && url.contains("/files/");
+        let host_path_ok =
+            url.contains("generativelanguage.googleapis.com") && url.contains("/files/");
         let youtube_ok = url.starts_with("https://youtube.com/")
             || url.starts_with("https://www.youtube.com/")
             || url.starts_with("https://youtu.be/");
@@ -87,9 +151,13 @@ pub fn is_gemini_file_uri(url: &str) -> bool {
     false
 }
 
-/// Infer an image media type from a URL: data URI prefix first, then file
-/// extension. Falls back to `image/png`.
-pub fn guess_image_media_type(url: &str) -> String {
+/// The media type of a reference, inferred from the data URI prefix or the
+/// file extension.
+///
+/// The inference covers the media the providers accept (images, documents,
+/// audio, video); an extension nobody knows falls back to the given
+/// default, which the caller picks per kind of content.
+pub fn guess_media_type(url: &str, fallback: &str) -> String {
     if let Some(rest) = url.strip_prefix("data:") {
         if let Some(meta) = rest.split(',').next() {
             let meta = meta.trim_end_matches(";base64");
@@ -106,7 +174,22 @@ pub fn guess_image_media_type(url: &str) -> String {
         "webp" => "image/webp",
         "gif" => "image/gif",
         "bmp" => "image/bmp",
-        _ => "image/png",
+        "pdf" => "application/pdf",
+        "txt" | "text" | "md" => "text/plain",
+        "csv" => "text/csv",
+        "json" => "application/json",
+        "html" | "htm" => "text/html",
+        "mp3" => "audio/mp3",
+        "wav" => "audio/wav",
+        "m4a" => "audio/mp4",
+        "aac" => "audio/aac",
+        "flac" => "audio/flac",
+        "ogg" => "audio/ogg",
+        "mp4" => "video/mp4",
+        "mov" => "video/quicktime",
+        "webm" => "video/webm",
+        "mkv" => "video/x-matroska",
+        _ => fallback,
     }
     .to_string()
 }
@@ -340,15 +423,59 @@ mod tests {
     }
 
     #[test]
+    fn a_native_block_of_the_serving_family_is_passed_through() {
+        let payload = serde_json::json!({"type": "search_result", "title": "Example"});
+        let out = native_block("anthropic", "anthropic", "search_result", &payload)
+            .expect("the block belongs to the family");
+        assert_eq!(out, payload, "the payload travels verbatim");
+    }
+
+    #[test]
+    fn a_native_block_of_another_family_is_rejected() {
+        let payload = serde_json::json!({"type": "search_result"});
+        let err = native_block("anthropic", "openai", "search_result", &payload)
+            .expect_err("a foreign block cannot be carried");
+        assert!(format!("{err}").contains("anthropic"), "{err}");
+    }
+
+    #[test]
+    fn a_native_block_must_carry_the_field_that_identifies_it() {
+        let wrong_type = serde_json::json!({"type": "tool_use"});
+        let err = native_block("anthropic", "anthropic", "search_result", &wrong_type)
+            .expect_err("the type must match the kind");
+        assert!(format!("{err}").contains("tool_use"), "{err}");
+
+        let no_type = serde_json::json!({"title": "Example"});
+        assert!(native_block("anthropic", "anthropic", "search_result", &no_type).is_err());
+
+        // A Gemini part is identified by the field it carries.
+        let part = serde_json::json!({"videoMetadata": {"endOffset": "10s"}});
+        assert!(native_block("gemini", "gemini", "video_metadata", &part).is_ok());
+        assert!(native_block("gemini", "gemini", "media_resolution", &part).is_err());
+    }
+
+    #[test]
     fn guess_media_type_prefers_data_uri_then_extension() {
         assert_eq!(
-            guess_image_media_type("data:image/webp;base64,AA"),
+            guess_media_type("data:image/webp;base64,AA", "image/png"),
             "image/webp"
         );
         assert_eq!(
-            guess_image_media_type("https://e.com/x.jpg?a=1"),
+            guess_media_type("https://e.com/x.jpg?a=1", "image/png"),
             "image/jpeg"
         );
-        assert_eq!(guess_image_media_type("https://e.com/unknown"), "image/png");
+        assert_eq!(
+            guess_media_type("https://e.com/unknown", "image/png"),
+            "image/png"
+        );
+        assert_eq!(
+            guess_media_type("gs://bucket/report.pdf", "image/png"),
+            "application/pdf",
+            "a document must not be labelled as an image"
+        );
+        assert_eq!(
+            guess_media_type("gs://bucket/clip.mp4", "image/png"),
+            "video/mp4"
+        );
     }
 }

@@ -13,5 +13,6 @@ pub(crate) use http::{
 };
 pub(crate) use params::{merge_and_apply_params, resolve_generation};
 pub(crate) use text_mode::{
-    convert_history_for_text_mode, is_text_mode, parse_text_tool_calls, text_mode_system_content,
+    convert_history_for_text_mode, history_with_system_text, is_text_mode, parse_text_tool_calls,
+    system_content, text_mode_system_content,
 };

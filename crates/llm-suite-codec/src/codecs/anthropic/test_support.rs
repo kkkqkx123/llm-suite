@@ -103,5 +103,6 @@ pub fn tool_call(id: &str, name: &str, arguments: &str) -> llm_suite_types::mess
             name: name.to_string(),
             arguments: arguments.to_string(),
         },
+        thought_signature: None,
     }
 }

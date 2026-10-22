@@ -64,6 +64,7 @@ pub fn parse_tool_calls_from_output(
                 r#type: "function".to_string(),
                 call_id: Some(call_id),
                 function: llm_suite_types::message::LlmFunctionCall { name, arguments },
+                thought_signature: None,
             })
         })
         .collect()

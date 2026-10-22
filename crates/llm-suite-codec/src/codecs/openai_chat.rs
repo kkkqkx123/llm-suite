@@ -1,4 +1,3 @@
-
 use super::shared;
 use super::LlmCodec;
 use crate::error::LlmResult;
@@ -57,7 +56,7 @@ impl OpenaiChatCodec {
         let messages = if use_text_mode {
             let (_, filtered) =
                 llm_suite_tool_call::tool::protocol::extract_system_message(&request.messages);
-            let content = shared::text_mode_system_content(request);
+            let content = shared::text_mode_system_content(request)?;
             let history = shared::convert_history_for_text_mode(&filtered, request);
             let mut converted = messages::convert_openai_messages(&history)?;
             if !content.is_empty() {
@@ -65,7 +64,8 @@ impl OpenaiChatCodec {
             }
             converted
         } else {
-            messages::convert_openai_messages(&request.messages)?
+            let history = shared::history_with_system_text(request)?;
+            messages::convert_openai_messages(&history)?
         };
 
         let mut body = serde_json::json!({

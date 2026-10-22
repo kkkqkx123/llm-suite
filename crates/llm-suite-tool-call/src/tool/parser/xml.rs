@@ -66,6 +66,7 @@ fn parse_xml_tool_call_block(content: &str) -> Option<LlmToolCall> {
             name: tool_name,
             arguments: serde_json::to_string(&args).unwrap_or_default(),
         },
+        thought_signature: None,
     })
 }
 

@@ -11,7 +11,8 @@ use llm_suite_codec::{
 };
 use llm_suite_types::llm::{LlmFormat, LlmProfile, LlmRequest, LlmResult as LlmResponseType};
 use llm_suite_types::message::{
-    LlmFunctionCall, LlmToolCall, Message, MessageContentValue, MessageRole,
+    FileContent, FileSource, ImageUrlContent, LlmFunctionCall, LlmToolCall, Message,
+    MessageContent, MessageContentValue, MessageRole, ToolResultContent, ToolUseContent,
 };
 use std::sync::Arc;
 
@@ -75,6 +76,7 @@ fn conversation() -> LlmRequest {
             name: "get_weather".to_string(),
             arguments: r#"{"city":"Beijing"}"#.to_string(),
         },
+        thought_signature: None,
     }]);
     let mut result = msg(MessageRole::Tool, "sunny");
     result.tool_call_id = Some("call_1".to_string());
@@ -748,6 +750,366 @@ fn the_response_envelope_reports_the_reasoning_the_same_way() {
             result.usage.as_ref().and_then(|u| u.reasoning_tokens),
             Some(4),
             "{format:?} must report the reasoning tokens in the usage as well"
+        );
+    }
+}
+
+/// A conversation whose messages carry every kind of content the internal
+/// model knows: text, an image, a document, a tool call and the rich result
+/// that answers it.
+fn multimodal_conversation() -> LlmRequest {
+    let mut assistant = msg(MessageRole::Assistant, "");
+    assistant.content = MessageContentValue::Rich(vec![
+        MessageContent::Text {
+            text: "let me look".to_string(),
+        },
+        MessageContent::ToolUse {
+            tool_use: ToolUseContent {
+                id: "call_1".to_string(),
+                name: "screenshot".to_string(),
+                input: serde_json::json!({}),
+                thought_signature: None,
+            },
+        },
+    ]);
+    let mut result = msg(MessageRole::Tool, "attached");
+    result.tool_call_id = Some("call_1".to_string());
+    result.content = MessageContentValue::Rich(vec![MessageContent::ToolResult {
+        tool_result: ToolResultContent {
+            tool_use_id: "call_1".to_string(),
+            content: "attached".to_string(),
+            blocks: Some(vec![MessageContent::ImageUrl {
+                image_url: ImageUrlContent {
+                    url: "data:image/png;base64,QUJD".to_string(),
+                    detail: None,
+                    file_id: None,
+                },
+            }]),
+            is_error: None,
+        },
+    }]);
+    let user = Message {
+        id: llm_suite_types::Id::new(),
+        role: MessageRole::User,
+        content: MessageContentValue::Rich(vec![
+            MessageContent::Text {
+                text: "what is this".to_string(),
+            },
+            MessageContent::ImageUrl {
+                image_url: ImageUrlContent {
+                    url: "data:image/png;base64,QUJD".to_string(),
+                    detail: None,
+                    file_id: None,
+                },
+            },
+            MessageContent::FileInput {
+                file: FileContent {
+                    source: FileSource::Base64 {
+                        media_type: "application/pdf".to_string(),
+                        data: "REVG".to_string(),
+                    },
+                    filename: Some("report.pdf".to_string()),
+                    detail: None,
+                    citations_enabled: None,
+                    context: None,
+                },
+            },
+        ]),
+        timestamp: 0,
+        tool_call_id: None,
+        tool_name: None,
+        tool_calls: None,
+        thinking: None,
+        thinking_signature: None,
+        metadata: None,
+    };
+
+    let mut request = empty_request();
+    request.messages = vec![user, assistant, result];
+    request
+}
+
+/// Every format keeps the picture of the user turn and of the tool result.
+#[test]
+fn the_multimodal_content_survives_every_format() {
+    for (codec, profile) in codecs() {
+        let request = codec
+            .build_request(&multimodal_conversation(), &profile)
+            .expect("must build");
+        let body = body_of(&request);
+        let text = serde_json::to_string(&body).expect("serializable");
+
+        assert!(
+            text.contains("QUJD"),
+            "the image payload must reach the wire for {:?}: {body}",
+            profile.format
+        );
+        assert!(
+            text.contains("REVG"),
+            "the document must reach the wire for {:?}: {body}",
+            profile.format
+        );
+        assert!(
+            text.contains("screenshot"),
+            "the tool call must reach the wire for {:?}: {body}",
+            profile.format
+        );
+        assert!(
+            text.contains("attached"),
+            "the tool result must reach the wire for {:?}: {body}",
+            profile.format
+        );
+    }
+}
+
+/// The tool call stays a structured call in every format; none of them
+/// degrades it into prose.
+#[test]
+fn the_tool_call_stays_structured_in_every_format() {
+    for (codec, profile) in codecs() {
+        let request = codec
+            .build_request(&multimodal_conversation(), &profile)
+            .expect("must build");
+        let body = body_of(&request);
+
+        match profile.format {
+            LlmFormat::OpenaiChat => {
+                let call = body["messages"]
+                    .as_array()
+                    .expect("messages")
+                    .iter()
+                    .find(|m| m.get("tool_calls").is_some())
+                    .expect("the tool call must be present");
+                assert_eq!(call["tool_calls"][0]["function"]["name"], "screenshot");
+            }
+            LlmFormat::OpenaiResponse => {
+                let call = body["input"]
+                    .as_array()
+                    .expect("input")
+                    .iter()
+                    .find(|i| i["type"] == serde_json::json!("function_call"))
+                    .expect("the function call must be present");
+                assert_eq!(call["name"], "screenshot");
+                assert_eq!(call["call_id"], serde_json::json!("call_1"));
+            }
+            LlmFormat::Anthropic => {
+                let call = body["messages"]
+                    .as_array()
+                    .expect("messages")
+                    .iter()
+                    .find_map(|m| {
+                        m["content"].as_array().and_then(|blocks| {
+                            blocks
+                                .iter()
+                                .find(|b| b["type"] == serde_json::json!("tool_use"))
+                                .cloned()
+                        })
+                    })
+                    .expect("the tool use block must be present");
+                assert_eq!(call["name"], "screenshot");
+            }
+            LlmFormat::GeminiNative => {
+                let call = body["contents"]
+                    .as_array()
+                    .expect("contents")
+                    .iter()
+                    .find_map(|c| {
+                        c["parts"].as_array().and_then(|parts| {
+                            parts
+                                .iter()
+                                .find(|p| p.get("functionCall").is_some())
+                                .cloned()
+                        })
+                    })
+                    .expect("the function call part must be present");
+                assert_eq!(call["functionCall"]["name"], "screenshot");
+            }
+            LlmFormat::Custom(name) => panic!("unexpected format {name}"),
+        }
+    }
+}
+
+/// The tool result stays correlated with the call it answers in every
+/// format.
+#[test]
+fn the_tool_result_stays_correlated_in_every_format() {
+    for (codec, profile) in codecs() {
+        let request = codec
+            .build_request(&multimodal_conversation(), &profile)
+            .expect("must build");
+        let body = body_of(&request);
+
+        match profile.format {
+            LlmFormat::OpenaiChat => {
+                let result = body["messages"]
+                    .as_array()
+                    .expect("messages")
+                    .iter()
+                    .find(|m| m["role"] == serde_json::json!("tool"))
+                    .expect("the tool message must be present");
+                assert_eq!(result["tool_call_id"], serde_json::json!("call_1"));
+            }
+            LlmFormat::OpenaiResponse => {
+                let result = body["input"]
+                    .as_array()
+                    .expect("input")
+                    .iter()
+                    .find(|i| i["type"] == serde_json::json!("function_call_output"))
+                    .expect("the function call output must be present");
+                assert_eq!(result["call_id"], serde_json::json!("call_1"));
+            }
+            LlmFormat::Anthropic => {
+                let result = body["messages"]
+                    .as_array()
+                    .expect("messages")
+                    .iter()
+                    .find(|m| {
+                        m["content"]
+                            .as_array()
+                            .is_some_and(|blocks| blocks.iter().any(|b| b["type"] == "tool_result"))
+                    })
+                    .expect("the tool result block must be present");
+                assert_eq!(
+                    result["content"][0]["tool_use_id"],
+                    serde_json::json!("call_1")
+                );
+            }
+            LlmFormat::GeminiNative => {
+                let result = body["contents"]
+                    .as_array()
+                    .expect("contents")
+                    .iter()
+                    .find(|c| {
+                        c["parts"].as_array().is_some_and(|parts| {
+                            parts.iter().any(|p| p.get("functionResponse").is_some())
+                        })
+                    })
+                    .expect("the function response part must be present");
+                assert_eq!(
+                    result["parts"][0]["functionResponse"]["name"],
+                    serde_json::json!("screenshot")
+                );
+            }
+            LlmFormat::Custom(name) => panic!("unexpected format {name}"),
+        }
+    }
+}
+
+/// A system prompt that carries more than text is refused by every format;
+/// none of them drops the content silently.
+#[test]
+fn a_rich_system_prompt_is_refused_by_every_format() {
+    for (codec, profile) in codecs() {
+        let mut request = empty_request();
+        request.messages = vec![Message {
+            id: llm_suite_types::Id::new(),
+            role: MessageRole::System,
+            content: MessageContentValue::Rich(vec![MessageContent::ImageUrl {
+                image_url: ImageUrlContent {
+                    url: "data:image/png;base64,QUJD".to_string(),
+                    detail: None,
+                    file_id: None,
+                },
+            }]),
+            timestamp: 0,
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+            thinking: None,
+            thinking_signature: None,
+            metadata: None,
+        }];
+        let err = codec
+            .build_request(&request, &profile)
+            .expect_err("the system prompt is text only");
+        assert!(
+            format!("{err}").contains("system"),
+            "{:?} must report the system prompt: {err}",
+            profile.format
+        );
+    }
+}
+
+/// The text of a tool result reaches the wire exactly once, whichever
+/// format carries it.
+#[test]
+fn the_text_of_a_tool_result_reaches_the_wire_once() {
+    for (codec, profile) in codecs() {
+        let mut assistant = msg(MessageRole::Assistant, "");
+        assistant.content = MessageContentValue::Rich(vec![MessageContent::ToolUse {
+            tool_use: ToolUseContent {
+                id: "call_1".to_string(),
+                name: "screenshot".to_string(),
+                input: serde_json::json!({}),
+                thought_signature: None,
+            },
+        }]);
+        let mut result = msg(MessageRole::Tool, "");
+        result.tool_call_id = Some("call_1".to_string());
+        result.content = MessageContentValue::Rich(vec![MessageContent::ToolResult {
+            tool_result: ToolResultContent {
+                tool_use_id: "call_1".to_string(),
+                content: "attached".to_string(),
+                blocks: Some(vec![MessageContent::Text {
+                    text: "attached".to_string(),
+                }]),
+                is_error: None,
+            },
+        }]);
+
+        let mut request = empty_request();
+        request.messages = vec![assistant, result];
+        let built = codec
+            .build_request(&request, &profile)
+            .expect("must build");
+        let body = body_of(&built);
+        let text = serde_json::to_string(&body).expect("serializable");
+        let occurrences = text.matches("attached").count();
+        assert_eq!(
+            occurrences, 1,
+            "the result text must not be repeated for {:?}: {body}",
+            profile.format
+        );
+    }
+}
+
+/// A tool result that carries a block the format cannot hold is reported
+/// by every format; none of them drops it silently.
+#[test]
+fn a_tool_result_with_an_unsupported_block_is_refused_by_every_format() {
+    for (codec, profile) in codecs() {
+        let mut assistant = msg(MessageRole::Assistant, "");
+        assistant.content = MessageContentValue::Rich(vec![MessageContent::ToolUse {
+            tool_use: ToolUseContent {
+                id: "call_1".to_string(),
+                name: "screenshot".to_string(),
+                input: serde_json::json!({}),
+                thought_signature: None,
+            },
+        }]);
+        let mut result = msg(MessageRole::Tool, "");
+        result.tool_call_id = Some("call_1".to_string());
+        result.content = MessageContentValue::Rich(vec![MessageContent::ToolResult {
+            tool_result: ToolResultContent {
+                tool_use_id: "call_1".to_string(),
+                content: "attached".to_string(),
+                blocks: Some(vec![MessageContent::Thinking {
+                    thinking: "let me verify".to_string(),
+                    signature: Some("sig".to_string()),
+                }]),
+                is_error: None,
+            },
+        }]);
+
+        let mut request = empty_request();
+        request.messages = vec![assistant, result];
+        let err = codec
+            .build_request(&request, &profile)
+            .expect_err("a block the format cannot hold must be reported");
+        assert!(
+            format!("{err}").contains("thinking"),
+            "{:?} must name the block it cannot carry: {err}",
+            profile.format
         );
     }
 }

@@ -46,6 +46,7 @@ pub(super) fn convert_to_standard_tool_call(value: &serde_json::Value) -> Option
                 name: tool.to_string(),
                 arguments: serde_json::to_string(&params).unwrap_or_default(),
             },
+            thought_signature: None,
         });
     }
 
@@ -64,6 +65,7 @@ pub(super) fn convert_to_standard_tool_call(value: &serde_json::Value) -> Option
                 name: name.to_string(),
                 arguments: args,
             },
+            thought_signature: None,
         });
     }
 
@@ -87,6 +89,7 @@ pub(super) fn convert_to_standard_tool_call(value: &serde_json::Value) -> Option
                     name: name.to_string(),
                     arguments: args,
                 },
+                thought_signature: None,
             });
         }
     }

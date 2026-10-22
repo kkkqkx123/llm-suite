@@ -11,21 +11,23 @@ use super::{messages, tools};
 /// The system prompt travels in the dedicated `instructions` field, the
 /// channel the official API reserves for it; it is not an input item.
 /// In text mode the instructions carry the tool declarations as well.
-pub fn split_system_and_history(request: &LlmRequest) -> (String, Vec<Message>) {
-    let (system_content, filtered) =
+pub fn split_system_and_history(request: &LlmRequest) -> LlmResult<(String, Vec<Message>)> {
+    let (_, filtered) =
         llm_suite_tool_call::tool::protocol::extract_system_message(&request.messages);
     if super::super::shared::is_text_mode(request) {
         let history = super::super::shared::convert_history_for_text_mode(&filtered, request);
-        (super::super::shared::text_mode_system_content(request), history)
+        let instructions = super::super::shared::text_mode_system_content(request)?;
+        Ok((instructions, history))
     } else {
-        (system_content.unwrap_or_default(), filtered)
+        let instructions = super::super::shared::system_content(request)?;
+        Ok((instructions, filtered))
     }
 }
 
 /// Build the request body (separated from the HTTP layer for testability).
 pub fn build_body(request: &LlmRequest, profile: &LlmProfile) -> LlmResult<serde_json::Value> {
     let use_text_mode = super::super::shared::is_text_mode(request);
-    let (instructions, history) = split_system_and_history(request);
+    let (instructions, history) = split_system_and_history(request)?;
 
     let mut body = serde_json::json!({
         "model": profile.model,
@@ -63,7 +65,7 @@ pub fn build_count_tokens_body(
     profile: &LlmProfile,
 ) -> LlmResult<serde_json::Value> {
     let use_text_mode = super::super::shared::is_text_mode(request);
-    let (instructions, history) = split_system_and_history(request);
+    let (instructions, history) = split_system_and_history(request)?;
 
     let mut body = serde_json::json!({
         "model": profile.model,
@@ -85,11 +87,11 @@ pub fn build_count_tokens_body(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codecs::LlmCodec;
     use crate::codecs::openai_response::test_support::{
         count_profile, count_request, minimal_request, request_body,
     };
     use crate::codecs::openai_response::OpenaiResponseCodec;
+    use crate::codecs::LlmCodec;
     use llm_suite_types::message::{Message, MessageContentValue, MessageRole};
 
     #[test]

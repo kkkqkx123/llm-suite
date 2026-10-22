@@ -141,9 +141,23 @@ pub fn parse_anthropic_response(body: &str) -> LlmResult<LlmResponseType> {
                         r#type: "function".to_string(),
                         call_id: None,
                         function: llm_suite_types::message::LlmFunctionCall { name, arguments },
+                        thought_signature: None,
                     });
                 }
-                _ => {}
+                Some(other) => {
+                    // A block the codec does not model (a server tool
+                    // result, a container upload, a search result) travels
+                    // in the provider's own shape so the reply can be
+                    // replayed in the next turn.
+                    content_blocks.push(MessageContent::Native {
+                        provider: "anthropic".to_string(),
+                        kind: other.to_string(),
+                        payload: block.clone(),
+                    });
+                }
+                // A block without a type carries no name to replay it
+                // under; there is nothing to keep.
+                None => {}
             }
         }
     }
@@ -479,5 +493,45 @@ mod tests {
             .find(|b| b["type"] == "redacted_thinking")
             .expect("redacted thinking must be replayed");
         assert_eq!(redacted["data"], "c2VjcmV0");
+    }
+
+    #[test]
+    fn a_server_tool_block_is_kept_and_replayed() {
+        // The server tool blocks are the provider's own; they travel in
+        // their own shape so the search result does not vanish.
+        let body = r#"{"id":"msg_5","model":"claude-sonnet","stop_reason":"end_turn","content":[{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{"query":"rust"}},{"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":[{"type":"web_search_result","url":"https://example.com","title":"Example","encrypted_content":"enc","page_age":"one day"}]}]}"#;
+        let request = request(vec![msg(MessageRole::User, "hi")], None);
+        let out = parse_response(body, &request).expect("must parse");
+
+        let MessageContentValue::Rich(blocks) = &out.message.content else {
+            panic!("the server tool blocks must be kept as rich content");
+        };
+        let native: Vec<&MessageContent> = blocks
+            .iter()
+            .filter(|block| matches!(block, MessageContent::Native { .. }))
+            .collect();
+        assert_eq!(
+            native.len(),
+            2,
+            "both server tool blocks must be kept: {blocks:?}"
+        );
+
+        // The blocks are replayed verbatim in the next turn.
+        let wire = convert_messages(std::slice::from_ref(&out.message)).expect("must convert");
+        let replayed = wire[0]["content"].as_array().unwrap();
+        let server_tool = replayed
+            .iter()
+            .find(|b| b["type"] == "server_tool_use")
+            .expect("the server tool use must be replayed");
+        assert_eq!(server_tool["name"], "web_search");
+        let search_result = replayed
+            .iter()
+            .find(|b| b["type"] == "web_search_tool_result")
+            .expect("the search result must be replayed");
+        assert_eq!(
+            search_result["content"][0]["title"],
+            "Example",
+            "the result travels verbatim"
+        );
     }
 }

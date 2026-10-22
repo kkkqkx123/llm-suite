@@ -3,8 +3,8 @@
 use crate::error::LlmResult;
 use llm_suite_types::llm::{
     MessageStreamEnd, MessageStreamError, MessageStreamEvent, MessageStreamInputJson,
-    MessageStreamReasoning, MessageStreamRedactedThinking, MessageStreamRefusal,
-    MessageStreamStart, MessageStreamText, MessageStreamToolCallDelta,
+    MessageStreamNativeBlock, MessageStreamReasoning, MessageStreamRedactedThinking,
+    MessageStreamRefusal, MessageStreamStart, MessageStreamText, MessageStreamToolCallDelta,
 };
 
 use super::usage::stream_usage;
@@ -100,7 +100,25 @@ pub fn parse_stream_events(data: &str) -> LlmResult<Vec<MessageStreamEvent>> {
                             )]);
                         }
                     }
-                    _ => {}
+                    // The text of a block arrives in the delta frames; the
+                    // start frame only announces it.
+                    Some("text") => {}
+                    Some(other) => {
+                        // A block the codec does not model (a server tool
+                        // result, a container upload, a search result)
+                        // travels in the provider's own shape so the
+                        // reply can be replayed in the next turn.
+                        return Ok(vec![MessageStreamEvent::NativeBlock(
+                            MessageStreamNativeBlock {
+                                provider: "anthropic".to_string(),
+                                kind: other.to_string(),
+                                payload: b.clone(),
+                            },
+                        )]);
+                    }
+                    // A block without a type carries no name to replay it
+                    // under; there is nothing to keep.
+                    None => {}
                 }
             }
             Ok(Vec::new())
@@ -286,6 +304,29 @@ mod tests {
             }
             other => panic!("expected RedactedThinking, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_server_tool_block_is_not_dropped() {
+        let chunk = r#"{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{"query":"rust"}}}"#;
+        let events = parse_stream_events(chunk).expect("must parse");
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            MessageStreamEvent::NativeBlock(native) => {
+                assert_eq!(native.provider, "anthropic");
+                assert_eq!(native.kind, "server_tool_use");
+                assert_eq!(native.payload["name"], "web_search");
+            }
+            other => panic!("expected NativeBlock, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_text_block_start_carries_no_block_of_its_own() {
+        // The text of a block arrives in the delta frames.
+        let chunk = r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
+        let events = parse_stream_events(chunk).expect("must parse");
+        assert!(events.is_empty(), "the text block must not be reported: {events:?}");
     }
 
     #[test]

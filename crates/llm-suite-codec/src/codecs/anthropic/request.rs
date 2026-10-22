@@ -6,18 +6,14 @@ use llm_suite_types::llm::{LlmProfile, LlmPromptCaching, LlmRequest};
 use super::{caching, messages, tools};
 
 /// Build the request body (separated from the HTTP layer for testability).
-pub fn build_body(
-    request: &LlmRequest,
-    profile: &LlmProfile,
-) -> LlmResult<serde_json::Value> {
+pub fn build_body(request: &LlmRequest, profile: &LlmProfile) -> LlmResult<serde_json::Value> {
     let use_text_mode = super::super::shared::is_text_mode(request);
 
     // `convert_messages` skips system messages; the system content is sent
     // in the dedicated `system` field. Text mode injects the original
     // system + tool usage instructions + declarations; native mode keeps
     // the original system message.
-    let (system_content, _) =
-        llm_suite_tool_call::tool::protocol::extract_system_message(&request.messages);
+    let system_content = super::super::shared::system_content(request)?;
 
     let history = if use_text_mode {
         super::super::shared::convert_history_for_text_mode(&request.messages, request)
@@ -32,14 +28,12 @@ pub fn build_body(
     });
 
     if use_text_mode {
-        let system = super::super::shared::text_mode_system_content(request);
+        let system = super::super::shared::text_mode_system_content(request)?;
         if !system.is_empty() {
             body["system"] = serde_json::json!(system);
         }
-    } else if let Some(system) = system_content {
-        if !system.is_empty() {
-            body["system"] = serde_json::json!(system);
-        }
+    } else if !system_content.is_empty() {
+        body["system"] = serde_json::json!(system_content);
     }
 
     let generation = super::super::shared::resolve_generation(request, profile)?;
@@ -96,17 +90,14 @@ pub fn build_count_tokens_body(
     });
 
     if use_text_mode {
-        let system = super::super::shared::text_mode_system_content(request);
+        let system = super::super::shared::text_mode_system_content(request)?;
         if !system.is_empty() {
             body["system"] = serde_json::json!(system);
         }
     } else {
-        let (system, _) =
-            llm_suite_tool_call::tool::protocol::extract_system_message(&request.messages);
-        if let Some(system) = system {
-            if !system.is_empty() {
-                body["system"] = serde_json::json!(system);
-            }
+        let system = super::super::shared::system_content(request)?;
+        if !system.is_empty() {
+            body["system"] = serde_json::json!(system);
         }
     }
     if !use_text_mode {
@@ -121,9 +112,9 @@ pub fn build_count_tokens_body(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codecs::anthropic::test_support::{msg, profile, request};
+    use crate::codecs::anthropic::test_support::{msg, profile, request, rich_msg};
     use llm_suite_types::llm::{LlmRequestCaching, ToolCallProtocol};
-    use llm_suite_types::message::MessageRole;
+    use llm_suite_types::message::{MessageContent, MessageRole};
 
     #[test]
     fn native_mode_sends_system_field() {
@@ -394,5 +385,37 @@ mod tests {
         let body = build_body(&req, &caching_profile).expect("must build");
         let control = serde_json::json!({"type": "ephemeral", "ttl": "5m"});
         assert_eq!(body["system"][0]["cache_control"], control);
+    }
+
+    #[test]
+    fn the_cache_breakpoint_skips_a_thinking_block() {
+        // The thinking blocks carry no `cache_control`; the breakpoint goes
+        // on the last block that accepts one.
+        let assistant = rich_msg(
+            MessageRole::Assistant,
+            vec![
+                MessageContent::Text {
+                    text: "the answer".to_string(),
+                },
+                MessageContent::Thinking {
+                    thinking: "Let me verify".to_string(),
+                    signature: Some("sig-abc".to_string()),
+                },
+            ],
+        );
+        let req = request(vec![msg(MessageRole::User, "Hi"), assistant], None);
+        let mut caching_profile = profile();
+        caching_profile.prompt_caching = Some(LlmPromptCaching {
+            ttl: Some("1h".to_string()),
+        });
+        let body = build_body(&req, &caching_profile).expect("must build");
+
+        let messages = body["messages"].as_array().unwrap();
+        let last_blocks = messages.last().unwrap()["content"].as_array().unwrap();
+        let marked = last_blocks
+            .iter()
+            .find(|block| block.get("cache_control").is_some())
+            .expect("the breakpoint must be placed");
+        assert_eq!(marked["type"], serde_json::json!("text"));
     }
 }

@@ -2,22 +2,15 @@
 
 use std::collections::HashMap;
 
+use crate::codecs::helpers::{block_name, native_block};
 use crate::error::LlmResult;
-use llm_suite_types::llm::THOUGHT_SIGNATURES_KEY;
 use llm_suite_types::message::{Message, MessageContent, MessageContentValue, MessageRole};
 
-/// The thought signature that belongs to the tool call at `index`, when the
-/// provider signed it.
-pub fn thought_signature_for(message: &Message, index: usize) -> Option<String> {
-    message
-        .metadata
-        .as_ref()?
-        .get(THOUGHT_SIGNATURES_KEY)?
-        .as_array()?
-        .get(index)?
-        .as_str()
-        .map(String::from)
-}
+/// The media type a document falls back to when its name says nothing.
+const DOCUMENT_MEDIA_TYPE: &str = "application/pdf";
+
+/// The media type an image falls back to when its name says nothing.
+const IMAGE_MEDIA_TYPE: &str = "image/png";
 
 /// Convert internal messages into Gemini `contents`.
 ///
@@ -90,13 +83,24 @@ fn convert_parts(
                 let call_id = msg.tool_call_id.clone().unwrap_or_default();
                 let name = resolve_function_name(msg, &call_id, function_names)?;
                 let provider_id = provider_call_ids.get(&call_id).map(String::as_str);
-                parts.push(function_response_part(&name, provider_id, text, None));
+                let is_error = msg
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.get("is_error"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                parts.push(function_response_part(
+                    &name,
+                    provider_id,
+                    text,
+                    None,
+                    is_error,
+                )?);
             } else if !text.is_empty() {
                 parts.push(serde_json::json!({"text": text}));
             }
         }
         MessageContentValue::Rich(blocks) => {
-            let mut call_ordinal = 0usize;
             for block in blocks {
                 match block {
                     MessageContent::Text { text } => {
@@ -122,15 +126,17 @@ fn convert_parts(
                                         "data": data,
                                     }
                                 }),
-                                super::super::helpers::ResolvedImage::Url(_) => unreachable!(
-                                    "a data URI never resolves to a remote URL"
-                                ),
+                                super::super::helpers::ResolvedImage::Url(_) => {
+                                    unreachable!("a data URI never resolves to a remote URL")
+                                }
                             }
                         } else if super::super::helpers::is_gemini_file_uri(url) {
                             serde_json::json!({
                                 "fileData": {
-                                    "mimeType":
-                                        super::super::helpers::guess_image_media_type(url),
+                                    "mimeType": super::super::helpers::guess_media_type(
+                                        url,
+                                        IMAGE_MEDIA_TYPE,
+                                    ),
                                     "fileUri": url,
                                 }
                             })
@@ -166,22 +172,28 @@ fn convert_parts(
                         // `fileData` (gs://, Files API, YouTube only).
                         let part = match &file.source {
                             llm_suite_types::message::FileSource::Base64 { media_type, data } => {
-                                serde_json::json!({
-                                    "inlineData": {
-                                        "mimeType": media_type,
-                                        "data": data,
-                                    }
-                                })
+                                let mut blob = serde_json::json!({
+                                    "mimeType": media_type,
+                                    "data": data,
+                                });
+                                if let Some(filename) = &file.filename {
+                                    blob["displayName"] = serde_json::json!(filename);
+                                }
+                                serde_json::json!({"inlineData": blob})
                             }
                             llm_suite_types::message::FileSource::Url { url } => {
                                 if super::super::helpers::is_gemini_file_uri(url) {
-                                    serde_json::json!({
-                                        "fileData": {
-                                            "mimeType":
-                                                super::super::helpers::guess_image_media_type(url),
-                                            "fileUri": url,
-                                        }
-                                    })
+                                    let mut file_data = serde_json::json!({
+                                        "mimeType": super::super::helpers::guess_media_type(
+                                            url,
+                                            DOCUMENT_MEDIA_TYPE,
+                                        ),
+                                        "fileUri": url,
+                                    });
+                                    if let Some(filename) = &file.filename {
+                                        file_data["displayName"] = serde_json::json!(filename);
+                                    }
+                                    serde_json::json!({"fileData": file_data})
                                 } else {
                                     return Err(crate::error::LlmError::ConfigError(format!(
                                         "gemini fileData.fileUri only accepts gs://, Files API \
@@ -196,6 +208,13 @@ fn convert_parts(
                                      file and pass its Files API URI instead: {file_id}"
                                 )));
                             }
+                            llm_suite_types::message::FileSource::Content { .. } => {
+                                return Err(crate::error::LlmError::ConfigError(
+                                    "gemini has no document built from content blocks; send the \
+                                     document as inline data or as a file URI"
+                                        .to_string(),
+                                ));
+                            }
                         };
                         parts.push(part);
                     }
@@ -209,32 +228,48 @@ fn convert_parts(
                         // The provider signs a function call with an
                         // opaque thought signature; the signature has
                         // to travel back with the call in the next turn.
-                        if let Some(signature) = thought_signature_for(msg, call_ordinal) {
+                        if let Some(signature) = &tool_use.thought_signature {
                             part["thoughtSignature"] = serde_json::json!(signature);
                         }
                         parts.push(part);
-                        call_ordinal += 1;
                         saw_tool_use = true;
                     }
                     MessageContent::ToolResult { tool_result } => {
-                        let name = resolve_function_name(
-                            msg,
-                            &tool_result.tool_use_id,
-                            function_names,
-                        )?;
+                        let name =
+                            resolve_function_name(msg, &tool_result.tool_use_id, function_names)?;
                         let provider_id = provider_call_ids
                             .get(&tool_result.tool_use_id)
                             .map(String::as_str);
+                        // A function response has one text channel (the
+                        // response object) and a media channel (the
+                        // parts); the text of the blocks joins the text.
+                        let text = tool_result.fallback_text();
+                        let media = tool_result
+                            .blocks
+                            .as_deref()
+                            .unwrap_or(&[])
+                            .iter()
+                            .filter(|block| !matches!(block, MessageContent::Text { .. }))
+                            .cloned()
+                            .collect::<Vec<_>>();
                         parts.push(function_response_part(
                             &name,
                             provider_id,
-                            &tool_result.content,
-                            tool_result.blocks.as_deref(),
-                        ));
+                            &text,
+                            Some(&media),
+                            tool_result.is_error == Some(true),
+                        )?);
                     }
                     // The reasoning text itself is not replayed; only the
                     // thought signature on a function call is.
                     MessageContent::Thinking { .. } | MessageContent::RedactedThinking { .. } => {}
+                    MessageContent::Native {
+                        provider,
+                        kind,
+                        payload,
+                    } => {
+                        parts.push(native_block(provider, "gemini", kind, payload)?);
+                    }
                 }
             }
         }
@@ -244,7 +279,7 @@ fn convert_parts(
     // parts; the rich blocks already hold them otherwise.
     if !saw_tool_use {
         if let Some(calls) = &msg.tool_calls {
-            for (ordinal, call) in calls.iter().enumerate() {
+            for call in calls {
                 let args: serde_json::Value = serde_json::from_str(&call.function.arguments)
                     .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
                 let mut part = serde_json::json!({
@@ -256,7 +291,7 @@ fn convert_parts(
                 // The provider signs a function call with an opaque
                 // thought signature; it has to travel back with the call
                 // in the next turn.
-                if let Some(signature) = thought_signature_for(msg, ordinal) {
+                if let Some(signature) = &call.thought_signature {
                     part["thoughtSignature"] = serde_json::json!(signature);
                 }
                 parts.push(part);
@@ -294,7 +329,8 @@ fn resolve_function_name(
 /// The official `response` field is a JSON object, not a bare value: the
 /// provider matches the response to the call by name and reads the
 /// result from the `output` / `error` keys. A tool output that is not
-/// already an object is therefore wrapped in `output`.
+/// already an object is therefore wrapped in `output`; a failed call is
+/// reported under `error`.
 ///
 /// The call id is echoed back when the provider assigned one, so the
 /// response can be matched to the exact call it answers.
@@ -303,10 +339,15 @@ fn function_response_part(
     call_id: Option<&str>,
     content: &str,
     blocks: Option<&[llm_suite_types::message::MessageContent]>,
-) -> serde_json::Value {
-    let response_value: serde_json::Value = match serde_json::from_str(content) {
-        Ok(serde_json::Value::Object(object)) => serde_json::Value::Object(object),
-        _ => serde_json::json!({ "output": content }),
+    is_error: bool,
+) -> LlmResult<serde_json::Value> {
+    let response_value: serde_json::Value = if is_error {
+        serde_json::json!({ "error": content })
+    } else {
+        match serde_json::from_str(content) {
+            Ok(serde_json::Value::Object(object)) => serde_json::Value::Object(object),
+            _ => serde_json::json!({ "output": content }),
+        }
     };
     let mut response = serde_json::json!({
         "name": name,
@@ -315,29 +356,62 @@ fn function_response_part(
     // Rich tool output rides on `functionResponse.parts` as inline blobs;
     // the `fileData` form is Vertex-only, so only inlineData is emitted.
     if let Some(blocks) = blocks {
-        let parts: Vec<serde_json::Value> = blocks
-            .iter()
-            .filter_map(|b| match b {
+        let mut parts: Vec<serde_json::Value> = Vec::new();
+        for block in blocks {
+            match block {
                 llm_suite_types::message::MessageContent::ImageUrl { image_url } => {
                     if image_url.file_id.is_some() {
-                        return None;
+                        return Err(crate::error::LlmError::ConfigError(
+                            "gemini does not accept a Files-API id in a function response; \
+                             inline the image instead"
+                                .to_string(),
+                        ));
                     }
                     match super::super::helpers::resolve_image_payload(&image_url.url) {
-                        Ok(super::super::helpers::ResolvedImage::Base64 {
-                            media_type,
-                            data,
-                        }) => Some(serde_json::json!({
-                            "inlineData": {
-                                "mimeType": media_type,
-                                "data": data,
-                            }
-                        })),
-                        _ => None,
+                        Ok(super::super::helpers::ResolvedImage::Base64 { media_type, data }) => {
+                            parts.push(serde_json::json!({
+                                "inlineData": {
+                                    "mimeType": media_type,
+                                    "data": data,
+                                }
+                            }))
+                        }
+                        Ok(super::super::helpers::ResolvedImage::Url(_)) => {
+                            return Err(crate::error::LlmError::ConfigError(
+                                "a function response carries inline data only; inline the \
+                                 image instead of referencing it by URL"
+                                    .to_string(),
+                            ));
+                        }
+                        Err(err) => return Err(err),
                     }
                 }
-                _ => None,
-            })
-            .collect();
+                llm_suite_types::message::MessageContent::FileInput { file } => {
+                    let llm_suite_types::message::FileSource::Base64 { media_type, data } =
+                        &file.source
+                    else {
+                        return Err(crate::error::LlmError::ConfigError(
+                            "a function response carries inline data only; inline the document \
+                             instead of referencing it by id or URL"
+                                .to_string(),
+                        ));
+                    };
+                    parts.push(serde_json::json!({
+                        "inlineData": {
+                            "mimeType": media_type,
+                            "data": data,
+                        }
+                    }));
+                }
+                other => {
+                    return Err(crate::error::LlmError::ConfigError(format!(
+                        "a gemini function response carries images and documents in its parts \
+                         and its text in the response object, not a `{}` block",
+                        block_name(other)
+                    )));
+                }
+            }
+        }
         if !parts.is_empty() {
             response["parts"] = serde_json::json!(parts);
         }
@@ -345,7 +419,7 @@ fn function_response_part(
     if let Some(call_id) = call_id.filter(|id| !id.is_empty()) {
         response["id"] = serde_json::json!(call_id);
     }
-    serde_json::json!({"functionResponse": response})
+    Ok(serde_json::json!({"functionResponse": response}))
 }
 
 #[cfg(test)]
@@ -457,6 +531,7 @@ mod tests {
                 name: "get_weather".to_string(),
                 arguments: "{}".to_string(),
             },
+            thought_signature: None,
         }]);
         let mut result = msg(MessageRole::Tool, "sunny");
         result.tool_call_id = Some("call_1".to_string());
@@ -490,8 +565,8 @@ mod tests {
     fn a_tool_result_without_a_known_function_is_rejected() {
         let mut result = msg(MessageRole::Tool, "sunny");
         result.tool_call_id = Some("call_unknown".to_string());
-        let err = convert_messages(&[result])
-            .expect_err("an unnamed function response is meaningless");
+        let err =
+            convert_messages(&[result]).expect_err("an unnamed function response is meaningless");
         assert!(format!("{err}").contains("call_unknown"), "{err}");
     }
 
@@ -507,6 +582,7 @@ mod tests {
                     id: "call_1".to_string(),
                     name: "get_weather".to_string(),
                     input: serde_json::json!({"city": "Beijing"}),
+                    thought_signature: None,
                 },
             },
         ]);
@@ -532,6 +608,7 @@ mod tests {
                 id: "call_1".to_string(),
                 name: "get_weather".to_string(),
                 input: serde_json::json!({}),
+                thought_signature: None,
             },
         }]);
         let mut result = msg(MessageRole::Tool, "");
@@ -560,8 +637,8 @@ mod tests {
     #[test]
     fn a_message_without_parts_is_skipped() {
         let empty = msg(MessageRole::User, "");
-        let contents = convert_messages(&[empty, msg(MessageRole::User, "hi")])
-            .expect("must convert");
+        let contents =
+            convert_messages(&[empty, msg(MessageRole::User, "hi")]).expect("must convert");
         assert_eq!(contents.len(), 1);
         assert_eq!(contents[0]["parts"][0]["text"], serde_json::json!("hi"));
     }
@@ -577,6 +654,7 @@ mod tests {
                 name: "get_weather".to_string(),
                 arguments: "{}".to_string(),
             },
+            thought_signature: None,
         }]);
         let mut result = msg(MessageRole::Tool, "sunny");
         result.tool_call_id = Some("call_1".to_string());
@@ -617,7 +695,10 @@ mod tests {
         };
         let contents = convert_messages(&[user]).expect("must convert");
         let part = &contents[0]["parts"][0];
-        assert_eq!(part["inlineData"]["mimeType"], serde_json::json!("audio/wav"));
+        assert_eq!(
+            part["inlineData"]["mimeType"],
+            serde_json::json!("audio/wav")
+        );
         assert_eq!(part["inlineData"]["data"], serde_json::json!("QUJD"));
     }
 
@@ -634,6 +715,8 @@ mod tests {
                     },
                     filename: None,
                     detail: None,
+                    citations_enabled: None,
+                    context: None,
                 },
             }]),
             timestamp: 0,
@@ -665,6 +748,8 @@ mod tests {
                     },
                     filename: None,
                     detail: None,
+                    citations_enabled: None,
+                    context: None,
                 },
             }]),
             timestamp: 0,
@@ -690,6 +775,7 @@ mod tests {
                 name: "screenshot".to_string(),
                 arguments: "{}".to_string(),
             },
+            thought_signature: None,
         }]);
         let mut result = msg(MessageRole::Tool, "attached");
         result.tool_call_id = Some("call_1".to_string());
@@ -717,5 +803,169 @@ mod tests {
             serde_json::json!("image/png")
         );
         assert_eq!(parts[0]["inlineData"]["data"], serde_json::json!("QUJD"));
+    }
+
+    #[test]
+    fn a_document_uri_is_not_mislabelled_as_an_image() {
+        let user = Message {
+            id: llm_suite_types::Id::new(),
+            role: MessageRole::User,
+            content: MessageContentValue::Rich(vec![MessageContent::FileInput {
+                file: llm_suite_types::message::FileContent {
+                    source: llm_suite_types::message::FileSource::Url {
+                        url: "gs://bucket/report.pdf".to_string(),
+                    },
+                    filename: None,
+                    detail: None,
+                    citations_enabled: None,
+                    context: None,
+                },
+            }]),
+            timestamp: 0,
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+            thinking: None,
+            thinking_signature: None,
+            metadata: None,
+        };
+        let contents = convert_messages(&[user]).expect("must convert");
+        let part = &contents[0]["parts"][0];
+        assert_eq!(
+            part["fileData"]["mimeType"],
+            serde_json::json!("application/pdf")
+        );
+        assert_eq!(
+            part["fileData"]["fileUri"],
+            serde_json::json!("gs://bucket/report.pdf")
+        );
+    }
+
+    #[test]
+    fn a_document_in_a_tool_result_becomes_inline_data() {
+        let mut assistant = msg(MessageRole::Assistant, "");
+        assistant.tool_calls = Some(vec![llm_suite_types::message::LlmToolCall {
+            id: "call_1".to_string(),
+            r#type: "function".to_string(),
+            call_id: None,
+            function: llm_suite_types::message::LlmFunctionCall {
+                name: "report".to_string(),
+                arguments: "{}".to_string(),
+            },
+            thought_signature: None,
+        }]);
+        let mut result = msg(MessageRole::Tool, "attached");
+        result.tool_call_id = Some("call_1".to_string());
+        result.content = MessageContentValue::Rich(vec![MessageContent::ToolResult {
+            tool_result: llm_suite_types::message::ToolResultContent {
+                tool_use_id: "call_1".to_string(),
+                content: "attached".to_string(),
+                blocks: Some(vec![MessageContent::FileInput {
+                    file: llm_suite_types::message::FileContent {
+                        source: llm_suite_types::message::FileSource::Base64 {
+                            media_type: "application/pdf".to_string(),
+                            data: "QUJD".to_string(),
+                        },
+                        filename: None,
+                        detail: None,
+                        citations_enabled: None,
+                        context: None,
+                    },
+                }]),
+                is_error: None,
+            },
+        }]);
+
+        let contents = convert_messages(&[assistant, result]).expect("must convert");
+        let parts = contents[1]["parts"][0]["functionResponse"]["parts"]
+            .as_array()
+            .expect("rich parts array");
+        assert_eq!(
+            parts[0]["inlineData"]["mimeType"],
+            serde_json::json!("application/pdf")
+        );
+        assert_eq!(parts[0]["inlineData"]["data"], serde_json::json!("QUJD"));
+    }
+
+    #[test]
+    fn a_failed_tool_result_is_reported_under_the_error_key() {
+        let mut assistant = msg(MessageRole::Assistant, "");
+        assistant.tool_calls = Some(vec![llm_suite_types::message::LlmToolCall {
+            id: "call_1".to_string(),
+            r#type: "function".to_string(),
+            call_id: None,
+            function: llm_suite_types::message::LlmFunctionCall {
+                name: "boom".to_string(),
+                arguments: "{}".to_string(),
+            },
+            thought_signature: None,
+        }]);
+        let mut result = msg(MessageRole::Tool, "it exploded");
+        result.tool_call_id = Some("call_1".to_string());
+        result.content = MessageContentValue::Rich(vec![MessageContent::ToolResult {
+            tool_result: llm_suite_types::message::ToolResultContent {
+                tool_use_id: "call_1".to_string(),
+                content: "it exploded".to_string(),
+                blocks: None,
+                is_error: Some(true),
+            },
+        }]);
+
+        let contents = convert_messages(&[assistant, result]).expect("must convert");
+        let response = &contents[1]["parts"][0]["functionResponse"]["response"];
+        assert_eq!(response["error"], serde_json::json!("it exploded"));
+        assert!(response.get("output").is_none());
+    }
+
+    #[test]
+    fn a_native_part_is_replayed_verbatim() {
+        let user = Message {
+            id: llm_suite_types::Id::new(),
+            role: MessageRole::User,
+            content: MessageContentValue::Rich(vec![MessageContent::Native {
+                provider: "gemini".to_string(),
+                kind: "video_metadata".to_string(),
+                payload: serde_json::json!({
+                    "inlineData": {"mimeType": "video/mp4", "data": "QUJD"},
+                    "videoMetadata": {"startOffset": "0s", "endOffset": "10s"},
+                }),
+            }]),
+            timestamp: 0,
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+            thinking: None,
+            thinking_signature: None,
+            metadata: None,
+        };
+        let contents = convert_messages(&[user]).expect("must convert");
+        let part = &contents[0]["parts"][0];
+        assert_eq!(part["videoMetadata"]["endOffset"], serde_json::json!("10s"));
+        assert_eq!(
+            part["inlineData"]["mimeType"],
+            serde_json::json!("video/mp4")
+        );
+    }
+
+    #[test]
+    fn a_native_part_of_another_provider_is_rejected() {
+        let user = Message {
+            id: llm_suite_types::Id::new(),
+            role: MessageRole::User,
+            content: MessageContentValue::Rich(vec![MessageContent::Native {
+                provider: "anthropic".to_string(),
+                kind: "search_result".to_string(),
+                payload: serde_json::json!({"type": "search_result"}),
+            }]),
+            timestamp: 0,
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+            thinking: None,
+            thinking_signature: None,
+            metadata: None,
+        };
+        let err = convert_messages(&[user]).expect_err("a block of another provider is refused");
+        assert!(format!("{err}").contains("anthropic"), "{err}");
     }
 }

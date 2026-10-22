@@ -61,11 +61,10 @@ impl ToolCallState {
         }
     }
 
-    /// Assemble the tool calls of the turn together with the provider
-    /// signature of every call, in the order the calls are reported.
-    pub fn assemble(&self) -> (Vec<LlmToolCall>, Vec<Option<String>>) {
+    /// Assemble the tool calls of the turn, in the order the calls are
+    /// reported. The provider signature of a call rides on the call itself.
+    pub fn assemble(&self) -> Vec<LlmToolCall> {
         let mut calls = Vec::new();
-        let mut signatures = Vec::new();
         for partial in self.calls.values() {
             let Some(name) = partial.name.clone() else {
                 continue;
@@ -83,10 +82,10 @@ impl ToolCallState {
                 r#type: "function".to_string(),
                 call_id: partial.call_id.clone(),
                 function: LlmFunctionCall { name, arguments },
+                thought_signature: partial.thought_signature.clone(),
             });
-            signatures.push(partial.thought_signature.clone());
         }
-        (calls, signatures)
+        calls
     }
 
     fn entry(&mut self, index: usize) -> &mut PartialToolCall {

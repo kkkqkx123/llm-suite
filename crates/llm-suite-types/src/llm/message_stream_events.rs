@@ -15,6 +15,7 @@ pub enum MessageStreamEventType {
     End,
     ReasoningText,
     RedactedThinking,
+    NativeBlock,
     Refusal,
     Usage,
     ToolCallDelta,
@@ -36,6 +37,7 @@ pub enum MessageStreamEvent {
     End(MessageStreamEnd),
     ReasoningText(MessageStreamReasoning),
     RedactedThinking(MessageStreamRedactedThinking),
+    NativeBlock(MessageStreamNativeBlock),
     Refusal(MessageStreamRefusal),
     Usage(MessageStreamUsage),
     ToolCallDelta(MessageStreamToolCallDelta),
@@ -161,6 +163,23 @@ pub struct MessageStreamRedactedThinking {
     pub data: String,
 }
 
+/// A provider-native content block.
+///
+/// The provider sent a block the codec does not model (a server tool
+/// result, a container upload, an executable code part). The block travels
+/// in the provider's own JSON so the reply can be replayed in the next
+/// turn.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MessageStreamNativeBlock {
+    /// The provider family the block belongs to: `openai`, `anthropic` or
+    /// `gemini`.
+    pub provider: String,
+    /// The provider-native block name.
+    pub kind: String,
+    /// The provider-native block body.
+    pub payload: serde_json::Value,
+}
+
 /// Token usage reported mid-stream (e.g. OpenAI's `include_usage` chunk or
 /// Anthropic's `message_delta` usage).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -199,10 +218,6 @@ pub struct MessageStreamToolCallDelta {
     #[serde(default)]
     pub is_snapshot: bool,
 }
-
-/// Metadata key holding the provider signatures attached to the tool calls
-/// of a reply, one entry per tool call in the order the calls are reported.
-pub const THOUGHT_SIGNATURES_KEY: &str = "thought_signatures";
 
 /// Metadata key holding the sources of a grounded answer (web-search
 /// citations, file citations). Every format reports them under this key so

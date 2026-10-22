@@ -77,6 +77,18 @@ impl GeminiNativeCodec {
                                     },
                                 ));
                             }
+                            Part::Native { kind, payload } => {
+                                // The part travels in the provider's own
+                                // shape so the reply can be replayed in the
+                                // next turn.
+                                events.push(MessageStreamEvent::NativeBlock(
+                                    llm_suite_types::llm::MessageStreamNativeBlock {
+                                        provider: "gemini".to_string(),
+                                        kind,
+                                        payload,
+                                    },
+                                ));
+                            }
                             Part::FunctionCall {
                                 name,
                                 arguments,
