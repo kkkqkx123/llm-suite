@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::codecs::gemini_native::test_support::msg;
 use llm_suite_types::message::MessageRole;
