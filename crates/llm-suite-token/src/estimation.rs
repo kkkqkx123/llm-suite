@@ -162,7 +162,10 @@ impl TokenEstimator {
             if tokens + ch_tokens > max_tokens as f32 {
                 // If we have a previous safe break, split there; otherwise split at current byte offset
                 let split = if last_break > 0 { last_break } else { bytes };
-                debug_assert!(text.is_char_boundary(split));
+                // Both `last_break` and `bytes` advance by whole chars, so this
+                // holds in practice; floor keeps release builds safe if the
+                // invariant is ever broken by future edits.
+                let split = floor_char_boundary(text, split);
                 return split;
             }
 
@@ -178,6 +181,19 @@ impl TokenEstimator {
         debug_assert!(text.is_char_boundary(text.len()));
         text.len()
     }
+}
+
+/// Floor a byte index down to the nearest UTF-8 char boundary.
+///
+/// Mirrors the host-side `cce_utils::floor_char_boundary` semantics: llm-suite
+/// stays free of core dependencies, so the same floor is kept locally.
+#[inline]
+fn floor_char_boundary(text: &str, position: usize) -> usize {
+    let mut position = position.min(text.len());
+    while position > 0 && !text.is_char_boundary(position) {
+        position -= 1;
+    }
+    position
 }
 
 /// Count occurrences of a byte in a slice
