@@ -2,7 +2,9 @@
 
 use super::LlmCodec;
 use crate::error::LlmResult;
-use llm_suite_types::llm::{LlmProfile, LlmRequest, LlmResult as LlmResponseType, MessageStreamEvent};
+use llm_suite_types::llm::{
+    LlmProfile, LlmRequest, LlmResult as LlmResponseType, MessageStreamEvent,
+};
 use llm_suite_types::tool::Tool;
 
 pub(crate) mod messages;

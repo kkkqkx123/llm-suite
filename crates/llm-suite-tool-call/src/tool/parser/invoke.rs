@@ -92,9 +92,11 @@ pub fn parse_invoke_json_calls_detailed(
                 .collect())
         }
         obj @ serde_json::Value::Object(_) => {
-            Ok(vec![convert_invoke_object(obj).map_err(|reason| InvokeParseError {
-                index: Some(0),
-                reason,
+            Ok(vec![convert_invoke_object(obj).map_err(|reason| {
+                InvokeParseError {
+                    index: Some(0),
+                    reason,
+                }
             })])
         }
         _ => Err(InvokeParseError {

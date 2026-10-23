@@ -140,7 +140,10 @@ pub fn read_parts(parts: &[serde_json::Value]) -> Vec<Part> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("application/octet-stream")
                 .to_string();
-            let uri = file.get("fileUri").and_then(|v| v.as_str()).map(String::from);
+            let uri = file
+                .get("fileUri")
+                .and_then(|v| v.as_str())
+                .map(String::from);
             if let Some(uri) = uri {
                 result.push(Part::Inline {
                     media_type,

@@ -205,9 +205,7 @@ pub fn convert_messages(messages: &[Message]) -> LlmResult<Vec<serde_json::Value
                         MessageContent::Text { text } => {
                             parts.push(serde_json::json!({"type": "input_text", "text": text}))
                         }
-                        MessageContent::ImageUrl { .. } => {
-                            parts.push(content_part(block)?)
-                        }
+                        MessageContent::ImageUrl { .. } => parts.push(content_part(block)?),
                         MessageContent::Thinking { thinking, .. } => {
                             parts.push(serde_json::json!({"type": "input_text", "text": thinking}))
                         }
@@ -226,9 +224,7 @@ pub fn convert_messages(messages: &[Message]) -> LlmResult<Vec<serde_json::Value
                                 input_audio.format
                             )));
                         }
-                        MessageContent::FileInput { .. } => {
-                            parts.push(content_part(block)?)
-                        }
+                        MessageContent::FileInput { .. } => parts.push(content_part(block)?),
                         // A tool call is a `function_call` item, never a
                         // content part: the call has to stay structured so
                         // its result can be correlated with it.
@@ -356,7 +352,6 @@ pub fn convert_messages(messages: &[Message]) -> LlmResult<Vec<serde_json::Value
 
     Ok(items)
 }
-
 
 #[cfg(test)]
 #[path = "messages/tests.rs"]

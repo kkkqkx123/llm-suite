@@ -8,7 +8,10 @@ use llm_suite_types::llm::TokenUsageStats;
 /// (Anthropic's `message_start` carries input tokens, `message_delta`
 /// carries cumulative output and may omit input tokens). Later non-zero /
 /// `Some` values win; zero / `None` values never erase earlier data.
-pub fn merge_usage(previous: Option<&TokenUsageStats>, incoming: &TokenUsageStats) -> TokenUsageStats {
+pub fn merge_usage(
+    previous: Option<&TokenUsageStats>,
+    incoming: &TokenUsageStats,
+) -> TokenUsageStats {
     let Some(prev) = previous else {
         return incoming.clone();
     };
@@ -29,8 +32,10 @@ pub fn merge_usage(previous: Option<&TokenUsageStats>, incoming: &TokenUsageStat
     // one the total is recomputed from the merged counters, and the cached
     // input tokens are added: a provider that reports them next to the
     // uncached ones (Anthropic) only reaches this path.
-    let component_total =
-        prompt_tokens + completion_tokens + cache_read_tokens.unwrap_or(0) + cache_write_tokens.unwrap_or(0);
+    let component_total = prompt_tokens
+        + completion_tokens
+        + cache_read_tokens.unwrap_or(0)
+        + cache_write_tokens.unwrap_or(0);
     let total_tokens = if u.total_tokens > 0 {
         u.total_tokens
     } else if component_total > 0 {

@@ -454,7 +454,9 @@ mod tests {
         gateway
             .register_profile(profile("p1", LlmFormat::OpenaiChat))
             .unwrap();
-        gateway.get_or_create_client(&gateway.profiles.get("p1").unwrap()).unwrap();
+        gateway
+            .get_or_create_client(&gateway.profiles.get("p1").unwrap())
+            .unwrap();
         gateway.shared_breaker("key", llm_suite_client::CircuitBreakerConfig::default());
         gateway.shared_limiter("key", 1.0, 1);
 

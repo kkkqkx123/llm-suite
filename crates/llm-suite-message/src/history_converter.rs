@@ -143,9 +143,7 @@ fn media_placeholders(message: &Message) -> Vec<String> {
             MessageContent::InputAudio { input_audio } => {
                 Some(format!("[audio: {}]", input_audio.format))
             }
-            MessageContent::FileInput { file } => {
-                Some(format!("[file: {}]", file_reference(file)))
-            }
+            MessageContent::FileInput { file } => Some(format!("[file: {}]", file_reference(file))),
             _ => None,
         })
         .collect()

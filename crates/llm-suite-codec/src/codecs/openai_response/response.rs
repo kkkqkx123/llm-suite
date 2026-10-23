@@ -129,8 +129,7 @@ pub fn parse_response_inner(body: &str) -> LlmResult<LlmResponseType> {
                         for block in blocks {
                             match block.get("type").and_then(|t| t.as_str()) {
                                 Some("output_text") => {
-                                    if let Some(t) = block.get("text").and_then(|v| v.as_str())
-                                    {
+                                    if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
                                         text_parts.push(t.to_string());
                                     }
                                     if let Some(list) =
@@ -142,9 +141,7 @@ pub fn parse_response_inner(body: &str) -> LlmResult<LlmResponseType> {
                                 // A refusal is a content block inside the
                                 // message item, not a separate output item.
                                 Some("refusal") => {
-                                    if let Some(t) =
-                                        block.get("refusal").and_then(|v| v.as_str())
-                                    {
+                                    if let Some(t) = block.get("refusal").and_then(|v| v.as_str()) {
                                         refusal_parts.push(t.to_string());
                                     }
                                 }
@@ -222,15 +219,11 @@ pub fn parse_response_inner(body: &str) -> LlmResult<LlmResponseType> {
         // Generated media rides on the message as rich blocks; a response
         // without media stays the plain-text shorthand.
         content: if media_blocks.is_empty() {
-            llm_suite_types::message::MessageContentValue::Text(
-                content.clone().unwrap_or_default(),
-            )
+            llm_suite_types::message::MessageContentValue::Text(content.clone().unwrap_or_default())
         } else {
             let mut blocks = Vec::new();
             if let Some(text) = &content {
-                blocks.push(llm_suite_types::message::MessageContent::Text {
-                    text: text.clone(),
-                });
+                blocks.push(llm_suite_types::message::MessageContent::Text { text: text.clone() });
             }
             blocks.extend(media_blocks);
             llm_suite_types::message::MessageContentValue::Rich(blocks)

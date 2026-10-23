@@ -485,7 +485,6 @@ pub fn convert_image_block(url: &str) -> LlmResult<serde_json::Value> {
     }
 }
 
-
 #[cfg(test)]
 #[path = "messages/tests.rs"]
 mod tests;

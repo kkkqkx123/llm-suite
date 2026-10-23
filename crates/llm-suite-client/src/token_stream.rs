@@ -195,11 +195,7 @@ impl MessageStream for TokenRecordingStream {
             if !self.stats_recorded {
                 self.stats_recorded = true;
                 if let (Some(metrics), Some(stats)) = (&self.metrics, msg.stream_stats.as_ref()) {
-                    metrics.record_stream_stats(
-                        stats,
-                        self.completion_tokens,
-                        &self.context,
-                    );
+                    metrics.record_stream_stats(stats, self.completion_tokens, &self.context);
                 }
             }
             // The stream completed: the end-to-end duration is the request
@@ -246,7 +242,9 @@ mod tests {
             provider_id: Some("openai".to_string()),
             format: Some("OPENAI_CHAT".to_string()),
             execution_id: Some("exec-1".to_string()),
-            accounting: llm_suite_token::token_accounting(&llm_suite_types::llm::LlmFormat::OpenaiChat),
+            accounting: llm_suite_token::token_accounting(
+                &llm_suite_types::llm::LlmFormat::OpenaiChat,
+            ),
         }
     }
 
@@ -516,9 +514,8 @@ mod tests {
             ],
         };
         let metrics = std::sync::Arc::new(RecordingMetricsSink::new());
-        let mut stream =
-            TokenRecordingStream::new(Box::new(inner), None, context(), None)
-                .with_metrics_sink(Some(metrics.clone()));
+        let mut stream = TokenRecordingStream::new(Box::new(inner), None, context(), None)
+            .with_metrics_sink(Some(metrics.clone()));
         while stream.next().await.is_some() {}
 
         let (stats, completion_tokens) = metrics.last();

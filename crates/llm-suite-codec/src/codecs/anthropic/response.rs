@@ -81,8 +81,7 @@ pub fn parse_anthropic_response(body: &str) -> LlmResult<LlmResponseType> {
                             text: text.to_string(),
                         });
                     }
-                    if let Some(block_citations) =
-                        block.get("citations").and_then(|v| v.as_array())
+                    if let Some(block_citations) = block.get("citations").and_then(|v| v.as_array())
                     {
                         citations.extend(block_citations.iter().cloned());
                     }
@@ -371,8 +370,8 @@ mod tests {
     #[test]
     fn error_payload_is_surfaced_as_invalid_response() {
         let body = r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
-        let err =
-            parse_response(body, &request(vec![], None)).expect_err("error payload must not parse into a message");
+        let err = parse_response(body, &request(vec![], None))
+            .expect_err("error payload must not parse into a message");
         match err {
             LlmError::InvalidResponse(msg) => {
                 assert!(msg.contains("overloaded_error"));
@@ -529,8 +528,7 @@ mod tests {
             .find(|b| b["type"] == "web_search_tool_result")
             .expect("the search result must be replayed");
         assert_eq!(
-            search_result["content"][0]["title"],
-            "Example",
+            search_result["content"][0]["title"], "Example",
             "the result travels verbatim"
         );
     }

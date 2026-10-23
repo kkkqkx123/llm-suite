@@ -144,7 +144,8 @@ mod tests {
         let final_event = acc.push(MessageStreamEvent::End(
             llm_suite_types::llm::MessageStreamEnd {},
         ));
-        let Accumulated::Finalized(MessageStreamEvent::FinalMessage(final_msg)) = final_event else {
+        let Accumulated::Finalized(MessageStreamEvent::FinalMessage(final_msg)) = final_event
+        else {
             panic!("expected FinalMessage");
         };
         let calls = final_msg.message.tool_calls.unwrap();
@@ -185,7 +186,8 @@ mod tests {
         let final_event = acc.push(MessageStreamEvent::End(
             llm_suite_types::llm::MessageStreamEnd {},
         ));
-        let Accumulated::Finalized(MessageStreamEvent::FinalMessage(final_msg)) = final_event else {
+        let Accumulated::Finalized(MessageStreamEvent::FinalMessage(final_msg)) = final_event
+        else {
             panic!("expected FinalMessage");
         };
         let calls = final_msg.message.tool_calls.unwrap();
@@ -213,7 +215,8 @@ mod tests {
         let final_event = acc.push(MessageStreamEvent::End(
             llm_suite_types::llm::MessageStreamEnd {},
         ));
-        let Accumulated::Finalized(MessageStreamEvent::FinalMessage(final_msg)) = final_event else {
+        let Accumulated::Finalized(MessageStreamEvent::FinalMessage(final_msg)) = final_event
+        else {
             panic!("expected FinalMessage");
         };
         let calls = final_msg.message.tool_calls.expect("tool calls present");
@@ -228,14 +231,18 @@ mod tests {
     fn text_snapshot_and_usage_merge_on_final_message() {
         let mut acc = MessageAccumulator::new(None);
 
-        acc.push(MessageStreamEvent::Text(llm_suite_types::llm::MessageStreamText {
-            text: "hello".to_string(),
-            snapshot: String::new(),
-        }));
-        acc.push(MessageStreamEvent::Text(llm_suite_types::llm::MessageStreamText {
-            text: " world".to_string(),
-            snapshot: String::new(),
-        }));
+        acc.push(MessageStreamEvent::Text(
+            llm_suite_types::llm::MessageStreamText {
+                text: "hello".to_string(),
+                snapshot: String::new(),
+            },
+        ));
+        acc.push(MessageStreamEvent::Text(
+            llm_suite_types::llm::MessageStreamText {
+                text: " world".to_string(),
+                snapshot: String::new(),
+            },
+        ));
         acc.push(MessageStreamEvent::Usage(MessageStreamUsage {
             usage: llm_suite_types::llm::TokenUsageStats {
                 prompt_tokens: 10,
@@ -253,7 +260,8 @@ mod tests {
         let final_event = acc.push(MessageStreamEvent::End(
             llm_suite_types::llm::MessageStreamEnd {},
         ));
-        let Accumulated::Finalized(MessageStreamEvent::FinalMessage(final_msg)) = final_event else {
+        let Accumulated::Finalized(MessageStreamEvent::FinalMessage(final_msg)) = final_event
+        else {
             panic!("expected FinalMessage");
         };
         assert_eq!(
@@ -300,7 +308,8 @@ mod tests {
         let final_event = acc.push(MessageStreamEvent::End(
             llm_suite_types::llm::MessageStreamEnd {},
         ));
-        let Accumulated::Finalized(MessageStreamEvent::FinalMessage(final_msg)) = final_event else {
+        let Accumulated::Finalized(MessageStreamEvent::FinalMessage(final_msg)) = final_event
+        else {
             panic!("expected FinalMessage");
         };
         let usage = final_msg.usage.expect("usage must be merged");
@@ -328,15 +337,18 @@ mod tests {
         acc.push(MessageStreamEvent::Annotation(MessageStreamAnnotation {
             annotation: serde_json::json!({"type": "url_citation", "url": "https://b.example"}),
         }));
-        acc.push(MessageStreamEvent::Text(llm_suite_types::llm::MessageStreamText {
-            text: "grounded".to_string(),
-            snapshot: String::new(),
-        }));
+        acc.push(MessageStreamEvent::Text(
+            llm_suite_types::llm::MessageStreamText {
+                text: "grounded".to_string(),
+                snapshot: String::new(),
+            },
+        ));
 
         let final_event = acc.push(MessageStreamEvent::End(
             llm_suite_types::llm::MessageStreamEnd {},
         ));
-        let Accumulated::Finalized(MessageStreamEvent::FinalMessage(final_msg)) = final_event else {
+        let Accumulated::Finalized(MessageStreamEvent::FinalMessage(final_msg)) = final_event
+        else {
             panic!("expected FinalMessage");
         };
         let metadata = final_msg
@@ -378,14 +390,17 @@ mod tests {
             "repeat Start events must be swallowed"
         );
 
-        acc.push(MessageStreamEvent::Text(llm_suite_types::llm::MessageStreamText {
-            text: "hi".to_string(),
-            snapshot: String::new(),
-        }));
+        acc.push(MessageStreamEvent::Text(
+            llm_suite_types::llm::MessageStreamText {
+                text: "hi".to_string(),
+                snapshot: String::new(),
+            },
+        ));
         let final_event = acc.push(MessageStreamEvent::End(
             llm_suite_types::llm::MessageStreamEnd {},
         ));
-        let Accumulated::Finalized(MessageStreamEvent::FinalMessage(final_msg)) = final_event else {
+        let Accumulated::Finalized(MessageStreamEvent::FinalMessage(final_msg)) = final_event
+        else {
             panic!("expected FinalMessage");
         };
         assert_eq!(final_msg.id.as_deref(), Some("msg_1"), "first id wins");
@@ -421,7 +436,8 @@ mod tests {
         let final_event = acc.push(MessageStreamEvent::End(
             llm_suite_types::llm::MessageStreamEnd {},
         ));
-        let Accumulated::Finalized(MessageStreamEvent::FinalMessage(final_msg)) = final_event else {
+        let Accumulated::Finalized(MessageStreamEvent::FinalMessage(final_msg)) = final_event
+        else {
             panic!("expected FinalMessage");
         };
         assert_eq!(
@@ -471,7 +487,8 @@ mod tests {
         let final_event = acc.push(MessageStreamEvent::End(
             llm_suite_types::llm::MessageStreamEnd {},
         ));
-        let Accumulated::Finalized(MessageStreamEvent::FinalMessage(final_msg)) = final_event else {
+        let Accumulated::Finalized(MessageStreamEvent::FinalMessage(final_msg)) = final_event
+        else {
             panic!("expected FinalMessage");
         };
         let calls = final_msg.message.tool_calls.expect("tool calls present");
@@ -490,15 +507,18 @@ mod tests {
                 data: "c2VjcmV0".to_string(),
             },
         ));
-        acc.push(MessageStreamEvent::Text(llm_suite_types::llm::MessageStreamText {
-            text: "answer".to_string(),
-            snapshot: String::new(),
-        }));
+        acc.push(MessageStreamEvent::Text(
+            llm_suite_types::llm::MessageStreamText {
+                text: "answer".to_string(),
+                snapshot: String::new(),
+            },
+        ));
 
         let final_event = acc.push(MessageStreamEvent::End(
             llm_suite_types::llm::MessageStreamEnd {},
         ));
-        let Accumulated::Finalized(MessageStreamEvent::FinalMessage(final_msg)) = final_event else {
+        let Accumulated::Finalized(MessageStreamEvent::FinalMessage(final_msg)) = final_event
+        else {
             panic!("expected FinalMessage");
         };
         match &final_msg.message.content {

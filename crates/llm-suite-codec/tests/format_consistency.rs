@@ -1059,9 +1059,7 @@ fn the_text_of_a_tool_result_reaches_the_wire_once() {
 
         let mut request = empty_request();
         request.messages = vec![assistant, result];
-        let built = codec
-            .build_request(&request, &profile)
-            .expect("must build");
+        let built = codec.build_request(&request, &profile).expect("must build");
         let body = body_of(&built);
         let text = serde_json::to_string(&body).expect("serializable");
         let occurrences = text.matches("attached").count();

@@ -51,7 +51,10 @@ pub fn parse_stream_events(data: &str) -> LlmResult<Vec<MessageStreamEvent>> {
             // item; the argument events that follow only carry fragments.
             let item = json.get("item");
             if item.and_then(|i| i.get("type")).and_then(|v| v.as_str()) == Some("function_call") {
-                let index = json.get("output_index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let index = json
+                    .get("output_index")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
                 let id = item
                     .and_then(|i| i.get("id"))
                     .and_then(|v| v.as_str())
@@ -83,7 +86,10 @@ pub fn parse_stream_events(data: &str) -> LlmResult<Vec<MessageStreamEvent>> {
             // argument string next to the item id.
             let item = json.get("item");
             if item.and_then(|i| i.get("type")).and_then(|v| v.as_str()) == Some("function_call") {
-                let index = json.get("output_index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let index = json
+                    .get("output_index")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
                 let id = item
                     .and_then(|i| i.get("id"))
                     .and_then(|v| v.as_str())
@@ -162,7 +168,10 @@ pub fn parse_stream_events(data: &str) -> LlmResult<Vec<MessageStreamEvent>> {
             // stable for the whole stream, so fragments of one call share
             // it and parallel calls stay apart.
             if let Some(delta) = json.get("delta").and_then(|v| v.as_str()) {
-                let index = json.get("output_index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let index = json
+                    .get("output_index")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
                 events.push(MessageStreamEvent::ToolCallDelta(
                     llm_suite_types::llm::MessageStreamToolCallDelta {
                         index,
@@ -181,7 +190,10 @@ pub fn parse_stream_events(data: &str) -> LlmResult<Vec<MessageStreamEvent>> {
             // identity at its top level; the name was announced by the
             // output item event.
             if let Some(arguments) = json.get("arguments").and_then(|v| v.as_str()) {
-                let index = json.get("output_index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let index = json
+                    .get("output_index")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
                 let id = json
                     .get("item_id")
                     .and_then(|v| v.as_str())
@@ -348,17 +360,19 @@ mod tests {
             "the turn must end even when usage is present"
         );
 
-        let without_usage =
-            parse_stream_events(r#"{"type":"response.completed"}"#).expect("completed without usage parses");
+        let without_usage = parse_stream_events(r#"{"type":"response.completed"}"#)
+            .expect("completed without usage parses");
         assert!(matches!(without_usage[0], MessageStreamEvent::End(_)));
     }
 
     #[test]
     fn created_event_emits_stream_identity() {
-        match parse_stream_events(r#"{"type":"response.created","response":{"id":"resp_1","model":"gpt-4o"}}"#)
-            .expect("created chunk parses")
-            .into_iter()
-            .next()
+        match parse_stream_events(
+            r#"{"type":"response.created","response":{"id":"resp_1","model":"gpt-4o"}}"#,
+        )
+        .expect("created chunk parses")
+        .into_iter()
+        .next()
         {
             Some(MessageStreamEvent::Start(s)) => {
                 assert_eq!(s.id.as_deref(), Some("resp_1"));
@@ -411,8 +425,7 @@ mod tests {
     fn the_done_sentinel_ends_the_stream() {
         // The official Responses stream closes with a `[DONE]` sentinel that
         // is not JSON.
-        let events =
-            parse_stream_events("[DONE]").expect("the sentinel must not be a parse error");
+        let events = parse_stream_events("[DONE]").expect("the sentinel must not be a parse error");
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], MessageStreamEvent::End(_)));
     }

@@ -422,7 +422,6 @@ fn function_response_part(
     Ok(serde_json::json!({"functionResponse": response}))
 }
 
-
 #[cfg(test)]
 #[path = "contents/tests.rs"]
 mod tests;

@@ -106,13 +106,11 @@ pub fn parse_gemini_response(body: &str) -> LlmResult<LlmResponseType> {
                             // The part travels in the provider's own shape
                             // so the reply can be replayed in the next
                             // turn.
-                            rich_blocks.push(
-                                llm_suite_types::message::MessageContent::Native {
-                                    provider: "gemini".to_string(),
-                                    kind,
-                                    payload,
-                                },
-                            );
+                            rich_blocks.push(llm_suite_types::message::MessageContent::Native {
+                                provider: "gemini".to_string(),
+                                kind,
+                                payload,
+                            });
                         }
                         Part::FunctionCall {
                             name,

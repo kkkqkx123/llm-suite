@@ -56,7 +56,8 @@ pub fn parse_stream_events(data: &str) -> LlmResult<Vec<MessageStreamEvent>> {
             if let Some(b) = json.get("content_block") {
                 match b.get("type").and_then(|v| v.as_str()) {
                     Some("tool_use") => {
-                        let index = json.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                        let index =
+                            json.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                         let id = b.get("id").and_then(|v| v.as_str()).map(String::from);
                         let name = b.get("name").and_then(|v| v.as_str()).map(String::from);
                         return Ok(vec![MessageStreamEvent::ToolCallDelta(
@@ -221,9 +222,7 @@ pub fn parse_stream_events(data: &str) -> LlmResult<Vec<MessageStreamEvent>> {
                     }));
                 }
             }
-            if let Some(stop_reason) =
-                json.pointer("/delta/stop_reason").and_then(|v| v.as_str())
-            {
+            if let Some(stop_reason) = json.pointer("/delta/stop_reason").and_then(|v| v.as_str()) {
                 // Everything except `pause_turn` terminates the turn
                 // (the official StopReason set also includes `refusal`
                 // and `model_context_window_exceeded`).
@@ -324,9 +323,13 @@ mod tests {
     #[test]
     fn a_text_block_start_carries_no_block_of_its_own() {
         // The text of a block arrives in the delta frames.
-        let chunk = r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
+        let chunk =
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
         let events = parse_stream_events(chunk).expect("must parse");
-        assert!(events.is_empty(), "the text block must not be reported: {events:?}");
+        assert!(
+            events.is_empty(),
+            "the text block must not be reported: {events:?}"
+        );
     }
 
     #[test]

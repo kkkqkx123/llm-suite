@@ -4,7 +4,9 @@ use std::sync::atomic::AtomicUsize;
 
 use super::LlmCodec;
 use crate::error::LlmResult;
-use llm_suite_types::llm::{LlmProfile, LlmRequest, LlmResult as LlmResponseType, MessageStreamEvent};
+use llm_suite_types::llm::{
+    LlmProfile, LlmRequest, LlmResult as LlmResponseType, MessageStreamEvent,
+};
 use llm_suite_types::tool::Tool;
 
 pub(crate) mod body;
@@ -254,10 +256,7 @@ mod tests {
         let mut p = profile();
         p.model = "models/gemini-1.5-pro".to_string();
         let req = codec
-            .build_request(
-                &request(vec![msg(MessageRole::User, "Hi")], None),
-                &p,
-            )
+            .build_request(&request(vec![msg(MessageRole::User, "Hi")], None), &p)
             .expect("must build");
         assert_eq!(
             req.url().as_str(),
@@ -282,8 +281,8 @@ mod tests {
     #[test]
     fn count_tokens_body_covers_the_same_contents_as_the_inference_request() {
         let codec = GeminiNativeCodec::new();
-        let inference = body::build_body(&count_request(), &profile())
-            .expect("inference body must build");
+        let inference =
+            body::build_body(&count_request(), &profile()).expect("inference body must build");
         let req = codec
             .build_count_tokens_request(&count_request(), &profile())
             .expect("count request must build")

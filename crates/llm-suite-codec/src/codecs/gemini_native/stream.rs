@@ -59,7 +59,11 @@ impl GeminiNativeCodec {
                                     },
                                 ));
                             }
-                            Part::Inline { media_type, data, uri } => {
+                            Part::Inline {
+                                media_type,
+                                data,
+                                uri,
+                            } => {
                                 // Generated media arrives as a complete
                                 // part; emit it as a text snapshot so the
                                 // accumulator keeps it in the answer.

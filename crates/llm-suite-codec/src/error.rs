@@ -316,9 +316,6 @@ mod tests {
             LlmError::StreamError("boom".to_string()).metric_class(),
             "stream_error"
         );
-        assert_eq!(
-            LlmError::CircuitOpen.metric_class(),
-            "circuit_open"
-        );
+        assert_eq!(LlmError::CircuitOpen.metric_class(), "circuit_open");
     }
 }

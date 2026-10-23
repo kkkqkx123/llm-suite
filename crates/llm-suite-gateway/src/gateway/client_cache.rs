@@ -31,7 +31,10 @@ pub fn client_cache_key(profile: &LlmProfile) -> String {
 }
 
 impl LlmGateway {
-    pub(super) fn get_or_create_client(&self, profile: &LlmProfile) -> LlmResult<Arc<LlmClientImpl>> {
+    pub(super) fn get_or_create_client(
+        &self,
+        profile: &LlmProfile,
+    ) -> LlmResult<Arc<LlmClientImpl>> {
         let key = client_cache_key(profile);
 
         if let Some(client) = self.clients.get(key.as_str()) {
