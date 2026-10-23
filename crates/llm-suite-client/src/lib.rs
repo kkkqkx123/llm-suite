@@ -23,3 +23,4 @@ pub use token_stream::{
     LlmMetricsSink, SharedLlmMetricsSink, SharedTokenUsageSink, TokenRecordingStream,
     TokenUsageSink,
 };
+pub use llm_suite_token::{LlmCallContext, LlmUsageReport};
