@@ -86,8 +86,13 @@ impl LlmGateway {
         let estimated = result.usage.is_none();
         let mut report = LlmUsageReport::from_usage(context.clone(), usage);
         report.estimated = estimated;
-        self.cost_enriching_sink(Arc::clone(metrics), &prepared.profile)
-            .record_token_usage(&report);
+        // Subscription-backed access is not metered, so no cost is attached.
+        if prepared.is_subscription {
+            metrics.record_token_usage(&report);
+        } else {
+            self.cost_enriching_sink(Arc::clone(metrics), &prepared.profile)
+                .record_token_usage(&report);
+        }
     }
 
     pub(super) fn record_request(

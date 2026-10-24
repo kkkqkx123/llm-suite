@@ -13,6 +13,7 @@ default = []
 mock = ["llm-suite-client/mock"]
 
 [dependencies]
+llm-suite-auth = { version = "0.1.0", path = "../llm-suite-auth" }
 llm-suite-client = { version = "0.1.0", path = "../llm-suite-client" }
 llm-suite-codec = { version = "0.1.0", path = "../llm-suite-codec" }
 llm-suite-common = { version = "0.1.0", path = "../llm-suite-common" }
@@ -29,6 +30,7 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 llm-suite-client = { version = "0.1.0", path = "../llm-suite-client", features = ["mock"] }
+async-trait = { workspace = true }
 
 # `mock_routing_integration` uses `LlmGateway::register_mock`, which only
 # exists under the `mock` feature; skip the test target otherwise.

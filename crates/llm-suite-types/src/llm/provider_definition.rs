@@ -44,4 +44,29 @@ pub struct LlmProviderDefinition {
     /// Provider-level rate limit shared by all profiles on this base URL.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limit: Option<super::RateLimitConfig>,
+    /// Optional authentication declaration: marks this provider as needing a
+    /// login flow and names the registered auth implementation. Absent means
+    /// static key authentication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<super::ProviderAuthRef>,
+}
+
+/// Reference from a provider definition to a registered auth implementation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProviderAuthRef {
+    /// Name of the registered auth implementation (built-in id or plugin
+    /// contribution name).
+    pub provider: String,
+    /// Authentication method the declaration expects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<super::AuthMethod>,
+    /// True when access through this provider is subscription-backed rather
+    /// than metered; hosts suppress per-token cost accounting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_subscription: Option<bool>,
+    /// Provider-specific auth parameters (endpoints, client id, scopes,
+    /// flow). Never carries secrets; the shape is defined by the named
+    /// auth implementation and passed to it verbatim at login time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params: Option<crate::Metadata>,
 }

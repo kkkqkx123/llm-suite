@@ -109,4 +109,23 @@ pub struct LlmProfile {
     /// Optional circuit breaker policy for this profile's endpoint.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub circuit_breaker: Option<super::CircuitBreakerConfig>,
+    /// Optional authentication reference that outsources key resolution to
+    /// the credential store. Absent keeps the static `api_key` behavior; an
+    /// explicit `api_key` still wins over the referenced credential.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<super::ProfileAuthRef>,
+}
+
+/// Reference from a profile to a stored credential.
+///
+/// The referenced credential owns the provider: once one is stored, ambient
+/// environment keys are not consulted for that provider.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProfileAuthRef {
+    /// Credential owner: the provider id keying the credential store.
+    pub provider_id: String,
+    /// Authentication method to use; absent infers from the stored
+    /// credential type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<super::AuthMethod>,
 }

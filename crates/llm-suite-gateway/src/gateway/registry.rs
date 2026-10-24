@@ -4,7 +4,9 @@ use llm_suite_codec::error::LlmResult;
 use llm_suite_config::catalog::ModelCatalog;
 use llm_suite_config::profile::ProfileManager;
 use llm_suite_config::provider::{apply_provider_defaults, ProviderDefinitionRegistry};
+use llm_suite_auth::AuthRegistry;
 use llm_suite_types::llm::LlmProfile;
+use std::sync::Arc;
 
 use super::LlmGateway;
 
@@ -84,6 +86,44 @@ impl LlmGateway {
             self.evict_clients_for_profile(id);
         }
         removed
+    }
+
+    /// Attach an optional auth registry. Profiles carrying an auth reference
+    /// then resolve their credential (stored key, OAuth token, ambient
+    /// environment) through the registry on every request; OAuth refresh
+    /// happens inside the registry's serialized write path. Callers must
+    /// evict cached clients after login/logout so a rotated credential
+    /// reaches the transport (see `evict_clients_for_auth`).
+    pub fn with_auth(mut self, registry: Arc<AuthRegistry>) -> Self {
+        self.auth = Some(registry);
+        self
+    }
+
+    /// The attached auth registry, when one is wired.
+    pub fn auth_registry(&self) -> Option<&Arc<AuthRegistry>> {
+        self.auth.as_ref()
+    }
+
+    /// Evict cached clients whose profile resolves auth through the given
+    /// auth name (the credential owner). Call after a login, logout or auth
+    /// surface removal so the next request re-resolves the credential.
+    pub fn evict_clients_for_auth(&self, auth_name: &str) {
+        let affected: Vec<String> = self
+            .profiles
+            .list()
+            .into_iter()
+            .filter(|profile| {
+                profile
+                    .auth
+                    .as_ref()
+                    .map(|auth| auth.provider_id == auth_name)
+                    .unwrap_or(false)
+            })
+            .map(|profile| profile.id.clone())
+            .collect();
+        for profile_id in affected {
+            self.evict_clients_for_profile(&profile_id);
+        }
     }
 
     /// Clear every piece of state the gateway holds: the profiles, the

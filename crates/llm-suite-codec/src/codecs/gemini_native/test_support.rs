@@ -31,6 +31,7 @@ pub fn profile() -> LlmProfile {
         proxy: None,
         no_proxy: None,
         circuit_breaker: None,
+        auth: None,
     }
 }
 

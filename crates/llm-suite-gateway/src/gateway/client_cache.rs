@@ -104,4 +104,11 @@ impl LlmGateway {
         let prefix = client_cache_prefix(profile_id);
         self.clients.retain(|key, _| !key.starts_with(&prefix));
     }
+
+    /// Public alias of `evict_clients_for_profile` for hosts that evict
+    /// after a login, logout or profile update so the next request rebuilds
+    /// the transport with the rotated credential.
+    pub fn evict_client(&self, profile_id: &str) {
+        self.evict_clients_for_profile(profile_id);
+    }
 }

@@ -55,6 +55,45 @@ impl std::str::FromStr for LlmFormat {
     }
 }
 
+/// Authentication method of a stored credential.
+///
+/// Serialized in snake_case so configuration files read naturally
+/// (`method = "oauth"`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthMethod {
+    /// Static API key resolved from a store, environment or request.
+    ApiKey,
+    /// OAuth credential with login and refresh lifecycle.
+    #[serde(rename = "oauth")]
+    OAuth,
+}
+
+/// Error returned when a string does not name an [`AuthMethod`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthMethodParseError(pub String);
+
+impl std::fmt::Display for AuthMethodParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown auth method: {}", self.0)
+    }
+}
+
+impl std::error::Error for AuthMethodParseError {}
+
+impl std::str::FromStr for AuthMethod {
+    type Err = AuthMethodParseError;
+
+    /// Parse from the canonical snake_case string form (`api_key`, `oauth`).
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "api_key" => Ok(Self::ApiKey),
+            "oauth" => Ok(Self::OAuth),
+            other => Err(AuthMethodParseError(other.to_string())),
+        }
+    }
+}
+
 impl Serialize for LlmFormat {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(self.as_str())
@@ -120,5 +159,23 @@ mod tests {
             let from_name = format.as_str().parse::<LlmFormat>().unwrap();
             assert_eq!(from_name, format);
         }
+    }
+
+    #[test]
+    fn auth_method_roundtrip() {
+        assert_eq!("api_key".parse::<AuthMethod>().unwrap(), AuthMethod::ApiKey);
+        assert_eq!("oauth".parse::<AuthMethod>().unwrap(), AuthMethod::OAuth);
+        assert_eq!(
+            serde_json::to_string(&AuthMethod::ApiKey).unwrap(),
+            "\"api_key\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AuthMethod::OAuth).unwrap(),
+            "\"oauth\""
+        );
+        let back: AuthMethod = serde_json::from_str("\"oauth\"").unwrap();
+        assert_eq!(back, AuthMethod::OAuth);
+        let err = "totp".parse::<AuthMethod>().unwrap_err();
+        assert_eq!(err, AuthMethodParseError("totp".to_string()));
     }
 }

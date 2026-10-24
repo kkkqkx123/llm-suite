@@ -46,6 +46,7 @@ fn profile(format: LlmFormat, model: &str) -> LlmProfile {
         proxy: None,
         no_proxy: None,
         circuit_breaker: None,
+        auth: None,
     }
 }
 

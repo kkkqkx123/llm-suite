@@ -102,6 +102,17 @@ pub fn apply_provider_defaults(
     if profile.auth_type.is_none() {
         profile.auth_type = definition.auth_type.clone();
     }
+    if profile.auth.is_none() {
+        if let Some(auth_ref) = definition.auth.as_ref() {
+            // The definition names the auth implementation owning the
+            // credential (a built-in auth id or a plugin-contributed auth
+            // name); the profile references it as its credential owner.
+            profile.auth = Some(llm_suite_types::llm::ProfileAuthRef {
+                provider_id: auth_ref.provider.clone(),
+                method: auth_ref.method,
+            });
+        }
+    }
     if profile.proxy.is_none() {
         profile.proxy = definition.proxy.clone();
     }
@@ -154,6 +165,7 @@ mod tests {
             proxy: None,
             no_proxy: None,
             circuit_breaker: None,
+            auth: None,
         }
     }
 
@@ -176,6 +188,7 @@ mod tests {
             proxy: Some("http://proxy.acme.test:8080".to_string()),
             no_proxy: None,
             rate_limit: None,
+            auth: None,
         }
     }
 
@@ -212,10 +225,36 @@ mod tests {
     }
 
     #[test]
+    fn definition_auth_reference_fills_missing_profile_auth() {
+        let registry = ProviderDefinitionRegistry::new();
+        let mut declared = definition();
+        declared.auth = Some(llm_suite_types::llm::ProviderAuthRef {
+            provider: "claude-subscription".to_string(),
+            method: Some(llm_suite_types::llm::AuthMethod::OAuth),
+            is_subscription: Some(true),
+            params: None,
+        });
+        registry.register(declared).unwrap();
+
+        let merged = apply_provider_defaults(profile("p1"), &registry).unwrap();
+        let auth = merged.auth.expect("auth inherited from definition");
+        assert_eq!(auth.provider_id, "claude-subscription");
+        assert_eq!(auth.method, Some(llm_suite_types::llm::AuthMethod::OAuth));
+
+        // An explicit profile auth reference always wins.
+        let mut explicit = profile("p2");
+        explicit.auth = Some(llm_suite_types::llm::ProfileAuthRef {
+            provider_id: "own-key".to_string(),
+            method: None,
+        });
+        let merged = apply_provider_defaults(explicit, &registry).unwrap();
+        assert_eq!(merged.auth.unwrap().provider_id, "own-key");
+    }
+
+    #[test]
     fn explicit_proxy_wins_over_definition() {
         let registry = ProviderDefinitionRegistry::new();
         registry.register(definition()).unwrap();
-
         let mut profile = profile("p1");
         profile.proxy = Some("http://override.test:3128".to_string());
         let merged = apply_provider_defaults(profile, &registry).unwrap();

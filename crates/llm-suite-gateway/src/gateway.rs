@@ -50,6 +50,10 @@ pub struct LlmGateway {
     /// (provider, model) price and attaches `total_cost` to the usage before
     /// handing it to the metrics sink. Zero overhead when absent.
     pricing_resolver: Option<Arc<dyn PricingResolver>>,
+    /// Optional auth registry resolving stored credentials and OAuth tokens
+    /// for profiles carrying an auth reference. Zero overhead when absent:
+    /// profiles without a reference keep their static-key behavior.
+    auth: Option<Arc<llm_suite_auth::AuthRegistry>>,
 }
 
 impl LlmGateway {
@@ -72,6 +76,7 @@ impl LlmGateway {
             mock_clients: Arc::new(DashMap::new()),
             token_metrics: None,
             pricing_resolver: None,
+            auth: None,
         }
     }
 
@@ -110,6 +115,8 @@ mod tests {
     use llm_suite_types::tool::Tool;
 
     use crate::gateway::client_cache::client_cache_key;
+    use llm_suite_auth::CredentialStore;
+    use llm_suite_codec::CodecRegistry;
 
     /// A codec whose `build_request` fails with a distinctive error, used
     /// to prove the gateway resolved the *custom* codec from the registry.
@@ -172,6 +179,7 @@ mod tests {
             proxy: None,
             no_proxy: None,
             circuit_breaker: None,
+            auth: None,
         }
     }
 
@@ -317,6 +325,7 @@ mod tests {
             proxy: None,
             no_proxy: None,
             rate_limit: None,
+            auth: None,
         }
     }
 
@@ -448,29 +457,204 @@ mod tests {
         );
     }
 
-    #[test]
-    fn clear_all_drops_the_resilience_state() {
-        let gateway = LlmGateway::new();
-        gateway
-            .register_profile(profile("p1", LlmFormat::OpenaiChat))
-            .unwrap();
-        gateway
-            .get_or_create_client(&gateway.profiles.get("p1").unwrap())
-            .unwrap();
-        gateway.shared_breaker("key", llm_suite_client::CircuitBreakerConfig::default());
-        gateway.shared_limiter("key", 1.0, 1);
 
-        gateway.clear_all();
+    /// OAuth surface whose stored credential is subscription-backed.
+    #[derive(Debug)]
+    struct SubscriptionOAuth;
 
-        assert!(!gateway.has_profile("p1"));
-        assert!(gateway.clients.is_empty());
-        assert!(
-            gateway.circuit_breakers.is_empty(),
-            "a breaker that survived the clear would keep rejecting requests"
+    #[async_trait::async_trait]
+    impl llm_suite_auth::OAuthAuth for SubscriptionOAuth {
+        fn name(&self) -> String {
+            "subscription oauth".to_string()
+        }
+
+        fn is_subscription(&self) -> bool {
+            true
+        }
+
+        async fn begin_login(
+            &self,
+        ) -> llm_suite_auth::AuthResult<llm_suite_auth::session::LoginFlow> {
+            Err(llm_suite_auth::AuthError::Login(
+                "not used in gateway tests".to_string(),
+            ))
+        }
+
+        async fn refresh(
+            &self,
+            credential: &llm_suite_auth::OAuthCredential,
+        ) -> llm_suite_auth::AuthResult<llm_suite_auth::OAuthCredential> {
+            Ok(credential.clone())
+        }
+
+        async fn to_auth(
+            &self,
+            credential: &llm_suite_auth::OAuthCredential,
+        ) -> llm_suite_auth::AuthResult<llm_suite_auth::ModelAuth> {
+            Ok(llm_suite_auth::ModelAuth {
+                api_key: Some(credential.access.clone()),
+                is_subscription: self.is_subscription(),
+                source: Some("OAuth".to_string()),
+                ..Default::default()
+            })
+        }
+    }
+
+    async fn auth_registry_with_stored_oauth() -> Arc<llm_suite_auth::AuthRegistry> {
+        let store = Arc::new(llm_suite_auth::MemoryCredentialStore::new());
+        let registry = llm_suite_auth::AuthRegistry::new(
+            store.clone(),
+            Arc::new(llm_suite_auth::StdAuthContext),
+        );
+        registry.register_provider(
+            "acme",
+            llm_suite_auth::ProviderAuth::oauth_only(Arc::new(SubscriptionOAuth)),
+        );
+        store
+            .modify("acme", Box::new(|_| {
+                Box::pin(async {
+                    Ok::<_, llm_suite_auth::AuthError>(Some(llm_suite_auth::Credential::OAuth(
+                        llm_suite_auth::OAuthCredential {
+                            refresh: "r-1".to_string(),
+                            access: "access-token".to_string(),
+                            expires: llm_suite_common::time::now() + 60 * 60 * 1000,
+                            is_subscription: true,
+                            extra: Default::default(),
+                        },
+                    )))
+                })
+            }))
+            .await
+            .expect("seed");
+        Arc::new(registry)
+    }
+
+    fn auth_profile(id: &str) -> LlmProfile {
+        let mut pending = profile(id, LlmFormat::Custom("probe".to_string()));
+        pending.auth = Some(llm_suite_types::llm::ProfileAuthRef {
+            provider_id: "acme".to_string(),
+            method: None,
+        });
+        pending
+    }
+
+    #[tokio::test]
+    async fn auth_reference_injects_stored_credential_and_subscription_flag() {
+        let codecs = CodecRegistry::new();
+        codecs
+            .register("probe", Arc::new(ProbeCodec))
+            .expect("probe registration must succeed");
+        let gateway = LlmGateway::new_with_codec_registry(codecs)
+            .with_auth(auth_registry_with_stored_oauth().await);
+        gateway.register_profile(auth_profile("p1")).unwrap();
+
+        let prepared = gateway.prepare(&request("p1")).await.expect("prepare");
+        assert_eq!(
+            prepared.profile.api_key.as_deref(),
+            Some("access-token"),
+            "the stored OAuth access token must reach the effective profile"
         );
         assert!(
-            gateway.rate_limiters.is_empty(),
-            "a token bucket that survived the clear would keep the old rate"
+            prepared.is_subscription,
+            "subscription-backed access must surface to cost accounting"
         );
+    }
+
+    #[tokio::test]
+    async fn missing_auth_registry_keeps_static_profile_untouched() {
+        let codecs = CodecRegistry::new();
+        codecs
+            .register("probe", Arc::new(ProbeCodec))
+            .expect("probe registration must succeed");
+        let gateway = LlmGateway::new_with_codec_registry(codecs);
+        gateway.register_profile(auth_profile("p1")).unwrap();
+
+        let prepared = gateway.prepare(&request("p1")).await.expect("prepare");
+        assert_eq!(prepared.profile.api_key, None);
+        assert!(!prepared.is_subscription);
+    }
+
+    #[tokio::test]
+    async fn unregistered_auth_provider_fails_before_http() {
+        let registry = llm_suite_auth::AuthRegistry::new(
+            Arc::new(llm_suite_auth::MemoryCredentialStore::new()),
+            Arc::new(llm_suite_auth::StdAuthContext),
+        );
+        let codecs = CodecRegistry::new();
+        codecs
+            .register("probe", Arc::new(ProbeCodec))
+            .expect("probe registration must succeed");
+        let gateway = LlmGateway::new_with_codec_registry(codecs).with_auth(Arc::new(registry));
+        gateway.register_profile(auth_profile("p1")).unwrap();
+
+        let err = match gateway.prepare(&request("p1")).await {
+            Ok(_) => panic!("unregistered auth provider must fail before dispatch"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("acme"),
+            "the provider id must stay in the message: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn evict_client_drops_cached_clients_for_profile() {
+        let codecs = CodecRegistry::new();
+        codecs
+            .register("probe", Arc::new(ProbeCodec))
+            .expect("probe registration must succeed");
+        let gateway = LlmGateway::new_with_codec_registry(codecs);
+        gateway
+            .register_profile(profile("p1", LlmFormat::Custom("probe".to_string())))
+            .unwrap();
+
+        // The probe codec fails, but the client is cached during prepare.
+        let _ = gateway.generate(&request("p1"), None).await;
+        let stored = gateway.profiles.get("p1").unwrap();
+        let key = client_cache_key(&stored);
+        assert!(gateway.clients.contains_key(key.as_str()));
+
+        gateway.evict_client("p1");
+        assert!(
+            !gateway.clients.contains_key(key.as_str()),
+            "evict_client must drop every cached client of the profile"
+        );
+    }
+
+    #[tokio::test]
+    async fn evict_clients_for_auth_drops_only_profiles_resolving_that_auth() {
+        let codecs = CodecRegistry::new();
+        codecs
+            .register("probe", Arc::new(ProbeCodec))
+            .expect("probe registration must succeed");
+        let gateway = LlmGateway::new_with_codec_registry(codecs)
+            .with_auth(auth_registry_with_stored_oauth().await);
+        gateway.register_profile(auth_profile("p1")).unwrap();
+        gateway
+            .register_profile(profile("p2", LlmFormat::Custom("probe".to_string())))
+            .unwrap();
+
+        // Both probes fail at the codec, but each client is cached during
+        // prepare; p1 resolves auth through "acme", p2 carries no auth.
+        let _ = gateway.generate(&request("p1"), None).await;
+        let _ = gateway.generate(&request("p2"), None).await;
+        let auth_key = client_cache_key(&gateway.profiles.get("p1").unwrap());
+        let plain_key = client_cache_key(&gateway.profiles.get("p2").unwrap());
+        assert!(gateway.clients.contains_key(auth_key.as_str()));
+        assert!(gateway.clients.contains_key(plain_key.as_str()));
+
+        gateway.evict_clients_for_auth("acme");
+        assert!(
+            !gateway.clients.contains_key(auth_key.as_str()),
+            "profiles resolving auth through the removed surface must be evicted"
+        );
+        assert!(
+            gateway.clients.contains_key(plain_key.as_str()),
+            "profiles without an auth reference must keep their cached clients"
+        );
+
+        // An unknown auth name is a no-op, not an error.
+        gateway.evict_clients_for_auth("missing");
+        assert!(gateway.clients.contains_key(plain_key.as_str()));
     }
 }

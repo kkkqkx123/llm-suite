@@ -22,7 +22,7 @@ impl LlmGateway {
             return client.generate(request, cancel).await;
         }
 
-        let prepared = self.prepare(request)?;
+        let prepared = self.prepare(request).await?;
         self.admit(&prepared).await?;
         let start = std::time::Instant::now();
         let timeout_ms = prepared.effective.timeout_ms;
@@ -55,7 +55,7 @@ impl LlmGateway {
             return client.generate_stream(request, cancel).await;
         }
 
-        let prepared = self.prepare(request)?;
+        let prepared = self.prepare(request).await?;
         self.admit(&prepared).await?;
         let start = std::time::Instant::now();
         let timeout_ms = prepared.effective.timeout_ms;
@@ -110,7 +110,7 @@ impl LlmGateway {
             return client.count_tokens(request, cancel).await;
         }
 
-        let prepared = self.prepare(request)?;
+        let prepared = self.prepare(request).await?;
         self.admit(&prepared).await?;
         prepared
             .client
