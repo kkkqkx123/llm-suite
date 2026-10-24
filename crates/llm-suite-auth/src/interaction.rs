@@ -35,9 +35,7 @@ pub enum AuthEvent {
         expires_in_seconds: Option<u64>,
     },
     /// Progress note (poll attempt, waiting for callback, ...).
-    Progress {
-        message: String,
-    },
+    Progress { message: String },
 }
 
 /// One option of a select prompt.

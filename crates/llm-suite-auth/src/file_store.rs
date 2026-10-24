@@ -141,7 +141,11 @@ mod tests {
     use crate::credential::{ApiKeyCredential, AuthMethod};
 
     fn temp_path(tag: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("llm-suite-auth-{}-{}.json", tag, std::process::id()))
+        std::env::temp_dir().join(format!(
+            "llm-suite-auth-{}-{}.json",
+            tag,
+            std::process::id()
+        ))
     }
 
     #[tokio::test]
@@ -166,13 +170,21 @@ mod tests {
             .await
             .expect("write");
         assert_eq!(
-            written.expect("post-write").as_api_key().expect("key").key.as_deref(),
+            written
+                .expect("post-write")
+                .as_api_key()
+                .expect("key")
+                .key
+                .as_deref(),
             Some("sk-file")
         );
 
         let reread = store.read("acme").await.expect("read").expect("stored");
         assert_eq!(reread.method(), AuthMethod::ApiKey);
-        assert!(!path.with_extension("json.tmp").exists(), "temp file must be renamed away");
+        assert!(
+            !path.with_extension("json.tmp").exists(),
+            "temp file must be renamed away"
+        );
 
         store.delete("acme").await.expect("delete");
         assert!(store.read("acme").await.expect("read").is_none());

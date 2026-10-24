@@ -24,9 +24,7 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// the entry unchanged. The read view is only valid inside the closure body,
 /// so implementations that need it across awaits must clone first.
 pub type ModifyFn<'a> = Box<
-    dyn FnOnce(Option<&Credential>) -> BoxFuture<'a, AuthResult<Option<Credential>>>
-        + Send
-        + 'a,
+    dyn FnOnce(Option<&Credential>) -> BoxFuture<'a, AuthResult<Option<Credential>>> + Send + 'a,
 >;
 
 /// Application-owned credential storage, keyed by provider id.
@@ -115,16 +113,35 @@ mod tests {
         assert!(store.read("p").await.expect("read").is_none());
 
         let written = store
-            .modify("p", Box::new(|_| Box::pin(async { Ok(Some(api_key("k1"))) })))
+            .modify(
+                "p",
+                Box::new(|_| Box::pin(async { Ok(Some(api_key("k1"))) })),
+            )
             .await
             .expect("write");
-        assert_eq!(written.expect("post-write").as_api_key().expect("key").key.as_deref(), Some("k1"));
+        assert_eq!(
+            written
+                .expect("post-write")
+                .as_api_key()
+                .expect("key")
+                .key
+                .as_deref(),
+            Some("k1")
+        );
 
         let unchanged = store
             .modify("p", Box::new(|_| Box::pin(async { Ok(None) })))
             .await
             .expect("no-op write");
-        assert_eq!(unchanged.expect("kept").as_api_key().expect("key").key.as_deref(), Some("k1"));
+        assert_eq!(
+            unchanged
+                .expect("kept")
+                .as_api_key()
+                .expect("key")
+                .key
+                .as_deref(),
+            Some("k1")
+        );
 
         store.delete("p").await.expect("delete");
         assert!(store.read("p").await.expect("read").is_none());
@@ -134,31 +151,48 @@ mod tests {
     async fn modify_closure_sees_current_credential() {
         let store = MemoryCredentialStore::new();
         store
-            .modify("p", Box::new(|_| Box::pin(async { Ok(Some(api_key("k1"))) })))
+            .modify(
+                "p",
+                Box::new(|_| Box::pin(async { Ok(Some(api_key("k1"))) })),
+            )
             .await
             .expect("seed");
 
         let rotated = store
-            .modify("p", Box::new(|current| {
-                let old = current.and_then(|c| match c {
-                    Credential::ApiKey(a) => a.key.clone(),
-                    _ => None,
-                });
-                Box::pin(async move {
-                    assert_eq!(old.as_deref(), Some("k1"));
-                    Ok(Some(api_key("k2")))
-                })
-            }))
+            .modify(
+                "p",
+                Box::new(|current| {
+                    let old = current.and_then(|c| match c {
+                        Credential::ApiKey(a) => a.key.clone(),
+                        _ => None,
+                    });
+                    Box::pin(async move {
+                        assert_eq!(old.as_deref(), Some("k1"));
+                        Ok(Some(api_key("k2")))
+                    })
+                }),
+            )
             .await
             .expect("rotate");
-        assert_eq!(rotated.expect("post-write").as_api_key().expect("key").key.as_deref(), Some("k2"));
+        assert_eq!(
+            rotated
+                .expect("post-write")
+                .as_api_key()
+                .expect("key")
+                .key
+                .as_deref(),
+            Some("k2")
+        );
     }
 
     #[tokio::test]
     async fn list_reports_metadata_only() {
         let store = MemoryCredentialStore::new();
         store
-            .modify("p", Box::new(|_| Box::pin(async { Ok(Some(api_key("k1"))) })))
+            .modify(
+                "p",
+                Box::new(|_| Box::pin(async { Ok(Some(api_key("k1"))) })),
+            )
             .await
             .expect("seed");
         let infos = store.list().await.expect("list");

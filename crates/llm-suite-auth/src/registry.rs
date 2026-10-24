@@ -5,8 +5,8 @@
 //! request-ready auth.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use dashmap::DashMap;
 use tokio::sync::Mutex;
@@ -69,13 +69,8 @@ impl AuthRegistry {
     /// Register (or replace) a provider's auth surface.
     pub fn register_provider(&self, id: impl Into<String>, auth: ProviderAuth) {
         let id = id.into();
-        self.providers.insert(
-            id.clone(),
-            ProviderEntry {
-                id,
-                auth,
-            },
-        );
+        self.providers
+            .insert(id.clone(), ProviderEntry { id, auth });
     }
 
     /// Remove a provider's auth surface.
@@ -104,15 +99,15 @@ impl AuthRegistry {
                         is_subscription: oauth.is_subscription(),
                     })
                 } else {
-                    auth.api_key.as_ref().map(|api_key| {
-                        crate::auth::AuthSurfaceInfo {
+                    auth.api_key
+                        .as_ref()
+                        .map(|api_key| crate::auth::AuthSurfaceInfo {
                             id: entry.id.clone(),
                             display_name: api_key.name(),
                             method: crate::credential::AuthMethod::ApiKey,
                             login_label: None,
                             is_subscription: false,
-                        }
-                    })
+                        })
                 }
             })
             .collect()
@@ -190,8 +185,14 @@ impl AuthRegistry {
         drop(entry);
         let mut session = LoginSession::new(provider_id.to_string(), flow);
         let state = session.initial_state().await?;
-        let session_id = format!("login-{}", self.next_session.fetch_add(1, Ordering::Relaxed));
-        self.sessions.lock().await.insert(session_id.clone(), session);
+        let session_id = format!(
+            "login-{}",
+            self.next_session.fetch_add(1, Ordering::Relaxed)
+        );
+        self.sessions
+            .lock()
+            .await
+            .insert(session_id.clone(), session);
         Ok((session_id, state))
     }
 
@@ -227,7 +228,11 @@ impl AuthRegistry {
             .get_mut(session_id)
             .ok_or_else(|| AuthError::SessionNotFound(session_id.to_string()))?;
         let state = session.submit(input, &login_http_client(), now()).await?;
-        if let LoginState::Completed { provider_id, method } = &state {
+        if let LoginState::Completed {
+            provider_id,
+            method,
+        } = &state
+        {
             // The session produced a credential; persist it through the
             // serialized write path so concurrent refreshes stay exclusive.
             let credential = session_credential(session)?;
@@ -248,7 +253,10 @@ impl AuthRegistry {
     }
 
     /// Take the loopback listener of a session waiting for a callback.
-    pub async fn login_take_loopback(&self, session_id: &str) -> AuthResult<Option<crate::oauth::pkce::LoopbackListener>> {
+    pub async fn login_take_loopback(
+        &self,
+        session_id: &str,
+    ) -> AuthResult<Option<crate::oauth::pkce::LoopbackListener>> {
         let mut sessions = self.sessions.lock().await;
         let session = sessions
             .get_mut(session_id)
@@ -278,9 +286,9 @@ impl AuthRegistry {
 /// re-derives it here from the session's own bookkeeping so the write goes
 /// through the store lock exactly once.
 fn session_credential(session: &LoginSession) -> AuthResult<Credential> {
-    session.produced_credential().ok_or_else(|| {
-        AuthError::Login("completed session produced no credential".to_string())
-    })
+    session
+        .produced_credential()
+        .ok_or_else(|| AuthError::Login("completed session produced no credential".to_string()))
 }
 
 /// Shared HTTP client for OAuth token exchanges.
@@ -304,7 +312,10 @@ mod tests {
             "env key".to_string()
         }
 
-        async fn resolve(&self, input: crate::auth::ResolveInput<'_>) -> AuthResult<Option<crate::auth::ModelAuth>> {
+        async fn resolve(
+            &self,
+            input: crate::auth::ResolveInput<'_>,
+        ) -> AuthResult<Option<crate::auth::ModelAuth>> {
             Ok(input
                 .ctx
                 .env("TEST_KEY")
@@ -394,7 +405,10 @@ mod tests {
             .await
             .expect("read")
             .expect("stored");
-        assert_eq!(stored.as_api_key().expect("key").key.as_deref(), Some("sk-typed"));
+        assert_eq!(
+            stored.as_api_key().expect("key").key.as_deref(),
+            Some("sk-typed")
+        );
     }
 
     #[tokio::test]
@@ -407,12 +421,7 @@ mod tests {
             .await
             .expect("submit");
         registry.logout("acme").await.expect("logout");
-        assert!(registry
-            .store()
-            .read("acme")
-            .await
-            .expect("read")
-            .is_none());
+        assert!(registry.store().read("acme").await.expect("read").is_none());
     }
 
     #[tokio::test]

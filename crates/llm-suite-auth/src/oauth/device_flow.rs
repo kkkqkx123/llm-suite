@@ -124,8 +124,7 @@ impl DeviceFlowPending {
                 .unwrap_or_else(|| self.verification_uri.clone()),
             interval_seconds: Some(self.interval.as_secs()),
             expires_in_seconds: Some(
-                u64::try_from((self.expires_at_ms - oauth_now_ms()).max(0) / 1000)
-                    .unwrap_or(0),
+                u64::try_from((self.expires_at_ms - oauth_now_ms()).max(0) / 1000).unwrap_or(0),
             ),
         }
     }
@@ -183,10 +182,7 @@ impl DeviceFlowPending {
             .post(&self.config.token_url)
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(form_body(
-                &form
-                    .iter()
-                    .map(|(k, v)| (*k, *v))
-                    .collect::<Vec<_>>(),
+                &form.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>(),
             ))
             .send()
             .await
@@ -196,8 +192,9 @@ impl DeviceFlowPending {
             .text()
             .await
             .map_err(|e| AuthError::Transport(e.to_string()))?;
-        let token: TokenResponse = serde_json::from_str(&body)
-            .map_err(|e| AuthError::Transport(format!("token response: {e} (HTTP {})", status.as_u16())))?;
+        let token: TokenResponse = serde_json::from_str(&body).map_err(|e| {
+            AuthError::Transport(format!("token response: {e} (HTTP {})", status.as_u16()))
+        })?;
         match token.error.as_deref() {
             Some("authorization_pending") => Ok(DeviceFlowPoll::Pending),
             Some("slow_down") => Ok(DeviceFlowPoll::SlowDown),
@@ -276,8 +273,7 @@ mod tests {
         let pending: TokenResponse =
             serde_json::from_str(r#"{"error":"authorization_pending"}"#).expect("parse");
         assert_eq!(pending.error.as_deref(), Some("authorization_pending"));
-        let slow: TokenResponse =
-            serde_json::from_str(r#"{"error":"slow_down"}"#).expect("parse");
+        let slow: TokenResponse = serde_json::from_str(r#"{"error":"slow_down"}"#).expect("parse");
         assert_eq!(slow.error.as_deref(), Some("slow_down"));
     }
 }

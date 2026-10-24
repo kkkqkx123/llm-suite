@@ -2,10 +2,10 @@
 
 use std::sync::Arc;
 
+use llm_suite_auth::AuthError;
 use llm_suite_client::client::LlmClientImpl;
 use llm_suite_codec::error::{LlmError, LlmResult};
 use llm_suite_config::merge_request;
-use llm_suite_auth::AuthError;
 use llm_suite_types::llm::{LlmProfile, LlmRequest};
 
 use super::LlmGateway;

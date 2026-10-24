@@ -114,9 +114,7 @@ impl LoopbackListener {
             .map_err(|e| AuthError::Loopback(e.to_string()))?;
         let _ = stream.flush().await;
         if let Some(error) = params.get("error") {
-            return Err(AuthError::Login(format!(
-                "authorization denied: {error}"
-            )));
+            return Err(AuthError::Login(format!("authorization denied: {error}")));
         }
         if params.get("state").map(String::as_str) != Some(self.state.as_str()) {
             return Err(AuthError::Login("authorization state mismatch".to_string()));
@@ -211,7 +209,8 @@ impl PkcePending {
                 pairs.append_pair("scope", scope);
             }
         }
-        url.query_pairs_mut().append_pair("code_challenge", &self.challenge());
+        url.query_pairs_mut()
+            .append_pair("code_challenge", &self.challenge());
         url.query_pairs_mut()
             .append_pair("code_challenge_method", "S256");
         url.to_string()
@@ -310,7 +309,10 @@ mod tests {
             PkcePending::extract_code_from_paste(pasted).as_deref(),
             Some("abc123")
         );
-        assert_eq!(PkcePending::extract_code_from_paste("http://127.0.0.1:8080/callback"), None);
+        assert_eq!(
+            PkcePending::extract_code_from_paste("http://127.0.0.1:8080/callback"),
+            None
+        );
     }
 
     #[test]
@@ -356,7 +358,9 @@ mod tests {
         .expect("start");
         let port = pending.listener.as_ref().expect("listener").port();
         assert!(port > 0);
-        assert!(pending.redirect_uri().contains(&format!(":{port}/callback")));
+        assert!(pending
+            .redirect_uri()
+            .contains(&format!(":{port}/callback")));
 
         let listener = pending.take_listener().expect("listener");
         let state = listener.state.clone();
@@ -390,7 +394,9 @@ mod tests {
         let port = listener.port();
         let handle = tokio::spawn(async move { listener.wait_for_code().await });
         let _ = reqwest::Client::new()
-            .get(format!("http://127.0.0.1:{port}/callback?code=c&state=wrong"))
+            .get(format!(
+                "http://127.0.0.1:{port}/callback?code=c&state=wrong"
+            ))
             .send()
             .await
             .expect("callback request");

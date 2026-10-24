@@ -63,9 +63,11 @@ pub async fn resolve_provider_auth(
     // 2. A stored credential owns its provider.
     match store.read(&entry.id).await? {
         Some(Credential::ApiKey(credential)) => {
-            let auth = entry.auth.api_key.as_ref().ok_or_else(|| {
-                AuthError::CredentialTypeNotHandled(entry.id.clone())
-            })?;
+            let auth = entry
+                .auth
+                .api_key
+                .as_ref()
+                .ok_or_else(|| AuthError::CredentialTypeNotHandled(entry.id.clone()))?;
             auth.resolve(ResolveInput {
                 ctx,
                 credential: Some(&Credential::ApiKey(credential)),
@@ -73,9 +75,11 @@ pub async fn resolve_provider_auth(
             .await
         }
         Some(Credential::OAuth(credential)) => {
-            let auth = entry.auth.oauth.clone().ok_or_else(|| {
-                AuthError::CredentialTypeNotHandled(entry.id.clone())
-            })?;
+            let auth = entry
+                .auth
+                .oauth
+                .clone()
+                .ok_or_else(|| AuthError::CredentialTypeNotHandled(entry.id.clone()))?;
             let now_ms = now();
             let min_validity = overrides
                 .min_oauth_validity_ms
@@ -174,15 +178,11 @@ mod tests {
                     }));
                 }
             }
-            Ok(input
-                .ctx
-                .env(self.env_name)
-                .await
-                .map(|key| ModelAuth {
-                    api_key: Some(key),
-                    source: Some(self.env_name.to_string()),
-                    ..Default::default()
-                }))
+            Ok(input.ctx.env(self.env_name).await.map(|key| ModelAuth {
+                api_key: Some(key),
+                source: Some(self.env_name.to_string()),
+                ..Default::default()
+            }))
         }
     }
 
@@ -227,7 +227,9 @@ mod tests {
         ProviderEntry {
             id: "acme".to_string(),
             auth: ProviderAuth {
-                api_key: Some(Arc::new(FixedKeyAuth { env_name: "ACME_KEY" })),
+                api_key: Some(Arc::new(FixedKeyAuth {
+                    env_name: "ACME_KEY",
+                })),
                 oauth: Some(Arc::new(BearerOAuth)),
             },
         }
@@ -402,10 +404,12 @@ mod tests {
         };
         let store = MemoryCredentialStore::new();
         let ctx: Arc<dyn AuthContext> = Arc::new(Ctx);
-        assert!(resolve_provider_auth(&entry, &store, &ctx, &ResolveOverrides::default())
-            .await
-            .expect("resolve")
-            .is_none());
+        assert!(
+            resolve_provider_auth(&entry, &store, &ctx, &ResolveOverrides::default())
+                .await
+                .expect("resolve")
+                .is_none()
+        );
     }
 
     #[tokio::test]

@@ -32,12 +32,16 @@ pub use auth::{
 };
 pub use credential::{ApiKeyCredential, AuthMethod, Credential, CredentialInfo, OAuthCredential};
 pub use error::{AuthError, AuthResult};
-pub use interaction::{AuthEvent, AuthInfoLink, AuthInteraction, AuthPrompt, AuthPromptOption, NullInteraction};
+pub use interaction::{
+    AuthEvent, AuthInfoLink, AuthInteraction, AuthPrompt, AuthPromptOption, NullInteraction,
+};
 pub use oauth::device_flow::{self, DeviceFlowConfig, DeviceFlowPending, DeviceFlowPoll};
 pub use oauth::pkce::{self, LoopbackListener, PkceChallenge, PkceConfig, PkcePending};
 pub use oauth::{credential_from_token, TokenResponse, EXPIRY_SAFETY_MARGIN_MS};
 pub use registry::{AuthRegistry, ResolvedAuth};
-pub use resolve::{resolve_provider_auth, ProviderEntry, ResolveOverrides, DEFAULT_MIN_OAUTH_VALIDITY_MS};
+pub use resolve::{
+    resolve_provider_auth, ProviderEntry, ResolveOverrides, DEFAULT_MIN_OAUTH_VALIDITY_MS,
+};
 pub use session::{
     ExternalFlowDriver, ExternalPending, ExternalState, ExternalStep, LoginFlow, LoginSession,
     LoginState,

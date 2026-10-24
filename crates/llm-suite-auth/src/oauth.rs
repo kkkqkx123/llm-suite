@@ -43,12 +43,12 @@ pub fn credential_from_token(
                 .unwrap_or_else(|| "unknown error".to_string())
         ))
     })?;
-    let refresh = token.refresh_token.clone().ok_or_else(|| {
-        AuthError::Transport("token response missing refresh_token".to_string())
-    })?;
-    let expires = now_ms
-        + token.expires_in.unwrap_or(3600).saturating_mul(1000)
-        - EXPIRY_SAFETY_MARGIN_MS;
+    let refresh = token
+        .refresh_token
+        .clone()
+        .ok_or_else(|| AuthError::Transport("token response missing refresh_token".to_string()))?;
+    let expires =
+        now_ms + token.expires_in.unwrap_or(3600).saturating_mul(1000) - EXPIRY_SAFETY_MARGIN_MS;
     Ok(OAuthCredential {
         refresh,
         access,
@@ -62,13 +62,7 @@ pub fn credential_from_token(
 pub fn form_body(pairs: &[(&str, &str)]) -> String {
     pairs
         .iter()
-        .map(|(k, v)| {
-            format!(
-                "{}={}",
-                urlencoding::encode(k),
-                urlencoding::encode(v)
-            )
-        })
+        .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
         .collect::<Vec<_>>()
         .join("&")
 }
@@ -113,7 +107,10 @@ mod tests {
         let cred = credential_from_token(&token, true, 1_000_000).expect("credential");
         assert_eq!(cred.access, "a");
         assert_eq!(cred.refresh, "r");
-        assert_eq!(cred.expires, 1_000_000 + 3_600_000 - EXPIRY_SAFETY_MARGIN_MS);
+        assert_eq!(
+            cred.expires,
+            1_000_000 + 3_600_000 - EXPIRY_SAFETY_MARGIN_MS
+        );
         assert!(cred.is_subscription);
     }
 

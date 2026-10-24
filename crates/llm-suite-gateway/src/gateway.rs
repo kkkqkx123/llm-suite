@@ -457,7 +457,6 @@ mod tests {
         );
     }
 
-
     /// OAuth surface whose stored credential is subscription-backed.
     #[derive(Debug)]
     struct SubscriptionOAuth;
@@ -511,19 +510,22 @@ mod tests {
             llm_suite_auth::ProviderAuth::oauth_only(Arc::new(SubscriptionOAuth)),
         );
         store
-            .modify("acme", Box::new(|_| {
-                Box::pin(async {
-                    Ok::<_, llm_suite_auth::AuthError>(Some(llm_suite_auth::Credential::OAuth(
-                        llm_suite_auth::OAuthCredential {
-                            refresh: "r-1".to_string(),
-                            access: "access-token".to_string(),
-                            expires: llm_suite_common::time::now() + 60 * 60 * 1000,
-                            is_subscription: true,
-                            extra: Default::default(),
-                        },
-                    )))
-                })
-            }))
+            .modify(
+                "acme",
+                Box::new(|_| {
+                    Box::pin(async {
+                        Ok::<_, llm_suite_auth::AuthError>(Some(llm_suite_auth::Credential::OAuth(
+                            llm_suite_auth::OAuthCredential {
+                                refresh: "r-1".to_string(),
+                                access: "access-token".to_string(),
+                                expires: llm_suite_common::time::now() + 60 * 60 * 1000,
+                                is_subscription: true,
+                                extra: Default::default(),
+                            },
+                        )))
+                    })
+                }),
+            )
             .await
             .expect("seed");
         Arc::new(registry)

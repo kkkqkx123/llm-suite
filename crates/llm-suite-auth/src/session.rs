@@ -119,28 +119,21 @@ pub struct LoginSession {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LoginState {
     /// The flow started; `events` carry the authorization URL or device code.
-    Challenge {
-        events: EventLog,
-    },
+    Challenge { events: EventLog },
     /// The host must collect one input, then call `login_submit`.
     AwaitingInput {
         prompt: AuthPrompt,
         events: EventLog,
     },
     /// Waiting on an external event (device poll window, loopback callback).
-    Pending {
-        events: EventLog,
-    },
+    Pending { events: EventLog },
     /// The credential was written to the store.
     Completed {
         provider_id: String,
         method: AuthMethod,
     },
     /// The flow failed; any stored credential is preserved.
-    Failed {
-        error: String,
-        events: EventLog,
-    },
+    Failed { error: String, events: EventLog },
 }
 
 impl LoginSession {
@@ -427,7 +420,10 @@ mod tests {
             .await
             .expect("submit");
         match state {
-            LoginState::Completed { provider_id, method } => {
+            LoginState::Completed {
+                provider_id,
+                method,
+            } => {
                 assert_eq!(provider_id, "acme");
                 assert_eq!(method, AuthMethod::ApiKey);
             }
@@ -480,7 +476,11 @@ mod tests {
         // The token endpoint is unreachable here; the paste parsing itself
         // must fail before any network call for a code-less paste.
         let err = session
-            .submit("http://127.0.0.1:8080/callback?state=only".to_string(), &reqwest::Client::new(), 0)
+            .submit(
+                "http://127.0.0.1:8080/callback?state=only".to_string(),
+                &reqwest::Client::new(),
+                0,
+            )
             .await
             .expect_err("must fail");
         assert!(matches!(err, AuthError::Login(_)));
