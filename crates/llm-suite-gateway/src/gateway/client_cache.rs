@@ -233,4 +233,55 @@ mod tests {
             "prefix eviction must keep working: {key}"
         );
     }
+
+    #[test]
+    fn cache_key_changes_when_custom_headers_rotate() {
+        let base = test_profile();
+        let mut rotated = base.clone();
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("x-api-key".to_string(), serde_json::json!("old"));
+        rotated.custom_headers = Some(headers.clone());
+        let key_base = client_cache_key(&base);
+
+        let mut changed = base.clone();
+        let mut headers2 = headers;
+        headers2.insert("x-api-key".to_string(), serde_json::json!("new"));
+        changed.custom_headers = Some(headers2);
+        assert_ne!(
+            key_base,
+            client_cache_key(&changed),
+            "rotated custom header must rebuild the transport"
+        );
+
+        // Adding a header to an otherwise identical profile also changes the key.
+        let mut added = base.clone();
+        let mut h = std::collections::HashMap::new();
+        h.insert("x-extra".to_string(), serde_json::json!(42));
+        added.custom_headers = Some(h);
+        assert_ne!(key_base, client_cache_key(&added));
+    }
+
+    #[test]
+    fn cache_key_is_deterministic_for_reordered_headers() {
+        let mut a = test_profile();
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("b".to_string(), serde_json::json!("2"));
+        headers.insert("a".to_string(), serde_json::json!("1"));
+        a.custom_headers = Some(headers);
+
+        let mut b = test_profile();
+        let mut headers2 = std::collections::HashMap::new();
+        headers2.insert("a".to_string(), serde_json::json!("1"));
+        headers2.insert("b".to_string(), serde_json::json!("2"));
+        b.custom_headers = Some(headers2);
+
+        assert_eq!(client_cache_key(&a), client_cache_key(&b));
+    }
+
+    #[test]
+    fn cache_key_stable_for_identical_profiles() {
+        let a = test_profile();
+        let b = test_profile();
+        assert_eq!(client_cache_key(&a), client_cache_key(&b));
+    }
 }

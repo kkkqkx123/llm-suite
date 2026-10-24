@@ -190,4 +190,63 @@ mod tests {
         assert!(store.read("acme").await.expect("read").is_none());
         let _ = std::fs::remove_file(&path);
     }
+
+    #[tokio::test]
+    async fn modify_returning_none_does_not_touch_disk() {
+        let path = temp_path("modify-none");
+        let _ = std::fs::remove_file(&path);
+        let store = FileCredentialStore::new(&path);
+
+        // Seed a credential first.
+        store
+            .modify(
+                "acme",
+                Box::new(|_| {
+                    Box::pin(async {
+                        Ok(Some(Credential::ApiKey(ApiKeyCredential {
+                            key: Some("sk-file".to_string()),
+                            env: Default::default(),
+                        })))
+                    })
+                }),
+            )
+            .await
+            .expect("seed");
+        let before = std::fs::read_to_string(&path).expect("read file");
+
+        // A no-op modify must not rewrite (or delete) the file.
+        let result = store
+            .modify(
+                "acme",
+                Box::new(|_| {
+                    Box::pin(async { Ok(None) })
+                }),
+            )
+            .await
+            .expect("modify");
+        assert!(result.is_some(), "existing credential returned unchanged");
+
+        let after = std::fs::read_to_string(&path).expect("read file");
+        assert_eq!(before, after, "file contents must be untouched");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn modify_returning_none_on_missing_does_not_create_file() {
+        let path = temp_path("modify-none-missing");
+        let _ = std::fs::remove_file(&path);
+        let store = FileCredentialStore::new(&path);
+
+        let result = store
+            .modify(
+                "acme",
+                Box::new(|_| {
+                    Box::pin(async { Ok(None) })
+                }),
+            )
+            .await
+            .expect("modify");
+        assert!(result.is_none());
+        assert!(!path.exists(), "no file should be created");
+    }
 }
