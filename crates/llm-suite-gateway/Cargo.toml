@@ -13,15 +13,15 @@ default = []
 mock = ["llm-suite-client/mock"]
 
 [dependencies]
-llm-suite-auth = { version = "0.1.0", path = "../llm-suite-auth" }
-llm-suite-client = { version = "0.1.0", path = "../llm-suite-client" }
-llm-suite-codec = { version = "0.1.0", path = "../llm-suite-codec" }
-llm-suite-common = { version = "0.1.0", path = "../llm-suite-common" }
-llm-suite-config = { version = "0.1.0", path = "../llm-suite-config" }
-llm-suite-message = { version = "0.1.0", path = "../llm-suite-message" }
-llm-suite-proxy = { version = "0.1.0", path = "../llm-suite-proxy" }
-llm-token = { version = "0.1.0", package = "llm-suite-token", path = "../llm-suite-token" }
-llm-suite-types = { version = "0.1.0", path = "../llm-suite-types" }
+llm-suite-auth.workspace = true
+llm-suite-client.workspace = true
+llm-suite-codec.workspace = true
+llm-suite-common.workspace = true
+llm-suite-config.workspace = true
+llm-suite-message.workspace = true
+llm-suite-proxy.workspace = true
+llm-token.workspace = true
+llm-suite-types.workspace = true
 dashmap = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true }
@@ -29,7 +29,7 @@ tokio-util = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-llm-suite-client = { version = "0.1.0", path = "../llm-suite-client", features = ["mock"] }
+llm-suite-client = { workspace = true, features = ["mock"] }
 async-trait = { workspace = true }
 
 # `mock_routing_integration` uses `LlmGateway::register_mock`, which only

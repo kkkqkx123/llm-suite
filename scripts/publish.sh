@@ -9,6 +9,7 @@ fi
 CRATES=(
     "crates/llm-suite-types"
     "crates/llm-suite-common"
+    "crates/llm-suite-auth"
     "crates/llm-suite-proxy"
     "crates/llm-suite-token"
     "crates/llm-suite-message"

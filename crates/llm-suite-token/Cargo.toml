@@ -9,8 +9,8 @@ description = "Token counting and handling for LLM messages"
 
 [dependencies]
 serde = { workspace = true }
-llm-suite-types = { version = "0.1.0", path = "../llm-suite-types" }
+llm-suite-types.workspace = true
 serde_json = { workspace = true }
 
 [dev-dependencies]
-llm-suite-common = { version = "0.1.0", path = "../llm-suite-common" }
+llm-suite-common.workspace = true

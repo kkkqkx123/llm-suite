@@ -8,8 +8,8 @@ repository.workspace = true
 description = "Credential storage, OAuth login/refresh primitives and provider-owned authentication"
 
 [dependencies]
-llm-suite-types = { version = "0.1.0", path = "../llm-suite-types" }
-llm-suite-common = { version = "0.1.0", path = "../llm-suite-common" }
+llm-suite-types.workspace = true
+llm-suite-common.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -19,7 +19,7 @@ tracing.workspace = true
 dashmap.workspace = true
 # Kept in lockstep with the other reqwest lines so the workspace resolves one
 # reqwest version.
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+reqwest = { workspace = true, default-features = false, features = ["json", "rustls"] }
 url.workspace = true
 sha2.workspace = true
 base64.workspace = true

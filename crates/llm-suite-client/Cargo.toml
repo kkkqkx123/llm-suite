@@ -13,12 +13,12 @@ default = []
 mock = []
 
 [dependencies]
-llm-suite-codec = { version = "0.1.0", path = "../llm-suite-codec" }
-llm-suite-token = { version = "0.1.0", path = "../llm-suite-token" }
-llm-suite-message = { version = "0.1.0", path = "../llm-suite-message" }
-llm-suite-tool-call = { version = "0.1.0", path = "../llm-suite-tool-call", features = ["json-partial"] }
-llm-suite-types = { version = "0.1.0", path = "../llm-suite-types" }
-llm-suite-common = { version = "0.1.0", path = "../llm-suite-common" }
+llm-suite-codec.workspace = true
+llm-suite-token.workspace = true
+llm-suite-message.workspace = true
+llm-suite-tool-call = { workspace = true, features = ["json-partial"] }
+llm-suite-types.workspace = true
+llm-suite-common.workspace = true
 async-trait = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
