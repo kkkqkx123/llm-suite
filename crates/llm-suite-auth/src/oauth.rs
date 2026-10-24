@@ -11,10 +11,6 @@ use serde::Deserialize;
 use crate::credential::OAuthCredential;
 use crate::error::{AuthError, AuthResult};
 
-/// Safety margin subtracted from `expires_in` so a token is refreshed
-/// slightly before the server considers it expired.
-pub const EXPIRY_SAFETY_MARGIN_MS: i64 = 5 * 60 * 1000;
-
 /// Token endpoint response covering both success and error shapes.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TokenResponse {
@@ -28,6 +24,10 @@ pub struct TokenResponse {
 }
 
 /// Build a stored credential from a token endpoint response.
+///
+/// The stored `expires` is the server-reported expiry verbatim; the refresh
+/// leeway lives at resolve time (`DEFAULT_MIN_OAUTH_VALIDITY_MS`) so there
+/// is exactly one early-refresh policy.
 pub fn credential_from_token(
     token: &TokenResponse,
     is_subscription: bool,
@@ -47,8 +47,7 @@ pub fn credential_from_token(
         .refresh_token
         .clone()
         .ok_or_else(|| AuthError::Transport("token response missing refresh_token".to_string()))?;
-    let expires =
-        now_ms + token.expires_in.unwrap_or(3600).saturating_mul(1000) - EXPIRY_SAFETY_MARGIN_MS;
+    let expires = now_ms + token.expires_in.unwrap_or(3600).saturating_mul(1000);
     Ok(OAuthCredential {
         refresh,
         access,
@@ -94,7 +93,7 @@ mod tests {
     }
 
     #[test]
-    fn credential_from_token_applies_safety_margin() {
+    fn credential_from_token_stores_verbatim_expiry() {
         let token = TokenResponse {
             access_token: Some("a".to_string()),
             refresh_token: Some("r".to_string()),
@@ -107,10 +106,7 @@ mod tests {
         let cred = credential_from_token(&token, true, 1_000_000).expect("credential");
         assert_eq!(cred.access, "a");
         assert_eq!(cred.refresh, "r");
-        assert_eq!(
-            cred.expires,
-            1_000_000 + 3_600_000 - EXPIRY_SAFETY_MARGIN_MS
-        );
+        assert_eq!(cred.expires, 1_000_000 + 3_600_000);
         assert!(cred.is_subscription);
     }
 

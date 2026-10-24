@@ -117,11 +117,11 @@ impl CredentialStore for FileCredentialStore {
         let result = match next {
             Some(cred) => {
                 map.insert(provider_id.to_string(), cred.clone());
+                self.save(&map).await?;
                 Some(cred)
             }
             None => map.get(provider_id).cloned(),
         };
-        self.save(&map).await?;
         Ok(result)
     }
 

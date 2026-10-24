@@ -19,15 +19,65 @@ pub fn client_cache_prefix(profile_id: &str) -> String {
 
 /// Cache key for the transport client. The proxy is part of the key so
 /// switching proxies rebuilds the transport instead of reusing a stale
-/// client.
+/// client. Auth-derived fields are folded in as a stable non-secret digest
+/// so an OAuth refresh (or key rotation) rebuilds the transport instead of
+/// reusing a client bound to the old credential.
 pub fn client_cache_key(profile: &LlmProfile) -> String {
     format!(
-        "{}{}::{}::{}",
+        "{}{}::{}::{}::{}",
         client_cache_prefix(&profile.id),
         profile.model,
         profile.proxy.as_deref().unwrap_or(""),
-        profile.no_proxy.as_deref().unwrap_or(&[]).join(",")
+        profile.no_proxy.as_deref().unwrap_or(&[]).join(","),
+        auth_fingerprint(profile)
     )
+}
+
+/// Stable non-secret digest of the auth-derived profile fields.
+///
+/// The digest never contains the key itself so the cache key is safe to keep
+/// in memory and to compare in tests; any credential rotation changes the
+/// digest and forces a fresh transport client.
+fn auth_fingerprint(profile: &LlmProfile) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    let mut mix = |bytes: &[u8]| {
+        for b in bytes {
+            hash ^= *b as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(0x100000001b3);
+    };
+    match profile.api_key.as_deref() {
+        Some(key) => {
+            mix(b"key");
+            mix(key.as_bytes());
+        }
+        None => mix(b"no-key"),
+    }
+    match profile.base_url.as_deref() {
+        Some(url) => {
+            mix(b"base");
+            mix(url.as_bytes());
+        }
+        None => mix(b"no-base"),
+    }
+    if let Some(headers) = profile.custom_headers.as_ref() {
+        let mut keys: Vec<&String> = headers.keys().collect();
+        keys.sort();
+        mix(b"headers");
+        for key in keys {
+            mix(key.as_bytes());
+            mix(b"=");
+            if let Some(value) = headers.get(key) {
+                mix(value.to_string().as_bytes());
+            }
+            mix(b";");
+        }
+    } else {
+        mix(b"no-headers");
+    }
+    format!("{:016x}", hash)
 }
 
 impl LlmGateway {
@@ -110,5 +160,77 @@ impl LlmGateway {
     /// the transport with the rotated credential.
     pub fn evict_client(&self, profile_id: &str) {
         self.evict_clients_for_profile(profile_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_profile() -> LlmProfile {
+        LlmProfile {
+            id: "p1".to_string(),
+            name: "p1".to_string(),
+            format: llm_suite_types::llm::LlmFormat::OpenaiChat,
+            provider_id: None,
+            model: "m".to_string(),
+            api_key: None,
+            base_url: None,
+            parameters: None,
+            generation: None,
+            timeout: None,
+            max_retries: None,
+            retry_delay: None,
+            headers: None,
+            metadata: None,
+            tool_call_protocol: None,
+            auth_type: None,
+            custom_headers: None,
+            custom_body: None,
+            custom_body_enabled: None,
+            query_params: None,
+            stream_options: None,
+            prompt_caching: None,
+            context_window_size: None,
+            proxy: None,
+            no_proxy: None,
+            circuit_breaker: None,
+            auth: None,
+        }
+    }
+
+    #[test]
+    fn cache_key_changes_when_auth_fields_rotate() {
+        let base = test_profile();
+        let mut rotated = base.clone();
+        rotated.api_key = Some("sk-new".to_string());
+        assert_ne!(
+            client_cache_key(&base),
+            client_cache_key(&rotated),
+            "rotated api_key must rebuild the transport"
+        );
+
+        let mut moved_base = base.clone();
+        moved_base.base_url = Some("https://new.example/v1".to_string());
+        assert_ne!(
+            client_cache_key(&base),
+            client_cache_key(&moved_base),
+            "rotated base_url must rebuild the transport"
+        );
+    }
+
+    #[test]
+    fn cache_key_hides_secrets() {
+        let mut profile = test_profile();
+        profile.api_key = Some("sk-secret-value".to_string());
+        let key = client_cache_key(&profile);
+        assert!(
+            !key.contains("sk-secret-value"),
+            "cache key must carry only a digest, never the secret: {key}"
+        );
+        assert!(
+            key.starts_with(&client_cache_prefix("p1")),
+            "prefix eviction must keep working: {key}"
+        );
     }
 }

@@ -45,8 +45,9 @@ pub struct ApiKeyCredential {
     pub env: BTreeMap<String, String>,
 }
 
-/// OAuth credential. `expires` is a Unix-milliseconds absolute timestamp;
-/// a small safety margin is already subtracted by the flow that produced it.
+/// OAuth credential. `expires` is a Unix-milliseconds absolute timestamp
+/// as reported by the token endpoint; early refresh is decided at resolve
+/// time, not by adjusting the stored value.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OAuthCredential {
     pub refresh: String,

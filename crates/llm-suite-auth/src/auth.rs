@@ -7,9 +7,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::credential::{ApiKeyCredential, AuthMethod, Credential, OAuthCredential};
-use crate::error::{AuthError, AuthResult};
-use crate::interaction::{AuthInteraction, AuthPrompt};
+use crate::credential::{AuthMethod, Credential, OAuthCredential};
+use crate::error::AuthResult;
+use crate::interaction::AuthPrompt;
 
 /// Ambient context for key resolution (process environment, well-known
 /// files). Injectable for tests and restricted hosts.
@@ -76,8 +76,8 @@ pub struct ResolveInput<'a> {
 }
 
 /// API-key authentication: stored key plus ambient sources (environment
-/// variables, credential files). Providers whose keys only come from the
-/// ambient environment omit `login`.
+/// variables, credential files). Login is always an explicit paste of the
+/// key; no provider-specific interactive handshake exists.
 #[async_trait]
 pub trait ApiKeyAuth: Send + Sync + std::fmt::Debug {
     /// Display name, e.g. "Anthropic API key".
@@ -89,14 +89,6 @@ pub trait ApiKeyAuth: Send + Sync + std::fmt::Debug {
             message: format!("Paste your {}:", self.name()),
             placeholder: None,
         }
-    }
-
-    /// Interactive setup. Absent means ambient-only.
-    async fn login(&self, _interaction: &dyn AuthInteraction) -> AuthResult<ApiKeyCredential> {
-        Err(AuthError::Login(format!(
-            "{} has no interactive login (ambient-only)",
-            self.name()
-        )))
     }
 
     /// Resolve auth from the stored credential and/or ambient sources.
@@ -181,6 +173,7 @@ impl ProviderAuth {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::credential::ApiKeyCredential;
 
     #[derive(Debug, Default)]
     struct EnvKeyAuth;
@@ -261,11 +254,12 @@ mod tests {
         assert_eq!(resolved.api_key.as_deref(), Some("sk-stored"));
     }
 
-    #[tokio::test]
-    async fn ambient_only_provider_login_fails_loudly() {
+    #[test]
+    fn api_key_login_is_paste_only_with_provider_prompt() {
         let auth = EnvKeyAuth;
-        let interaction = crate::interaction::NullInteraction;
-        let err = auth.login(&interaction).await.expect_err("must fail");
-        assert!(matches!(err, AuthError::Login(_)));
+        assert!(matches!(
+            auth.login_prompt(),
+            crate::interaction::AuthPrompt::Secret { .. }
+        ));
     }
 }

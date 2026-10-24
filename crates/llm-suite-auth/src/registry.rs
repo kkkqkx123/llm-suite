@@ -83,32 +83,33 @@ impl AuthRegistry {
         self.providers.contains_key(id)
     }
 
-    /// Describe every registered auth surface (never secrets). Ordering is
-    /// unspecified; frontends sort for display.
+    /// Describe every registered auth surface (never secrets). A provider
+    /// with both methods registered yields two surfaces; ordering is
+    /// unspecified and frontends sort for display.
     pub fn describe_providers(&self) -> Vec<crate::auth::AuthSurfaceInfo> {
         self.providers
             .iter()
-            .filter_map(|entry| {
-                let auth = &entry.auth;
-                if let Some(oauth) = auth.oauth.as_ref() {
-                    Some(crate::auth::AuthSurfaceInfo {
+            .flat_map(|entry| {
+                let mut surfaces = Vec::new();
+                if let Some(api_key) = entry.auth.api_key.as_ref() {
+                    surfaces.push(crate::auth::AuthSurfaceInfo {
+                        id: entry.id.clone(),
+                        display_name: api_key.name(),
+                        method: crate::credential::AuthMethod::ApiKey,
+                        login_label: None,
+                        is_subscription: false,
+                    });
+                }
+                if let Some(oauth) = entry.auth.oauth.as_ref() {
+                    surfaces.push(crate::auth::AuthSurfaceInfo {
                         id: entry.id.clone(),
                         display_name: oauth.name(),
                         method: crate::credential::AuthMethod::OAuth,
                         login_label: oauth.login_label(),
                         is_subscription: oauth.is_subscription(),
-                    })
-                } else {
-                    auth.api_key
-                        .as_ref()
-                        .map(|api_key| crate::auth::AuthSurfaceInfo {
-                            id: entry.id.clone(),
-                            display_name: api_key.name(),
-                            method: crate::credential::AuthMethod::ApiKey,
-                            login_label: None,
-                            is_subscription: false,
-                        })
+                    });
                 }
+                surfaces
             })
             .collect()
     }
@@ -196,15 +197,21 @@ impl AuthRegistry {
         Ok((session_id, state))
     }
 
-    /// Advance a login session's polling step.
+    /// Advance a login session's polling step. The session is taken out of
+    /// the map while polling so device polling and plugin calls never hold
+    /// the global sessions lock across a network await.
     pub async fn login_poll(&self, session_id: &str) -> AuthResult<LoginState> {
-        let mut sessions = self.sessions.lock().await;
-        let session = sessions
-            .get_mut(session_id)
-            .ok_or_else(|| AuthError::SessionNotFound(session_id.to_string()))?;
-        let state = session.poll(now()).await?;
+        let mut session = self.take_session(session_id).await?;
+        let poll_result = session.poll(now()).await;
+        let state = match poll_result {
+            Ok(state) => state,
+            Err(err) => {
+                self.sessions.lock().await.insert(session_id.to_string(), session);
+                return Err(err);
+            }
+        };
         if let LoginState::Completed { provider_id, .. } = &state {
-            let credential = session_credential(session)?;
+            let credential = session_credential(&session)?;
             let provider_id = provider_id.clone();
             self.store
                 .modify(
@@ -212,22 +219,30 @@ impl AuthRegistry {
                     Box::new(move |_| Box::pin(async move { Ok(Some(credential)) })),
                 )
                 .await?;
-            sessions.remove(session_id);
+            return Ok(state);
         }
         if matches!(state, LoginState::Failed { .. }) {
-            sessions.remove(session_id);
+            return Ok(state);
         }
+        self.sessions.lock().await.insert(session_id.to_string(), session);
         Ok(state)
     }
 
     /// Submit user input for a session awaiting it. On success the credential
-    /// is written through the store's serialized write path.
+    /// is written through the store's serialized write path. The session is
+    /// taken out of the map while awaiting the token exchange so the global
+    /// lock never spans a network await.
     pub async fn login_submit(&self, session_id: &str, input: String) -> AuthResult<LoginState> {
-        let mut sessions = self.sessions.lock().await;
-        let session = sessions
-            .get_mut(session_id)
-            .ok_or_else(|| AuthError::SessionNotFound(session_id.to_string()))?;
-        let state = session.submit(input, &login_http_client(), now()).await?;
+        let mut session = self.take_session(session_id).await?;
+        let client = login_http_client();
+        let submit_result = session.submit(input, &client, now()).await;
+        let state = match submit_result {
+            Ok(state) => state,
+            Err(err) => {
+                self.sessions.lock().await.insert(session_id.to_string(), session);
+                return Err(err);
+            }
+        };
         if let LoginState::Completed {
             provider_id,
             method,
@@ -235,7 +250,7 @@ impl AuthRegistry {
         {
             // The session produced a credential; persist it through the
             // serialized write path so concurrent refreshes stay exclusive.
-            let credential = session_credential(session)?;
+            let credential = session_credential(&session)?;
             let provider_id = provider_id.clone();
             let _ = method;
             self.store
@@ -244,11 +259,12 @@ impl AuthRegistry {
                     Box::new(move |_| Box::pin(async move { Ok(Some(credential)) })),
                 )
                 .await?;
-            sessions.remove(session_id);
+            return Ok(state);
         }
         if matches!(state, LoginState::Failed { .. }) {
-            sessions.remove(session_id);
+            return Ok(state);
         }
+        self.sessions.lock().await.insert(session_id.to_string(), session);
         Ok(state)
     }
 
@@ -277,6 +293,17 @@ impl AuthRegistry {
             .get(session_id)
             .ok_or_else(|| AuthError::SessionNotFound(session_id.to_string()))?;
         Ok(session.poll_interval())
+    }
+
+    /// Remove a session from the map and hand ownership to the caller.
+    /// Callers reinsert the session unless it completed or failed, so the
+    /// global lock is never held across a network await.
+    async fn take_session(&self, session_id: &str) -> AuthResult<LoginSession> {
+        self.sessions
+            .lock()
+            .await
+            .remove(session_id)
+            .ok_or_else(|| AuthError::SessionNotFound(session_id.to_string()))
     }
 }
 
@@ -459,5 +486,51 @@ mod tests {
         assert_eq!(surfaces[0].display_name, "env key");
         assert_eq!(surfaces[0].method, crate::credential::AuthMethod::ApiKey);
         assert!(!surfaces[0].is_subscription);
+    }
+
+    #[test]
+    fn describe_providers_reports_both_methods_for_dual_auth() {
+        #[derive(Debug)]
+        struct StubOAuth;
+        #[async_trait::async_trait]
+        impl crate::auth::OAuthAuth for StubOAuth {
+            fn name(&self) -> String {
+                "stub oauth".to_string()
+            }
+            async fn begin_login(&self) -> AuthResult<crate::session::LoginFlow> {
+                Err(AuthError::Login("unused".to_string()))
+            }
+            async fn refresh(
+                &self,
+                credential: &crate::credential::OAuthCredential,
+            ) -> AuthResult<crate::credential::OAuthCredential> {
+                Ok(credential.clone())
+            }
+            async fn to_auth(
+                &self,
+                credential: &crate::credential::OAuthCredential,
+            ) -> AuthResult<crate::auth::ModelAuth> {
+                Ok(crate::auth::ModelAuth {
+                    api_key: Some(credential.access.clone()),
+                    ..Default::default()
+                })
+            }
+        }
+        let registry = registry();
+        registry.register_provider(
+            "acme",
+            ProviderAuth {
+                api_key: Some(Arc::new(EnvKey)),
+                oauth: Some(Arc::new(StubOAuth)),
+            },
+        );
+        let surfaces = registry.describe_providers();
+        assert_eq!(surfaces.len(), 2, "dual auth must expose both surfaces");
+        assert!(surfaces
+            .iter()
+            .any(|s| s.method == crate::credential::AuthMethod::ApiKey));
+        assert!(surfaces
+            .iter()
+            .any(|s| s.method == crate::credential::AuthMethod::OAuth));
     }
 }

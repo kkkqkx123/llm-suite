@@ -37,7 +37,7 @@ pub use interaction::{
 };
 pub use oauth::device_flow::{self, DeviceFlowConfig, DeviceFlowPending, DeviceFlowPoll};
 pub use oauth::pkce::{self, LoopbackListener, PkceChallenge, PkceConfig, PkcePending};
-pub use oauth::{credential_from_token, TokenResponse, EXPIRY_SAFETY_MARGIN_MS};
+pub use oauth::{credential_from_token, TokenResponse};
 pub use registry::{AuthRegistry, ResolvedAuth};
 pub use resolve::{
     resolve_provider_auth, ProviderEntry, ResolveOverrides, DEFAULT_MIN_OAUTH_VALIDITY_MS,
