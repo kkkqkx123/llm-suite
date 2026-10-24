@@ -286,6 +286,19 @@ impl AuthRegistry {
         Ok(())
     }
 
+    /// Mark a login session as failed and drop it from the live set. Used by
+    /// host-side drivers that own an external wait (loopback callback) and
+    /// need to surface the failure through the normal polling state.
+    pub async fn login_fail(&self, session_id: &str, error: String) -> AuthResult<LoginState> {
+        let mut session = self.take_session(session_id).await?;
+        let state = session.mark_failed(error);
+        // Keep the terminal session in the map so a later frontend poll can
+        // observe the failure (and its original cause) instead of a bare
+        // "session not found". The first poll consumes and drops it.
+        self.sessions.lock().await.insert(session_id.to_string(), session);
+        Ok(state)
+    }
+
     /// The polling interval a frontend should use between `login_poll` calls.
     pub async fn login_poll_interval(&self, session_id: &str) -> AuthResult<std::time::Duration> {
         let sessions = self.sessions.lock().await;

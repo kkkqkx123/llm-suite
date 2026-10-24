@@ -113,6 +113,10 @@ pub struct LoginSession {
     flow: LoginFlow,
     events: EventLog,
     produced: Option<Credential>,
+    /// Set once the session has terminally failed. `poll` then reports the
+    /// stored failure instead of driving the flow again, so a host-side
+    /// failure can be consumed by a later frontend poll.
+    failed: Option<String>,
 }
 
 /// Observable state of a login session.
@@ -165,6 +169,7 @@ impl LoginSession {
             flow,
             events,
             produced: None,
+            failed: None,
         }
     }
 
@@ -203,6 +208,12 @@ impl LoginSession {
 
     /// Advance a polling step (device flow poll, loopback callback wait).
     pub async fn poll(&mut self, now_ms: i64) -> AuthResult<LoginState> {
+        if let Some(error) = self.failed.clone() {
+            return Ok(LoginState::Failed {
+                error,
+                events: self.events.clone(),
+            });
+        }
         match &mut self.flow {
             LoginFlow::Device(pending) => {
                 use crate::oauth::device_flow::DeviceFlowPoll;
@@ -255,6 +266,11 @@ impl LoginSession {
         client: &reqwest::Client,
         now_ms: i64,
     ) -> AuthResult<LoginState> {
+        if self.failed.is_some() {
+            return Err(AuthError::SessionNotAwaitingInput(
+                "login session has already failed".to_string(),
+            ));
+        }
         match &mut self.flow {
             LoginFlow::PkcePaste(pending) => {
                 let code = PkcePending::extract_code_from_paste(&input).ok_or_else(|| {
@@ -353,6 +369,13 @@ impl LoginSession {
         }
     }
 
+    /// Mark a login session as failed without consuming user input. Used by
+    /// host-side drivers (e.g. the loopback callback watcher) when an
+    /// external step cannot be represented as `submit`.
+    pub fn mark_failed(&mut self, error: String) -> LoginState {
+        self.failed(error)
+    }
+
     /// The credential a completed session produced, for the registry to
     /// persist through the store's serialized write path.
     pub fn produced_credential(&self) -> Option<Credential> {
@@ -360,9 +383,12 @@ impl LoginSession {
     }
 
     fn failed(&mut self, error: String) -> LoginState {
-        self.events.push(AuthEvent::Progress {
-            message: format!("login failed: {error}"),
-        });
+        if self.failed.is_none() {
+            self.events.push(AuthEvent::Progress {
+                message: format!("login failed: {error}"),
+            });
+        }
+        self.failed = Some(error.clone());
         LoginState::Failed {
             error,
             events: self.events.clone(),
