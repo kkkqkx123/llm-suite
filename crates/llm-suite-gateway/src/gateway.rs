@@ -642,8 +642,13 @@ mod tests {
         // so a rotated credential rebuilds the transport.
         let _ = gateway.generate(&request("p1"), None).await;
         let _ = gateway.generate(&request("p2"), None).await;
-        let auth_key =
-            client_cache_key(&gateway.prepare(&request("p1")).await.expect("prepare").profile);
+        let auth_key = client_cache_key(
+            &gateway
+                .prepare(&request("p1"))
+                .await
+                .expect("prepare")
+                .profile,
+        );
         let plain_key = client_cache_key(&gateway.profiles.get("p2").unwrap());
         assert!(gateway.clients.contains_key(auth_key.as_str()));
         assert!(gateway.clients.contains_key(plain_key.as_str()));

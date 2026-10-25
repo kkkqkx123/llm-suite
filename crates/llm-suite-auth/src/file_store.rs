@@ -216,12 +216,7 @@ mod tests {
 
         // A no-op modify must not rewrite (or delete) the file.
         let result = store
-            .modify(
-                "acme",
-                Box::new(|_| {
-                    Box::pin(async { Ok(None) })
-                }),
-            )
+            .modify("acme", Box::new(|_| Box::pin(async { Ok(None) })))
             .await
             .expect("modify");
         assert!(result.is_some(), "existing credential returned unchanged");
@@ -238,12 +233,7 @@ mod tests {
         let store = FileCredentialStore::new(&path);
 
         let result = store
-            .modify(
-                "acme",
-                Box::new(|_| {
-                    Box::pin(async { Ok(None) })
-                }),
-            )
+            .modify("acme", Box::new(|_| Box::pin(async { Ok(None) })))
             .await
             .expect("modify");
         assert!(result.is_none());

@@ -206,7 +206,10 @@ impl AuthRegistry {
         let state = match poll_result {
             Ok(state) => state,
             Err(err) => {
-                self.sessions.lock().await.insert(session_id.to_string(), session);
+                self.sessions
+                    .lock()
+                    .await
+                    .insert(session_id.to_string(), session);
                 return Err(err);
             }
         };
@@ -224,7 +227,10 @@ impl AuthRegistry {
         if matches!(state, LoginState::Failed { .. }) {
             return Ok(state);
         }
-        self.sessions.lock().await.insert(session_id.to_string(), session);
+        self.sessions
+            .lock()
+            .await
+            .insert(session_id.to_string(), session);
         Ok(state)
     }
 
@@ -239,7 +245,10 @@ impl AuthRegistry {
         let state = match submit_result {
             Ok(state) => state,
             Err(err) => {
-                self.sessions.lock().await.insert(session_id.to_string(), session);
+                self.sessions
+                    .lock()
+                    .await
+                    .insert(session_id.to_string(), session);
                 return Err(err);
             }
         };
@@ -264,7 +273,10 @@ impl AuthRegistry {
         if matches!(state, LoginState::Failed { .. }) {
             return Ok(state);
         }
-        self.sessions.lock().await.insert(session_id.to_string(), session);
+        self.sessions
+            .lock()
+            .await
+            .insert(session_id.to_string(), session);
         Ok(state)
     }
 
@@ -295,7 +307,10 @@ impl AuthRegistry {
         // Keep the terminal session in the map so a later frontend poll can
         // observe the failure (and its original cause) instead of a bare
         // "session not found". The first poll consumes and drops it.
-        self.sessions.lock().await.insert(session_id.to_string(), session);
+        self.sessions
+            .lock()
+            .await
+            .insert(session_id.to_string(), session);
         Ok(state)
     }
 
