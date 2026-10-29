@@ -20,8 +20,8 @@ pub use jev::JevDecisionProvider;
 pub use provider::DecisionProvider;
 pub use types::{
     BoxCoordinates, ChoiceProbability, ChoiceValue, ContentPart, DecisionAnswer, DecisionMessage,
-    DecisionQuestion, DecisionRequest, DecisionResponse, DecisionState, DecisionUsage, MessageContent,
-    MessageRole, NamedAnswer, NamedQuestion, PromptCacheBreakpoint, PromptCacheOptions, ScoreLevel,
+    DecisionModelMetadata, DecisionQuestion, DecisionRequest, DecisionResponse, DecisionState,
+    DecisionUsage, MessageContent, MessageRole, NamedAnswer, NamedQuestion, ScoreLevel,
     ScoreProbability, validate_request,
 };
 

@@ -56,6 +56,7 @@ async fn sync_runner_unverified_on_done() {
         model: "m".into(),
         input: "task".into(),
         safety_identifier: None,
+        state: None,
     };
     let result = runner.run(&provider, params, 5, None, None).await.unwrap();
     assert_eq!(result.status, "unverified");
@@ -117,6 +118,7 @@ async fn sync_runner_executes_action_then_done() {
         model: "m".into(),
         input: "task".into(),
         safety_identifier: None,
+        state: None,
     };
     let err = runner.run(&provider, params, 2, None, None).await.unwrap_err();
     // step_limit because action repeatedly selected until max_steps
@@ -160,6 +162,7 @@ async fn sync_runner_refusal() {
         model: "m".into(),
         input: "task".into(),
         safety_identifier: None,
+        state: None,
     };
     let result = runner.run(&provider, params, 5, None, None).await.unwrap();
     assert_eq!(result.status, "refused");
@@ -209,6 +212,7 @@ async fn sync_runner_async_executor_error() {
         model: "m".into(),
         input: "task".into(),
         safety_identifier: None,
+        state: None,
     };
     let err = runner.run(&provider, params, 5, None, None).await.unwrap_err();
     assert_eq!(err.reason, llm_suite_decision::runner::DecisionRunnerReason::AsyncExecutor);
@@ -258,6 +262,7 @@ async fn async_runner_runs() {
         model: "m".into(),
         input: "task".into(),
         safety_identifier: None,
+        state: None,
     };
     let result = runner.run(&provider, params, 5, None, None).await.unwrap();
     assert_eq!(result.status, "unverified");
@@ -277,7 +282,7 @@ async fn invalid_candidates() {
         |_obs| vec![SyncDecisionCandidate::Action { id: "act".into(), description: "do".into(), execute: Arc::new(|| SyncExecutorOutput::Completed) }],
         None::<fn(String) -> bool>,
     );
-    let params = DecisionRunnerParams { model: "m".into(), input: "task".into(), safety_identifier: None };
+    let params = DecisionRunnerParams { model: "m".into(), input: "task".into(), state: None, safety_identifier: None };
     let err = runner2.run(&provider, params, 5, None, None).await.unwrap_err();
     assert_eq!(err.reason, llm_suite_decision::runner::DecisionRunnerReason::InvalidCandidates);
 }

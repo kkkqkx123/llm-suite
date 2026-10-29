@@ -19,7 +19,7 @@ llm-suite-common = { version = "0.1.0", path = "../llm-suite-common" }
 llm-suite-proxy = { version = "0.1.0", path = "../llm-suite-proxy" }
 reqwest = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["preserve_order"] }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["fs"] }

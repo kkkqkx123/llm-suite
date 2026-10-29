@@ -43,6 +43,7 @@ pub struct DecisionRunnerError {
     pub reason: DecisionRunnerReason,
     pub attempted: Vec<String>,
     pub completed: Vec<String>,
+    pub source: Option<Box<dyn std::error::Error + Send + Sync>>,
 }
 
 impl std::fmt::Display for DecisionRunnerError {
@@ -91,6 +92,7 @@ pub type DiagnosticObserver = Arc<dyn Fn(DecisionDiagnostic) + Send + Sync>;
 pub struct DecisionRunnerParams {
     pub model: String,
     pub input: String,
+    pub state: Option<DecisionState>,
     pub safety_identifier: Option<String>,
 }
 
@@ -143,14 +145,14 @@ struct RunState {
 impl RunState {
     fn new(params: DecisionRunnerParams, max_steps: usize, cancelled: Option<Arc<dyn Fn() -> bool + Send + Sync>>) -> Result<Self, DecisionRunnerError> {
         if max_steps < 1 {
-            return Err(DecisionRunnerError { reason: DecisionRunnerReason::InvalidParams, attempted: vec![], completed: vec![] });
+            return Err(DecisionRunnerError { reason: DecisionRunnerReason::InvalidParams, attempted: vec![], completed: vec![], source: None });
         }
         Ok(Self { attempted: Vec::new(), completed: Vec::new(), decisions: Vec::new(), cancelled, params, max_steps })
     }
     fn check_cancelled(&self) -> Result<(), DecisionRunnerError> {
         if let Some(cancelled) = &self.cancelled {
             if cancelled() {
-                return Err(DecisionRunnerError { reason: DecisionRunnerReason::Cancelled, attempted: self.attempted.clone(), completed: self.completed.clone() });
+                return Err(DecisionRunnerError { reason: DecisionRunnerReason::Cancelled, attempted: self.attempted.clone(), completed: self.completed.clone(), source: None });
             }
         }
         Ok(())
@@ -198,11 +200,16 @@ impl RunState {
         Ok(snapshot)
     }
     fn err_invalid_candidates(&self) -> DecisionRunnerError {
-        DecisionRunnerError { reason: DecisionRunnerReason::InvalidCandidates, attempted: self.attempted.clone(), completed: self.completed.clone() }
+        DecisionRunnerError { reason: DecisionRunnerReason::InvalidCandidates, attempted: self.attempted.clone(), completed: self.completed.clone(), source: None }
     }
     fn build_request(&self, observation: &str, candidates: &[Candidate]) -> DecisionRequest {
+        let input_text = match &self.params.state {
+            Some(DecisionState::Text(text)) => text.clone(),
+            Some(state) => serde_json::to_string(state).unwrap_or_else(|_| self.params.input.clone()),
+            None => self.params.input.clone(),
+        };
         let messages = vec![
-            crate::types::DecisionMessage { role: MessageRole::User, content: MessageContent::Text(self.params.input.clone()), kind: "message".to_string(), phase: None },
+            crate::types::DecisionMessage { role: MessageRole::User, content: MessageContent::Text(input_text), kind: "message".to_string(), phase: None },
             crate::types::DecisionMessage { role: MessageRole::User, content: MessageContent::Text(observation.to_string()), kind: "message".to_string(), phase: None },
         ];
         let question = crate::types::DecisionQuestion::Choice {
@@ -215,8 +222,6 @@ impl RunState {
             model: Some(self.params.model.clone()),
             state: DecisionState::Messages(messages),
             questions: vec![named],
-            prompt_cache_key: None,
-            prompt_cache_options: None,
             safety_identifier: self.params.safety_identifier.clone(),
             assets: None,
         }
@@ -286,9 +291,9 @@ impl DecisionRunner {
                             }
                         }
                     }
-                    Err(_) => {
+                    Err(err) => {
                         emit(&on_diagnostic, DecisionDiagnostic { api: "decisions", stage: "request", reason: "api_failed", call_id: None, member: None, duration_ms: started.elapsed().as_secs_f64() * 1000.0, usage: None });
-                        return Err(DecisionRunnerError { reason: DecisionRunnerReason::Failed, attempted: run.attempted.clone(), completed: run.completed.clone() });
+                        return Err(DecisionRunnerError { reason: DecisionRunnerReason::Failed, attempted: run.attempted.clone(), completed: run.completed.clone(), source: Some(Box::new(err)) });
                     }
                 }
                 run.check_cancelled()?;
@@ -313,19 +318,19 @@ impl DecisionRunner {
                     return Ok(DecisionRunResult { status: "verified".to_string(), decisions: run.decisions.clone(), attempted_candidate_ids: run.attempted.clone(), completed_candidate_ids: run.completed.clone() });
                 }
                 if only_done {
-                    return Err(DecisionRunnerError { reason: DecisionRunnerReason::VerificationFailed, attempted: run.attempted.clone(), completed: run.completed.clone() });
+                    return Err(DecisionRunnerError { reason: DecisionRunnerReason::VerificationFailed, attempted: run.attempted.clone(), completed: run.completed.clone(), source: None });
                 }
                 if step == run.max_steps - 1 {
-                    return Err(DecisionRunnerError { reason: DecisionRunnerReason::StepLimit, attempted: run.attempted.clone(), completed: run.completed.clone() });
+                    return Err(DecisionRunnerError { reason: DecisionRunnerReason::StepLimit, attempted: run.attempted.clone(), completed: run.completed.clone(), source: None });
                 }
                 continue;
             }
 
             if step == run.max_steps - 1 {
-                return Err(DecisionRunnerError { reason: DecisionRunnerReason::StepLimit, attempted: run.attempted.clone(), completed: run.completed.clone() });
+                return Err(DecisionRunnerError { reason: DecisionRunnerReason::StepLimit, attempted: run.attempted.clone(), completed: run.completed.clone(), source: None });
             }
             if choice.sync_execute.is_none() {
-                return Err(DecisionRunnerError { reason: DecisionRunnerReason::Failed, attempted: run.attempted.clone(), completed: run.completed.clone() });
+                return Err(DecisionRunnerError { reason: DecisionRunnerReason::Failed, attempted: run.attempted.clone(), completed: run.completed.clone(), source: None });
             }
             run.check_cancelled()?;
             run.attempted.push(choice.id.clone());
@@ -334,7 +339,7 @@ impl DecisionRunner {
             match exec() {
                 SyncExecutorOutput::Awaitable(_) => {
                     emit(&on_diagnostic, DecisionDiagnostic { api: "decisions", stage: "action", reason: "driver_failed", call_id: Some(choice.id.clone()), member: None, duration_ms: started.elapsed().as_secs_f64() * 1000.0, usage: None });
-                    return Err(DecisionRunnerError { reason: DecisionRunnerReason::AsyncExecutor, attempted: run.attempted.clone(), completed: run.completed.clone() });
+                    return Err(DecisionRunnerError { reason: DecisionRunnerReason::AsyncExecutor, attempted: run.attempted.clone(), completed: run.completed.clone(), source: None });
                 }
                 SyncExecutorOutput::Completed => {}
             }
@@ -343,7 +348,17 @@ impl DecisionRunner {
             run.check_cancelled()?;
         }
 
-        Err(DecisionRunnerError { reason: DecisionRunnerReason::StepLimit, attempted: run.attempted.clone(), completed: run.completed.clone() })
+        Err(DecisionRunnerError { reason: DecisionRunnerReason::StepLimit, attempted: run.attempted.clone(), completed: run.completed.clone(), source: None })
+    }
+
+    pub async fn run_default(
+        &self,
+        provider: &dyn DecisionProvider,
+        params: DecisionRunnerParams,
+        cancelled: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+        on_diagnostic: Option<DiagnosticObserver>,
+    ) -> Result<DecisionRunResult, DecisionRunnerError> {
+        self.run(provider, params, 20, cancelled, on_diagnostic).await
     }
 }
 
@@ -405,9 +420,9 @@ impl AsyncDecisionRunner {
                             }
                         }
                     }
-                    Err(_) => {
+                    Err(err) => {
                         emit(&on_diagnostic, DecisionDiagnostic { api: "decisions", stage: "request", reason: "api_failed", call_id: None, member: None, duration_ms: started.elapsed().as_secs_f64() * 1000.0, usage: None });
-                        return Err(DecisionRunnerError { reason: DecisionRunnerReason::Failed, attempted: run.attempted.clone(), completed: run.completed.clone() });
+                        return Err(DecisionRunnerError { reason: DecisionRunnerReason::Failed, attempted: run.attempted.clone(), completed: run.completed.clone(), source: Some(Box::new(err)) });
                     }
                 }
                 run.check_cancelled()?;
@@ -432,19 +447,19 @@ impl AsyncDecisionRunner {
                     return Ok(DecisionRunResult { status: "verified".to_string(), decisions: run.decisions.clone(), attempted_candidate_ids: run.attempted.clone(), completed_candidate_ids: run.completed.clone() });
                 }
                 if only_done {
-                    return Err(DecisionRunnerError { reason: DecisionRunnerReason::VerificationFailed, attempted: run.attempted.clone(), completed: run.completed.clone() });
+                    return Err(DecisionRunnerError { reason: DecisionRunnerReason::VerificationFailed, attempted: run.attempted.clone(), completed: run.completed.clone(), source: None });
                 }
                 if step == run.max_steps - 1 {
-                    return Err(DecisionRunnerError { reason: DecisionRunnerReason::StepLimit, attempted: run.attempted.clone(), completed: run.completed.clone() });
+                    return Err(DecisionRunnerError { reason: DecisionRunnerReason::StepLimit, attempted: run.attempted.clone(), completed: run.completed.clone(), source: None });
                 }
                 continue;
             }
 
             if step == run.max_steps - 1 {
-                return Err(DecisionRunnerError { reason: DecisionRunnerReason::StepLimit, attempted: run.attempted.clone(), completed: run.completed.clone() });
+                return Err(DecisionRunnerError { reason: DecisionRunnerReason::StepLimit, attempted: run.attempted.clone(), completed: run.completed.clone(), source: None });
             }
             if choice.async_execute.is_none() {
-                return Err(DecisionRunnerError { reason: DecisionRunnerReason::Failed, attempted: run.attempted.clone(), completed: run.completed.clone() });
+                return Err(DecisionRunnerError { reason: DecisionRunnerReason::Failed, attempted: run.attempted.clone(), completed: run.completed.clone(), source: None });
             }
             run.check_cancelled()?;
             run.attempted.push(choice.id.clone());
@@ -456,7 +471,17 @@ impl AsyncDecisionRunner {
             run.check_cancelled()?;
         }
 
-        Err(DecisionRunnerError { reason: DecisionRunnerReason::StepLimit, attempted: run.attempted.clone(), completed: run.completed.clone() })
+        Err(DecisionRunnerError { reason: DecisionRunnerReason::StepLimit, attempted: run.attempted.clone(), completed: run.completed.clone(), source: None })
+    }
+
+    pub async fn run_default(
+        &self,
+        provider: &dyn DecisionProvider,
+        params: DecisionRunnerParams,
+        cancelled: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+        on_diagnostic: Option<DiagnosticObserver>,
+    ) -> Result<DecisionRunResult, DecisionRunnerError> {
+        self.run(provider, params, 20, cancelled, on_diagnostic).await
     }
 }
 
@@ -467,24 +492,24 @@ fn select_candidate(
 ) -> Result<(Option<Candidate>, Option<(u64, u64, u64)>), DecisionRunnerError> {
     run.decisions.push(decision.clone());
     if decision.answers.len() != 1 {
-        return Err(DecisionRunnerError { reason: DecisionRunnerReason::InvalidAnswer, attempted: run.attempted.clone(), completed: run.completed.clone() });
+        return Err(DecisionRunnerError { reason: DecisionRunnerReason::InvalidAnswer, attempted: run.attempted.clone(), completed: run.completed.clone(), source: None });
     }
     let answer = &decision.answers[0];
     if answer.name.as_deref() != Some("next_action") {
-        return Err(DecisionRunnerError { reason: DecisionRunnerReason::InvalidAnswer, attempted: run.attempted.clone(), completed: run.completed.clone() });
+        return Err(DecisionRunnerError { reason: DecisionRunnerReason::InvalidAnswer, attempted: run.attempted.clone(), completed: run.completed.clone(), source: None });
     }
     let usage_tuple = (decision.usage.input_tokens.unwrap_or(0), decision.usage.output_tokens.unwrap_or(0), decision.usage.total_tokens.unwrap_or(0));
     match &answer.answer {
         DecisionAnswer::Refusal { .. } => Ok((None, Some(usage_tuple))),
         DecisionAnswer::Choice { choice, confidence, probabilities, .. } => {
-            if !confidence.is_finite() { return Err(DecisionRunnerError { reason: DecisionRunnerReason::InvalidAnswer, attempted: run.attempted.clone(), completed: run.completed.clone() }); }
-            for p in probabilities { if !p.probability.is_finite() { return Err(DecisionRunnerError { reason: DecisionRunnerReason::InvalidAnswer, attempted: run.attempted.clone(), completed: run.completed.clone() }); } }
+            if !confidence.is_finite() { return Err(DecisionRunnerError { reason: DecisionRunnerReason::InvalidAnswer, attempted: run.attempted.clone(), completed: run.completed.clone(), source: None }); }
+            for p in probabilities { if !p.probability.is_finite() { return Err(DecisionRunnerError { reason: DecisionRunnerReason::InvalidAnswer, attempted: run.attempted.clone(), completed: run.completed.clone(), source: None }); } }
             let choice_text = match choice { ChoiceValue::Text(t) => t.clone(), ChoiceValue::Bool(b) => b.to_string() };
             for c in candidates {
                 if c.id == choice_text { return Ok((Some(c.clone()), Some(usage_tuple))); }
             }
-            Err(DecisionRunnerError { reason: DecisionRunnerReason::InvalidAnswer, attempted: run.attempted.clone(), completed: run.completed.clone() })
+            Err(DecisionRunnerError { reason: DecisionRunnerReason::InvalidAnswer, attempted: run.attempted.clone(), completed: run.completed.clone(), source: None })
         }
-        _ => Err(DecisionRunnerError { reason: DecisionRunnerReason::InvalidAnswer, attempted: run.attempted.clone(), completed: run.completed.clone() }),
+        _ => Err(DecisionRunnerError { reason: DecisionRunnerReason::InvalidAnswer, attempted: run.attempted.clone(), completed: run.completed.clone(), source: None }),
     }
 }

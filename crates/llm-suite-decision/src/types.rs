@@ -23,33 +23,16 @@ impl ChoiceValue {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-pub struct PromptCacheBreakpoint {
-    pub mode: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-pub struct PromptCacheOptions {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mode: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ttl: Option<String>,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentPart {
     InputText {
         text: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        prompt_cache_breakpoint: Option<PromptCacheBreakpoint>,
     },
     InputImage {
         image_url: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        prompt_cache_breakpoint: Option<PromptCacheBreakpoint>,
     },
     InputJson {
         data: Value,
@@ -116,7 +99,8 @@ pub enum DecisionQuestion {
     Predicate {
         #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
-        instructions: Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        instructions: Option<Value>,
         #[serde(skip_serializing_if = "Option::is_none")]
         true_description: Option<Value>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -258,13 +242,16 @@ pub struct DecisionRequest {
     pub state: DecisionState,
     pub questions: Vec<NamedQuestion>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub prompt_cache_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prompt_cache_options: Option<PromptCacheOptions>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub safety_identifier: Option<String>,
     #[serde(default, skip)]
     pub assets: Option<std::collections::BTreeMap<String, crate::assets::ImageAsset>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DecisionModelMetadata {
+    pub name: String,
+    pub description: String,
+    pub release_date: String,
 }
 
 pub fn validate_request(request: &DecisionRequest) -> Result<(), DecisionError> {
@@ -277,14 +264,16 @@ pub fn validate_request(request: &DecisionRequest) -> Result<(), DecisionError> 
         let question = &named.question;
         match question {
             DecisionQuestion::Predicate { instructions, .. } => {
-                if !value_non_empty(instructions) {
-                    return Err(DecisionError::InvalidRequest(
-                        "predicate instructions must not be empty".into(),
-                    ));
+                if let Some(instructions) = instructions {
+                    if !value_non_empty(instructions) {
+                        return Err(DecisionError::InvalidRequest(
+                            "predicate instructions must not be empty".into(),
+                        ));
+                    }
                 }
             }
             DecisionQuestion::Choice { instructions, choices, .. } => {
-                if choices.len() < 2 || choices.len() > 255 {
+                if choices.is_empty() || choices.len() > 255 {
                     return Err(DecisionError::InvalidRequest(
                         "choice requires 2 to 255 options".into(),
                     ));
@@ -362,8 +351,6 @@ mod tests {
             model: None,
             state: DecisionState::Text("hello".to_string()),
             questions: Vec::new(),
-            prompt_cache_key: None,
-            prompt_cache_options: None,
             safety_identifier: None,
             assets: None,
         };

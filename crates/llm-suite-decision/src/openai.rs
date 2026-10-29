@@ -9,7 +9,7 @@ use crate::error::{DecisionError, Result};
 use crate::provider::DecisionProvider;
 use crate::types::{
     ChoiceProbability, ChoiceValue, DecisionAnswer, DecisionQuestion, DecisionRequest,
-    DecisionResponse, DecisionUsage, InputTokensDetails, NamedAnswer, NamedQuestion, OutputTokensDetails,
+    DecisionResponse, DecisionUsage, InputTokensDetails, NamedAnswer, OutputTokensDetails,
     ScoreProbability, validate_request, DecisionState,
 };
 
@@ -121,11 +121,22 @@ impl OpenAIDecisionProvider {
 
     fn build_body(&self, request: &DecisionRequest) -> Result<Value> {
         validate_request(request)?;
+        if request.questions.is_empty() || request.questions.len() > 200 {
+            return Err(DecisionError::InvalidRequest(
+                "OpenAI decision questions must contain 1 to 200 items".into(),
+            ));
+        }
         let model = request
             .model
             .clone()
             .unwrap_or_else(|| self.config.model.clone());
 
+        let image_count = count_images(&request.state);
+        if image_count > 128 {
+            return Err(DecisionError::InvalidRequest(
+                "OpenAI decision supports at most 128 images".into(),
+            ));
+        }
         let input = state_to_input(&request.state)?;
         let questions = questions_to_openai(&request.questions)?;
 
@@ -134,15 +145,6 @@ impl OpenAIDecisionProvider {
         body.insert("input".to_string(), input);
         body.insert("questions".to_string(), Value::Array(questions));
 
-        if let Some(value) = &request.prompt_cache_key {
-            body.insert("prompt_cache_key".to_string(), Value::String(value.clone()));
-        }
-        if let Some(value) = &request.prompt_cache_options {
-            body.insert(
-                "prompt_cache_options".to_string(),
-                serde_json::to_value(value).map_err(|err| DecisionError::Decode(err.to_string()))?,
-            );
-        }
         if let Some(value) = &request.safety_identifier {
             body.insert("safety_identifier".to_string(), Value::String(value.clone()));
         }
@@ -231,19 +233,58 @@ impl OpenAIDecisionProvider {
     }
 }
 
+fn count_images(state: &DecisionState) -> usize {
+    match state {
+        DecisionState::Parts(parts) => parts
+            .iter()
+            .filter(|part| matches!(part, crate::types::ContentPart::InputImage { .. }))
+            .count(),
+        DecisionState::Messages(messages) => messages
+            .iter()
+            .filter_map(|message| match &message.content {
+                crate::types::MessageContent::Parts(parts) => Some(
+                    parts
+                        .iter()
+                        .filter(|part| matches!(part, crate::types::ContentPart::InputImage { .. }))
+                        .count(),
+                ),
+                _ => None,
+            })
+            .sum(),
+        _ => 0,
+    }
+}
+
 fn state_to_input(state: &DecisionState) -> Result<Value> {
     match state {
         DecisionState::Text(text) => Ok(Value::String(text.clone())),
-        DecisionState::Json(value) => {
-            let part = json!({ "type": "input_json", "data": value });
-            Ok(json!([{ "role": "user", "type": "message", "content": [part] }]))
-        }
+        DecisionState::Json(_) => Err(DecisionError::InvalidRequest(
+            "OpenAI decision protocol does not support JSON state".into(),
+        )),
         DecisionState::Parts(parts) => {
+            for part in parts {
+                match part {
+                    crate::types::ContentPart::InputText { .. }
+                    | crate::types::ContentPart::InputImage { .. } => {}
+                    crate::types::ContentPart::InputJson { .. } => {
+                        return Err(DecisionError::InvalidRequest(
+                            "OpenAI decision protocol does not support JSON parts".into(),
+                        ));
+                    }
+                }
+            }
             let parts = serde_json::to_value(parts)
                 .map_err(|err| DecisionError::Decode(err.to_string()))?;
             Ok(json!([{ "role": "user", "type": "message", "content": parts }]))
         }
         DecisionState::Messages(messages) => {
+            for message in messages {
+                if !matches!(message.role, crate::types::MessageRole::User) {
+                    return Err(DecisionError::InvalidRequest(
+                        "OpenAI decision protocol only supports user messages".into(),
+                    ));
+                }
+            }
             serde_json::to_value(messages).map_err(|err| DecisionError::Decode(err.to_string()))
         }
     }
@@ -257,10 +298,13 @@ fn questions_to_openai(questions: &[crate::types::NamedQuestion]) -> Result<Vec<
             instructions, ..
         } = &question
         {
-            if !value_non_empty(instructions) {
-                return Err(DecisionError::InvalidRequest(
-                    "predicate instructions must not be empty".into(),
-                ));
+            match instructions {
+                Some(value) if value_non_empty(value) => {}
+                _ => {
+                    return Err(DecisionError::InvalidRequest(
+                        "predicate instructions must not be empty".into(),
+                    ));
+                }
             }
         }
         if let DecisionQuestion::Choice {
@@ -271,6 +315,13 @@ fn questions_to_openai(questions: &[crate::types::NamedQuestion]) -> Result<Vec<
             if !value_non_empty(instructions) {
                 return Err(DecisionError::InvalidRequest(
                     "choice instructions must not be empty".into(),
+                ));
+            }
+        }
+        if let DecisionQuestion::Choice { choices, .. } = &question {
+            if choices.len() < 2 {
+                return Err(DecisionError::InvalidRequest(
+                    "OpenAI decision choice requires 2 to 255 options".into(),
                 ));
             }
         }
@@ -300,6 +351,18 @@ fn questions_to_openai(questions: &[crate::types::NamedQuestion]) -> Result<Vec<
             return Err(DecisionError::InvalidRequest(
                 "score instructions must not be empty".into(),
             ));
+        }
+        if let DecisionQuestion::Score { levels, .. } = &question {
+            for level in levels {
+                match &level.label {
+                    Some(label) if !label.trim().is_empty() => {}
+                    _ => {
+                        return Err(DecisionError::InvalidRequest(
+                            "score level label must not be empty".into(),
+                        ));
+                    }
+                }
+            }
         }
         if let DecisionQuestion::Box { .. } = &question {
             return Err(DecisionError::InvalidRequest(
@@ -394,6 +457,7 @@ impl DecisionProvider for OpenAIDecisionProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::NamedQuestion;
 
     #[test]
     fn build_body_openai_predicate() {
@@ -406,13 +470,11 @@ mod tests {
                 name: Some("q1".into()),
                 question: DecisionQuestion::Predicate {
                     name: None,
-                    instructions: serde_json::json!("is it?"),
+                    instructions: Some(serde_json::json!("is it?")),
                     true_description: None,
                     false_description: None,
                 },
             }],
-            prompt_cache_key: Some("k".into()),
-            prompt_cache_options: None,
             safety_identifier: None,
             assets: None,
         };
@@ -420,7 +482,6 @@ mod tests {
         assert_eq!(body["model"], "gpt-6-luna");
         assert_eq!(body["input"], "hello");
         assert_eq!(body["questions"][0]["type"], "predicate");
-        assert_eq!(body["prompt_cache_key"], "k");
     }
 
     #[test]
@@ -434,8 +495,6 @@ mod tests {
                 name: Some("q".into()),
                 question: DecisionQuestion::Box { name: None, instructions: Some(serde_json::json!("loc")) },
             }],
-            prompt_cache_key: None,
-            prompt_cache_options: None,
             safety_identifier: None,
             assets: None,
         };

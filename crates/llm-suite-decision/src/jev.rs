@@ -9,9 +9,9 @@ use crate::config::DecisionConfig;
 use crate::error::{DecisionError, Result};
 use crate::provider::DecisionProvider;
 use crate::types::{
-    BoxCoordinates, ChoiceOption, ChoiceProbability, ChoiceValue, DecisionAnswer, DecisionQuestion,
-    DecisionRequest, DecisionResponse, DecisionState, DecisionUsage, NamedAnswer, NamedQuestion,
-    ScoreProbability, validate_request,
+    BoxCoordinates, ChoiceProbability, ChoiceValue, DecisionAnswer, DecisionModelMetadata,
+    DecisionQuestion, DecisionRequest, DecisionResponse, DecisionState, DecisionUsage, NamedAnswer,
+    NamedQuestion, ScoreProbability, validate_request,
 };
 
 pub struct JevDecisionProvider {
@@ -31,7 +31,7 @@ impl std::fmt::Debug for JevDecisionProvider {
 #[derive(Debug, Deserialize)]
 struct JevResponse {
     model: String,
-    answers: BTreeMap<String, JevAnswer>,
+    answers: serde_json::Map<String, serde_json::Value>,
     usage: Option<JevUsage>,
 }
 
@@ -83,6 +83,52 @@ impl JevDecisionProvider {
         &self.config
     }
 
+    pub async fn list_models(&self) -> Result<Vec<DecisionModelMetadata>> {
+        let url = if let Some(prefix) = self.config.base_url.strip_suffix("/systemone") {
+            format!("{}/models", prefix.trim_end_matches('/'))
+        } else {
+            format!("{}/models", self.config.base_url.trim_end_matches('/'))
+        };
+
+        #[derive(Deserialize)]
+        struct ModelsResponse {
+            models: Vec<DecisionModelMetadata>,
+        }
+
+        let mut outgoing = self.client.get(&url);
+        if let Some(api_key) = &self.config.api_key {
+            outgoing = outgoing.bearer_auth(api_key);
+        }
+        for (name, value) in &self.config.headers {
+            outgoing = outgoing.header(name, value);
+        }
+        if !self.config.query_params.is_empty() {
+            outgoing = outgoing.query(&self.config.query_params);
+        }
+
+        let response = outgoing.send().await.map_err(DecisionError::from)?;
+        let status = response.status();
+        if !status.is_success() {
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            let body = response.text().await.unwrap_or_default();
+            return Err(DecisionError::Provider {
+                status: status.as_u16(),
+                message: body,
+                retry_after_ms: llm_suite_common::parse_retry_after_ms(retry_after.as_deref()),
+            });
+        }
+
+        let decoded: ModelsResponse = response
+            .json()
+            .await
+            .map_err(|err| DecisionError::Decode(err.to_string()))?;
+        Ok(decoded.models)
+    }
+
     fn build_body(&self, request: &DecisionRequest) -> Result<Value> {
         validate_request(request)?;
         // Jev requires names for every question.
@@ -124,9 +170,11 @@ impl JevDecisionProvider {
         Ok(Value::Object(body))
     }
 
-    fn parse_response(&self, response: JevResponse) -> DecisionResponse {
+    fn parse_response(&self, response: JevResponse) -> Result<DecisionResponse> {
         let mut answers = Vec::new();
-        for (name, answer) in response.answers {
+        for (name, raw) in response.answers {
+            let answer: JevAnswer = serde_json::from_value(raw)
+                .map_err(|err| DecisionError::Decode(err.to_string()))?;
             let named = match answer {
                 JevAnswer::Noul { noul } => NamedAnswer {
                     name: Some(name.clone()),
@@ -203,7 +251,7 @@ impl JevDecisionProvider {
         }
 
         let usage = response.usage.unwrap_or_default();
-        DecisionResponse {
+        Ok(DecisionResponse {
             model: response.model,
             answers,
             usage: DecisionUsage {
@@ -213,7 +261,7 @@ impl JevDecisionProvider {
                 input_tokens_details: None,
                 output_tokens_details: None,
             },
-        }
+        })
     }
 }
 
@@ -266,8 +314,10 @@ fn question_to_jev(question: &DecisionQuestion) -> Result<Value> {
             }
             let mut object = serde_json::Map::new();
             object.insert("type".to_string(), Value::String("noul".to_string()));
-            if let Some(instructions) = instructions_if_non_empty(instructions) {
-                object.insert("instructions".to_string(), instructions);
+            if let Some(instructions) = instructions {
+                if let Some(value) = instructions_if_non_empty(instructions) {
+                    object.insert("instructions".to_string(), value);
+                }
             }
             if !criteria.is_empty() {
                 object.insert("criteria".to_string(), Value::Object(criteria));
@@ -469,7 +519,7 @@ impl DecisionProvider for JevDecisionProvider {
             .json()
             .await
             .map_err(|err| DecisionError::Decode(err.to_string()))?;
-        Ok(self.parse_response(decoded))
+        self.parse_response(decoded)
     }
 
     fn protocol_name(&self) -> &'static str {
@@ -484,6 +534,7 @@ impl DecisionProvider for JevDecisionProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ChoiceOption;
 
     #[test]
     fn build_body_jev_requires_names() {
@@ -496,13 +547,11 @@ mod tests {
                 name: None,
                 question: DecisionQuestion::Predicate {
                     name: None,
-                    instructions: serde_json::json!("q"),
+                    instructions: Some(serde_json::json!("q")),
                     true_description: None,
                     false_description: None,
                 },
             }],
-            prompt_cache_key: None,
-            prompt_cache_options: None,
             safety_identifier: None,
             assets: None,
         };
@@ -528,8 +577,6 @@ mod tests {
                     ],
                 },
             }],
-            prompt_cache_key: None,
-            prompt_cache_options: None,
             safety_identifier: None,
             assets: None,
         };
@@ -545,7 +592,7 @@ mod tests {
         let provider = JevDecisionProvider::new(config).unwrap();
         let raw = r#"{"model":"m","answers":{"q":{"type":"noul","noul":0.5}},"usage":{"input_tokens":1,"output_tokens":2}}"#;
         let decoded: JevResponse = serde_json::from_str(raw).unwrap();
-        let resp = provider.parse_response(decoded);
+        let resp = provider.parse_response(decoded).unwrap();
         assert_eq!(resp.answers.len(), 1);
         assert_eq!(resp.answers[0].name.as_deref(), Some("q"));
     }
