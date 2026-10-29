@@ -70,6 +70,7 @@ pub fn stream_usage(usage: &serde_json::Value) -> Option<MessageStreamUsage> {
             prompt_tokens_cost: None,
             completion_tokens_cost: None,
             total_cost: None,
+            provider_total: None,
         },
     })
 }

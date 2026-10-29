@@ -194,6 +194,7 @@ mod tests {
             no_proxy: None,
             circuit_breaker: None,
             auth: None,
+            compat: None,
         }
     }
 

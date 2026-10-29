@@ -122,6 +122,36 @@ pub fn apply_provider_defaults(
             custom_headers.entry(key).or_insert(value);
         }
     }
+    if profile.compat.is_none() {
+        profile.compat = definition.compat.clone();
+    } else if let (Some(profile_compat), Some(definition_compat)) =
+        (profile.compat.as_mut(), definition.compat.as_ref())
+    {
+        let mut merged = definition_compat.clone();
+        merged.merge_over(profile_compat);
+        *profile_compat = merged;
+    }
+    if profile.compat.is_none() {
+        let detected = llm_suite_types::llm::ProviderCompat::detect(
+            profile
+                .base_url
+                .as_deref()
+                .or(definition.base_url.as_deref()),
+            &profile.format,
+        );
+        if !detected.is_empty() {
+            tracing::debug!(
+                profile_id = profile.id.as_str(),
+                base_url = profile
+                    .base_url
+                    .as_deref()
+                    .or(definition.base_url.as_deref())
+                    .unwrap_or(""),
+                "auto-detected provider compat; explicit config wins"
+            );
+            profile.compat = Some(detected);
+        }
+    }
     Ok(profile)
 }
 
@@ -166,6 +196,7 @@ mod tests {
             no_proxy: None,
             circuit_breaker: None,
             auth: None,
+            compat: None,
         }
     }
 
@@ -189,6 +220,7 @@ mod tests {
             no_proxy: None,
             rate_limit: None,
             auth: None,
+            compat: None,
         }
     }
 

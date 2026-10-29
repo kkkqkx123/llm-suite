@@ -201,6 +201,12 @@ impl LlmUsageReport {
     pub fn normalized(&self) -> NormalizedUsage {
         normalize_usage(&self.usage, self.context.accounting)
     }
+
+    /// True when the billing total came from the provider rather than the
+    /// catalog estimate.
+    pub fn total_from_provider(&self) -> bool {
+        self.usage.total_from_provider()
+    }
 }
 
 #[cfg(test)]
@@ -224,6 +230,7 @@ mod tests {
             prompt_tokens_cost: None,
             completion_tokens_cost: None,
             total_cost: None,
+            provider_total: None,
         }
     }
 

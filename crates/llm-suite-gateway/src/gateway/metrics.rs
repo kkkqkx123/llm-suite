@@ -46,6 +46,7 @@ impl LlmGateway {
             prompt_tokens_cost: None,
             completion_tokens_cost: None,
             total_cost: None,
+            provider_total: None,
         })
     }
 

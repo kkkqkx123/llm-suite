@@ -46,6 +46,7 @@ fn profile_with_retries(id: &str, max_retries: Option<u32>) -> LlmProfile {
         no_proxy: None,
         circuit_breaker: None,
         auth: None,
+        compat: None,
     }
 }
 

@@ -193,6 +193,7 @@ pub fn parse_anthropic_response(body: &str) -> LlmResult<LlmResponseType> {
             prompt_tokens_cost: None,
             completion_tokens_cost: None,
             total_cost: None,
+            provider_total: None,
         }
     });
 

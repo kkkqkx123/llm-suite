@@ -9,6 +9,17 @@
 use llm_suite_types::llm::TokenUsageStats;
 use serde::{Deserialize, Serialize};
 
+/// One input-volume pricing tier: when the request input volume falls at
+/// or below `up_to_tokens`, the tier rates apply to the whole request.
+/// `None` is the catch-all tier above every bounded tier.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TokenPricingTier {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub up_to_tokens: Option<u64>,
+    pub input_per_mtok: f64,
+    pub output_per_mtok: f64,
+}
+
 /// Per-million-token prices for one model. Currency-agnostic: callers decide
 /// whether the numbers are USD, CNY, and so on.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -29,6 +40,28 @@ pub struct TokenPricing {
     /// (the Anthropic codec sums the breakdown), so this rate is only used
     /// by callers that track the TTL split themselves.
     pub cache_write_1h_per_mtok: Option<f64>,
+    /// Optional input-volume tiers. `None`/empty means flat pricing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tiers: Option<Vec<TokenPricingTier>>,
+}
+
+impl TokenPricing {
+    /// Rates that apply to a request with the given input volume: the
+    /// first tier covering the volume wins, otherwise the base rates.
+    pub fn rates_for(&self, input_tokens: u64) -> (f64, f64) {
+        if let Some(tiers) = self.tiers.as_ref() {
+            for tier in tiers {
+                match tier.up_to_tokens {
+                    Some(limit) if input_tokens <= limit => {
+                        return (tier.input_per_mtok, tier.output_per_mtok);
+                    }
+                    None => return (tier.input_per_mtok, tier.output_per_mtok),
+                    _ => continue,
+                }
+            }
+        }
+        (self.input_per_mtok, self.output_per_mtok)
+    }
 }
 
 /// Whether the provider's `prompt_tokens` already includes the cache-hit and
@@ -57,10 +90,26 @@ pub struct TokenCost {
 impl TokenCost {
     /// Fill the cost fields of a `TokenUsageStats` (or of an audit copy of
     /// it) so the numbers travel with the usage they were derived from.
+    /// When the provider reported its own billing total
+    /// (`provider_total`), that total wins for `total_cost` while the
+    /// computed split still explains the prompt/completion parts.
     pub fn apply_to(&self, usage: &mut TokenUsageStats) {
         usage.prompt_tokens_cost = Some(self.prompt_tokens_cost);
         usage.completion_tokens_cost = Some(self.completion_tokens_cost);
-        usage.total_cost = Some(self.total_cost);
+        usage.total_cost = Some(usage.provider_total.unwrap_or(self.total_cost));
+    }
+}
+
+/// Input volume a tiered price table keys on: the whole prompt width the
+/// provider billed (cache tokens included under `IncludedInPrompt`).
+fn input_volume(usage: &TokenUsageStats, scope: CacheTokenScope) -> u64 {
+    match scope {
+        CacheTokenScope::IncludedInPrompt => u64::from(usage.prompt_tokens),
+        CacheTokenScope::SeparateFromPrompt => {
+            u64::from(usage.prompt_tokens)
+                + u64::from(usage.cache_read_tokens.unwrap_or(0))
+                + u64::from(usage.cache_write_tokens.unwrap_or(0))
+        }
     }
 }
 
@@ -91,19 +140,16 @@ pub fn compute_cost(
         CacheTokenScope::SeparateFromPrompt => usage.prompt_tokens as f64,
     };
 
-    let read_rate = pricing
-        .cache_read_per_mtok
-        .unwrap_or(pricing.input_per_mtok);
-    let write_rate = pricing
-        .cache_write_5m_per_mtok
-        .unwrap_or(pricing.input_per_mtok);
+    let (input_rate, output_rate) = pricing.rates_for(input_volume(usage, scope));
+
+    let read_rate = pricing.cache_read_per_mtok.unwrap_or(input_rate);
+    let write_rate = pricing.cache_write_5m_per_mtok.unwrap_or(input_rate);
 
     let per_mtok = 1_000_000.0;
-    let prompt_tokens_cost = non_cached_input * pricing.input_per_mtok / per_mtok
+    let prompt_tokens_cost = non_cached_input * input_rate / per_mtok
         + cache_read * read_rate / per_mtok
         + cache_write * write_rate / per_mtok;
-    let completion_tokens_cost =
-        usage.completion_tokens as f64 * pricing.output_per_mtok / per_mtok;
+    let completion_tokens_cost = usage.completion_tokens as f64 * output_rate / per_mtok;
 
     TokenCost {
         prompt_tokens_cost,
@@ -171,6 +217,7 @@ mod tests {
             prompt_tokens_cost: None,
             completion_tokens_cost: None,
             total_cost: None,
+            provider_total: None,
         }
     }
 
@@ -185,6 +232,7 @@ mod tests {
             cache_read_per_mtok: Some(0.1),
             cache_write_5m_per_mtok: None,
             cache_write_1h_per_mtok: None,
+            tiers: None,
         };
         let cost = compute_cost(
             &usage(1000, 100, Some(800), None),
@@ -208,6 +256,7 @@ mod tests {
             cache_read_per_mtok: Some(0.3),
             cache_write_5m_per_mtok: Some(3.75),
             cache_write_1h_per_mtok: Some(6.0),
+            tiers: None,
         };
         let cost = compute_cost(
             &usage(10, 20, Some(80), Some(15)),
@@ -228,6 +277,7 @@ mod tests {
             cache_read_per_mtok: Some(0.1),
             cache_write_5m_per_mtok: None,
             cache_write_1h_per_mtok: None,
+            tiers: None,
         };
         // Cache read (800) exceeds prompt_tokens (10): never negative.
         let cost = compute_cost(
@@ -247,6 +297,7 @@ mod tests {
             cache_read_per_mtok: None,
             cache_write_5m_per_mtok: None,
             cache_write_1h_per_mtok: None,
+            tiers: None,
         };
         let cost = compute_cost(
             &usage(0, 0, Some(100), Some(50)),
@@ -265,6 +316,7 @@ mod tests {
             cache_read_per_mtok: None,
             cache_write_5m_per_mtok: None,
             cache_write_1h_per_mtok: None,
+            tiers: None,
         };
         let mut stats = usage(10, 5, None, None);
         compute_cost(&stats, &pricing, CacheTokenScope::IncludedInPrompt).apply_to(&mut stats);
@@ -282,6 +334,7 @@ mod tests {
             cache_read_per_mtok: Some(0.1),
             cache_write_5m_per_mtok: None,
             cache_write_1h_per_mtok: None,
+            tiers: None,
         };
         // 1000 prompt tokens of which 800 are cached, 100 output tokens.
         let stats = usage(1000, 100, Some(800), None);
@@ -300,6 +353,7 @@ mod tests {
             cache_read_per_mtok: None,
             cache_write_5m_per_mtok: None,
             cache_write_1h_per_mtok: None,
+            tiers: None,
         };
         let stats = usage(1000, 100, Some(800), None);
         let savings = compute_cache_savings(&stats, &pricing, CacheTokenScope::IncludedInPrompt);
@@ -314,6 +368,7 @@ mod tests {
             cache_read_per_mtok: Some(0.3),
             cache_write_5m_per_mtok: Some(3.75),
             cache_write_1h_per_mtok: Some(6.0),
+            tiers: None,
         };
         let stats = usage(10, 20, Some(80), Some(15));
         let baseline = compute_baseline_cost(&stats, &pricing, CacheTokenScope::SeparateFromPrompt);

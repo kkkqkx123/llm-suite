@@ -114,6 +114,11 @@ pub struct LlmProfile {
     /// explicit `api_key` still wins over the referenced credential.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<super::ProfileAuthRef>,
+    /// Optional provider compatibility opinions for this profile. Explicit
+    /// fields win over the referenced provider definition, which wins over
+    /// automatic detection. `None` keeps the codec defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compat: Option<super::ProviderCompat>,
 }
 
 /// Reference from a profile to a stored credential.

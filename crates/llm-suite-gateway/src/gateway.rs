@@ -180,6 +180,7 @@ mod tests {
             no_proxy: None,
             circuit_breaker: None,
             auth: None,
+            compat: None,
         }
     }
 
@@ -326,6 +327,7 @@ mod tests {
             no_proxy: None,
             rate_limit: None,
             auth: None,
+            compat: None,
         }
     }
 

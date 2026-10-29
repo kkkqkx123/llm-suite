@@ -43,6 +43,7 @@ pub fn parse_openai_usage(u: &serde_json::Value) -> llm_suite_types::llm::TokenU
         prompt_tokens_cost: None,
         completion_tokens_cost: None,
         total_cost: None,
+        provider_total: None,
     }
 }
 

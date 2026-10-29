@@ -30,6 +30,11 @@ pub fn resolve_generation(
     if let Some(ref typed) = request.generation {
         resolved.merge_over(typed);
     }
+    if resolved.max_token_field.is_none() {
+        if let Some(compat) = profile.compat.as_ref().and_then(|c| c.max_tokens_field) {
+            resolved.max_token_field = Some(compat);
+        }
+    }
     validate::validate_generation(&resolved, &profile.format)?;
     Ok(resolved)
 }
@@ -75,6 +80,7 @@ mod tests {
             no_proxy: None,
             circuit_breaker: None,
             auth: None,
+            compat: None,
         }
     }
 

@@ -41,5 +41,6 @@ pub fn profile_with(auth_type: Option<&str>) -> LlmProfile {
         no_proxy: None,
         circuit_breaker: None,
         auth: None,
+        compat: None,
     }
 }

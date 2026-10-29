@@ -53,5 +53,6 @@ pub fn merge_usage(
         prompt_tokens_cost: u.prompt_tokens_cost.or(prev.prompt_tokens_cost),
         completion_tokens_cost: u.completion_tokens_cost.or(prev.completion_tokens_cost),
         total_cost: u.total_cost.or(prev.total_cost),
+        provider_total: None,
     }
 }

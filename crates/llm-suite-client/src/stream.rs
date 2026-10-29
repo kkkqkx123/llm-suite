@@ -254,6 +254,7 @@ mod tests {
                 prompt_tokens_cost: None,
                 completion_tokens_cost: None,
                 total_cost: None,
+                provider_total: None,
             },
         }));
 
@@ -288,6 +289,7 @@ mod tests {
                 prompt_tokens_cost: None,
                 completion_tokens_cost: None,
                 total_cost: None,
+                provider_total: None,
             },
         }));
         // Anthropic `message_delta`: cumulative output, input may be omitted.
@@ -302,6 +304,7 @@ mod tests {
                 prompt_tokens_cost: None,
                 completion_tokens_cost: None,
                 total_cost: None,
+                provider_total: None,
             },
         }));
 

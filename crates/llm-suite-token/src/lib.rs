@@ -13,7 +13,7 @@ pub use count::{
 pub use estimation::{estimate_tokens, TokenEstimator};
 pub use pricing::{
     compute_baseline_cost, compute_cache_savings, compute_cost, CacheTokenScope, TokenCost,
-    TokenPricing,
+    TokenPricing, TokenPricingTier,
 };
 pub use pricing_resolver::{PricingResolver, ResolvedPricing};
 pub use usage::{

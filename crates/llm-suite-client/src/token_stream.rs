@@ -403,6 +403,7 @@ mod tests {
                         prompt_tokens_cost: None,
                         completion_tokens_cost: None,
                         total_cost: None,
+                        provider_total: None,
                     },
                 }),
                 MessageStreamEvent::FinalMessage(llm_suite_types::llm::MessageStreamFinal {
@@ -501,6 +502,7 @@ mod tests {
                         prompt_tokens_cost: None,
                         completion_tokens_cost: None,
                         total_cost: None,
+                        provider_total: None,
                     },
                 }),
                 MessageStreamEvent::FinalMessage(llm_suite_types::llm::MessageStreamFinal {

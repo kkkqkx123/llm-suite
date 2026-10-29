@@ -34,6 +34,12 @@ pub struct TokenUsageStats {
     pub completion_tokens_cost: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_cost: Option<f64>,
+    /// Billing total reported by the provider itself (e.g. an OpenRouter
+    /// `cost` field). When present it wins over the catalog estimate for
+    /// `total_cost` (see `TokenCost::apply_to`); the computed split still
+    /// explains the prompt/completion parts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_total: Option<f64>,
 }
 
 /// Cost-track record of a single LLM request (real provider usage only).
@@ -99,6 +105,14 @@ impl TokenUsageHistory {
     }
 }
 
+impl TokenUsageStats {
+    /// True when the billing total came from the provider rather than the
+    /// catalog estimate.
+    pub fn total_from_provider(&self) -> bool {
+        self.provider_total.is_some()
+    }
+}
+
 /// Result of a provider-side token counting API call.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TokenCountResult {
@@ -123,6 +137,7 @@ mod tests {
             prompt_tokens_cost: None,
             completion_tokens_cost: None,
             total_cost: Some(0.42),
+            provider_total: None,
         };
         let history = TokenUsageHistory::from_usage(
             "req-1",

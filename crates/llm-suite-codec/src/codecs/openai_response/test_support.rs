@@ -32,6 +32,7 @@ pub fn count_profile() -> LlmProfile {
         no_proxy: None,
         circuit_breaker: None,
         auth: None,
+        compat: None,
     }
 }
 

@@ -49,6 +49,11 @@ pub struct LlmProviderDefinition {
     /// static key authentication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<super::ProviderAuthRef>,
+    /// Default compatibility opinions shared by profiles on this provider.
+    /// A profile-level `compat` overlays these per field; unset fields
+    /// fall back to automatic detection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compat: Option<super::ProviderCompat>,
 }
 
 /// Reference from a provider definition to a registered auth implementation.

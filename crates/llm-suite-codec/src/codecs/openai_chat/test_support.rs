@@ -53,6 +53,7 @@ pub(crate) fn profile() -> LlmProfile {
         no_proxy: None,
         circuit_breaker: None,
         auth: None,
+        compat: None,
     }
 }
 
