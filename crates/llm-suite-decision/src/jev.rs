@@ -9,9 +9,9 @@ use crate::config::DecisionConfig;
 use crate::error::{DecisionError, Result};
 use crate::provider::DecisionProvider;
 use crate::types::{
-    BoxCoordinates, ChoiceProbability, ChoiceValue, DecisionAnswer, DecisionModelMetadata,
-    DecisionQuestion, DecisionRequest, DecisionResponse, DecisionState, DecisionUsage, NamedAnswer,
-    NamedQuestion, ScoreProbability, validate_request,
+    validate_request, BoxCoordinates, ChoiceProbability, ChoiceValue, DecisionAnswer,
+    DecisionModelMetadata, DecisionQuestion, DecisionRequest, DecisionResponse, DecisionState,
+    DecisionUsage, NamedAnswer, NamedQuestion, ScoreProbability,
 };
 
 pub struct JevDecisionProvider {
@@ -291,9 +291,7 @@ fn state_to_jev(state: &DecisionState) -> Value {
             }
             Value::Array(output)
         }
-        DecisionState::Messages(messages) => {
-            serde_json::to_value(messages).unwrap_or(Value::Null)
-        }
+        DecisionState::Messages(messages) => serde_json::to_value(messages).unwrap_or(Value::Null),
     }
 }
 
@@ -331,7 +329,10 @@ fn question_to_jev(question: &DecisionQuestion) -> Result<Value> {
         } => {
             let mut criteria = serde_json::Map::new();
             for choice in choices {
-                criteria.insert(choice.value.as_text(), choice.description.clone().unwrap_or(Value::Null));
+                criteria.insert(
+                    choice.value.as_text(),
+                    choice.description.clone().unwrap_or(Value::Null),
+                );
             }
             let mut object = serde_json::Map::new();
             object.insert("type".to_string(), Value::String("choice".to_string()));
@@ -406,8 +407,8 @@ impl DecisionProvider for JevDecisionProvider {
             known.insert(asset.reference().to_string(), asset.clone());
         }
 
-        let base_bytes = serde_json::to_vec(&body)
-            .map_err(|err| DecisionError::Decode(err.to_string()))?;
+        let base_bytes =
+            serde_json::to_vec(&body).map_err(|err| DecisionError::Decode(err.to_string()))?;
 
         // Collect pending assets in insertion order: explicit first, then
         // references found in the body in order of appearance.
@@ -479,10 +480,7 @@ impl DecisionProvider for JevDecisionProvider {
             (ct, bytes)
         };
 
-        let mut outgoing = self
-            .client
-            .post(&self.config.base_url)
-            .body(body_bytes);
+        let mut outgoing = self.client.post(&self.config.base_url).body(body_bytes);
         // set content type
         outgoing = outgoing.header("content-type", &content_type);
 
@@ -496,10 +494,7 @@ impl DecisionProvider for JevDecisionProvider {
             outgoing = outgoing.query(&self.config.query_params);
         }
 
-        let response = outgoing
-            .send()
-            .await
-            .map_err(DecisionError::from)?;
+        let response = outgoing.send().await.map_err(DecisionError::from)?;
         let status = response.status();
         if !status.is_success() {
             let retry_after = response
@@ -572,8 +567,14 @@ mod tests {
                     name: None,
                     instructions: Some(serde_json::json!("choose")),
                     choices: vec![
-                        ChoiceOption { value: ChoiceValue::Text("a".into()), description: Some(serde_json::json!("desc a")) },
-                        ChoiceOption { value: ChoiceValue::Text("b".into()), description: None },
+                        ChoiceOption {
+                            value: ChoiceValue::Text("a".into()),
+                            description: Some(serde_json::json!("desc a")),
+                        },
+                        ChoiceOption {
+                            value: ChoiceValue::Text("b".into()),
+                            description: None,
+                        },
                     ],
                 },
             }],

@@ -8,9 +8,9 @@ use crate::config::DecisionConfig;
 use crate::error::{DecisionError, Result};
 use crate::provider::DecisionProvider;
 use crate::types::{
-    ChoiceProbability, ChoiceValue, DecisionAnswer, DecisionQuestion, DecisionRequest,
-    DecisionResponse, DecisionUsage, InputTokensDetails, NamedAnswer, OutputTokensDetails,
-    ScoreProbability, validate_request, DecisionState,
+    validate_request, ChoiceProbability, ChoiceValue, DecisionAnswer, DecisionQuestion,
+    DecisionRequest, DecisionResponse, DecisionState, DecisionUsage, InputTokensDetails,
+    NamedAnswer, OutputTokensDetails, ScoreProbability,
 };
 
 pub struct OpenAIDecisionProvider {
@@ -146,7 +146,10 @@ impl OpenAIDecisionProvider {
         body.insert("questions".to_string(), Value::Array(questions));
 
         if let Some(value) = &request.safety_identifier {
-            body.insert("safety_identifier".to_string(), Value::String(value.clone()));
+            body.insert(
+                "safety_identifier".to_string(),
+                Value::String(value.clone()),
+            );
         }
 
         Ok(Value::Object(body))
@@ -294,10 +297,7 @@ fn questions_to_openai(questions: &[crate::types::NamedQuestion]) -> Result<Vec<
     let mut output = Vec::new();
     for named in questions {
         let question = named.question.clone();
-        if let DecisionQuestion::Predicate {
-            instructions, ..
-        } = &question
-        {
+        if let DecisionQuestion::Predicate { instructions, .. } = &question {
             match instructions {
                 Some(value) if value_non_empty(value) => {}
                 _ => {
@@ -370,8 +370,8 @@ fn questions_to_openai(questions: &[crate::types::NamedQuestion]) -> Result<Vec<
             ));
         }
 
-        let mut value = serde_json::to_value(question)
-            .map_err(|err| DecisionError::Decode(err.to_string()))?;
+        let mut value =
+            serde_json::to_value(question).map_err(|err| DecisionError::Decode(err.to_string()))?;
         if let Some(name) = &named.name {
             if let Value::Object(map) = &mut value {
                 map.insert("name".to_string(), Value::String(name.clone()));
@@ -419,10 +419,7 @@ impl DecisionProvider for OpenAIDecisionProvider {
             outgoing = outgoing.query(&self.config.query_params);
         }
 
-        let response = outgoing
-            .send()
-            .await
-            .map_err(DecisionError::from)?;
+        let response = outgoing.send().await.map_err(DecisionError::from)?;
         let status = response.status();
         if !status.is_success() {
             let retry_after = response
@@ -493,7 +490,10 @@ mod tests {
             state: DecisionState::Text("hi".into()),
             questions: vec![NamedQuestion {
                 name: Some("q".into()),
-                question: DecisionQuestion::Box { name: None, instructions: Some(serde_json::json!("loc")) },
+                question: DecisionQuestion::Box {
+                    name: None,
+                    instructions: Some(serde_json::json!("loc")),
+                },
             }],
             safety_identifier: None,
             assets: None,
@@ -509,6 +509,9 @@ mod tests {
         let decoded: OpenAIResponse = serde_json::from_str(raw).unwrap();
         let resp = provider.parse_response(decoded);
         assert_eq!(resp.answers.len(), 2);
-        assert!(matches!(resp.answers[1].answer, DecisionAnswer::Refusal { .. }));
+        assert!(matches!(
+            resp.answers[1].answer,
+            DecisionAnswer::Refusal { .. }
+        ));
     }
 }

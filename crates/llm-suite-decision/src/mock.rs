@@ -38,7 +38,10 @@ impl MockDecisionProvider {
     }
 
     pub fn recorded_calls(&self) -> usize {
-        *self.calls.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        *self
+            .calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     pub fn last_request(&self) -> Option<DecisionRequest> {
@@ -52,9 +55,14 @@ impl MockDecisionProvider {
 #[async_trait]
 impl DecisionProvider for MockDecisionProvider {
     async fn create(&self, request: &DecisionRequest) -> Result<DecisionResponse> {
-        *self.calls.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) += 1;
-        *self.last_request.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
-            Some(request.clone());
+        *self
+            .calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) += 1;
+        *self
+            .last_request
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(request.clone());
         if let Some(error) = &self.error {
             return Err(error.clone());
         }

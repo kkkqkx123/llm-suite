@@ -51,7 +51,9 @@ impl PartialEq for ImageAsset {
 
 impl std::fmt::Debug for ImageAsset {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ImageAsset").field("reference", &self.reference).finish()
+        f.debug_struct("ImageAsset")
+            .field("reference", &self.reference)
+            .finish()
     }
 }
 
@@ -68,16 +70,29 @@ impl ImageAsset {
         let text = data.as_ref();
         let cleaned: String = text.split_whitespace().collect();
         if cleaned.is_empty() || !cleaned.is_ascii() {
-            return Err(DecisionError::InvalidRequest("Image data must contain non-empty ASCII base64 text.".into()));
+            return Err(DecisionError::InvalidRequest(
+                "Image data must contain non-empty ASCII base64 text.".into(),
+            ));
         }
-        let decoded = base64::engine::general_purpose::STANDARD.decode(&cleaned).map_err(|err| {
-            DecisionError::InvalidRequest(format!("Image data must contain valid base64 text: {err}"))
-        })?;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&cleaned)
+            .map_err(|err| {
+                DecisionError::InvalidRequest(format!(
+                    "Image data must contain valid base64 text: {err}"
+                ))
+            })?;
         Ok(Self::new(ImageSource::Bytes(decoded)))
     }
 
     fn new(source: ImageSource) -> Self {
-        Self { source, reference: format!("<image:{}>", Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).simple()), resolved: Arc::new(Mutex::new(None)) }
+        Self {
+            source,
+            reference: format!(
+                "<image:{}>",
+                Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).simple()
+            ),
+            resolved: Arc::new(Mutex::new(None)),
+        }
     }
 
     pub fn reference(&self) -> &str {
@@ -87,15 +102,27 @@ impl ImageAsset {
     pub fn resolve(&self) -> Result<ResolvedImage, DecisionError> {
         {
             let guard = self.resolved.lock().unwrap_or_else(|p| p.into_inner());
-            if let Some(resolved) = guard.as_ref() { return Ok(resolved.clone()); }
+            if let Some(resolved) = guard.as_ref() {
+                return Ok(resolved.clone());
+            }
         }
         let data = match &self.source {
-            ImageSource::Path(path) => std::fs::read(&path).map_err(|err| DecisionError::InvalidRequest(format!("Image file {:?} could not be read: {}.", path, err)))?,
+            ImageSource::Path(path) => std::fs::read(&path).map_err(|err| {
+                DecisionError::InvalidRequest(format!(
+                    "Image file {:?} could not be read: {}.",
+                    path, err
+                ))
+            })?,
             ImageSource::Bytes(data) => data.clone(),
         };
-        if data.is_empty() { return Err(DecisionError::InvalidRequest("Image data is empty.".into())); }
+        if data.is_empty() {
+            return Err(DecisionError::InvalidRequest("Image data is empty.".into()));
+        }
         let ct = content_type_from_bytes(&data[..data.len().min(SIGNATURE_LENGTH)]);
-        let resolved = ResolvedImage { content_type: ct, data };
+        let resolved = ResolvedImage {
+            content_type: ct,
+            data,
+        };
         let mut guard = self.resolved.lock().unwrap_or_else(|p| p.into_inner());
         *guard = Some(resolved.clone());
         Ok(resolved)
@@ -104,16 +131,32 @@ impl ImageAsset {
     pub async fn resolve_async(&self) -> Result<ResolvedImage, DecisionError> {
         {
             let guard = self.resolved.lock().unwrap_or_else(|p| p.into_inner());
-            if let Some(resolved) = guard.as_ref() { return Ok(resolved.clone()); }
+            if let Some(resolved) = guard.as_ref() {
+                return Ok(resolved.clone());
+            }
         }
         let source = self.source.clone();
         let data = tokio::task::spawn_blocking(move || match source {
-            ImageSource::Path(path) => std::fs::read(&path).map_err(|err| DecisionError::InvalidRequest(format!("Image file {:?} could not be read: {}.", path, err))),
+            ImageSource::Path(path) => std::fs::read(&path).map_err(|err| {
+                DecisionError::InvalidRequest(format!(
+                    "Image file {:?} could not be read: {}.",
+                    path, err
+                ))
+            }),
             ImageSource::Bytes(data) => Ok(data),
-        }).await.map_err(|err| DecisionError::InvalidRequest(format!("image resolution task failed: {err}")))??;
-        if data.is_empty() { return Err(DecisionError::InvalidRequest("Image data is empty.".into())); }
+        })
+        .await
+        .map_err(|err| {
+            DecisionError::InvalidRequest(format!("image resolution task failed: {err}"))
+        })??;
+        if data.is_empty() {
+            return Err(DecisionError::InvalidRequest("Image data is empty.".into()));
+        }
         let ct = content_type_from_bytes(&data[..data.len().min(SIGNATURE_LENGTH)]);
-        let resolved = ResolvedImage { content_type: ct, data };
+        let resolved = ResolvedImage {
+            content_type: ct,
+            data,
+        };
         let mut guard = self.resolved.lock().unwrap_or_else(|p| p.into_inner());
         *guard = Some(resolved.clone());
         Ok(resolved)
@@ -122,14 +165,24 @@ impl ImageAsset {
 
 pub type DecisionAsset = ImageAsset;
 
-pub fn resolve_assets(assets: &BTreeMap<String, ImageAsset>) -> Result<BTreeMap<String, ResolvedImage>, DecisionError> {
+pub fn resolve_assets(
+    assets: &BTreeMap<String, ImageAsset>,
+) -> Result<BTreeMap<String, ResolvedImage>, DecisionError> {
     for name in assets.keys() {
-        if name.trim().is_empty() { return Err(DecisionError::InvalidRequest("Asset aliases must be non-empty strings.".into())); }
+        if name.trim().is_empty() {
+            return Err(DecisionError::InvalidRequest(
+                "Asset aliases must be non-empty strings.".into(),
+            ));
+        }
     }
     let mut cache: HashMap<String, ResolvedImage> = HashMap::new();
     for (name, asset) in assets {
-        if cache.contains_key(&asset.reference) { continue; }
-        let resolved = asset.resolve().map_err(|err| DecisionError::InvalidRequest(format!("Asset {name:?}: {err}")))?;
+        if cache.contains_key(&asset.reference) {
+            continue;
+        }
+        let resolved = asset
+            .resolve()
+            .map_err(|err| DecisionError::InvalidRequest(format!("Asset {name:?}: {err}")))?;
         cache.insert(asset.reference.clone(), resolved);
     }
     let mut out = BTreeMap::new();
@@ -139,18 +192,32 @@ pub fn resolve_assets(assets: &BTreeMap<String, ImageAsset>) -> Result<BTreeMap<
     Ok(out)
 }
 
-pub async fn resolve_assets_async(assets: &BTreeMap<String, ImageAsset>) -> Result<BTreeMap<String, ResolvedImage>, DecisionError> {
+pub async fn resolve_assets_async(
+    assets: &BTreeMap<String, ImageAsset>,
+) -> Result<BTreeMap<String, ResolvedImage>, DecisionError> {
     for name in assets.keys() {
-        if name.trim().is_empty() { return Err(DecisionError::InvalidRequest("Asset aliases must be non-empty strings.".into())); }
+        if name.trim().is_empty() {
+            return Err(DecisionError::InvalidRequest(
+                "Asset aliases must be non-empty strings.".into(),
+            ));
+        }
     }
     let mut distinct: HashMap<String, ImageAsset> = HashMap::new();
     for asset in assets.values() {
-        distinct.entry(asset.reference.clone()).or_insert_with(|| asset.clone());
+        distinct
+            .entry(asset.reference.clone())
+            .or_insert_with(|| asset.clone());
     }
     let mut cache: HashMap<String, ResolvedImage> = HashMap::new();
     for (reference, asset) in &distinct {
-        let name_for_error = assets.iter().find(|(_, a)| a.reference == *reference).map(|(n, _)| n.clone()).unwrap_or_else(|| reference.clone());
-        let resolved = asset.resolve_async().await.map_err(|err| DecisionError::InvalidRequest(format!("Asset {name_for_error:?}: {err}")))?;
+        let name_for_error = assets
+            .iter()
+            .find(|(_, a)| a.reference == *reference)
+            .map(|(n, _)| n.clone())
+            .unwrap_or_else(|| reference.clone());
+        let resolved = asset.resolve_async().await.map_err(|err| {
+            DecisionError::InvalidRequest(format!("Asset {name_for_error:?}: {err}"))
+        })?;
         cache.insert(reference.clone(), resolved);
     }
     let mut out = BTreeMap::new();
@@ -171,7 +238,9 @@ pub fn scan_references(content: &[u8]) -> Vec<String> {
     let mut out = Vec::new();
     for m in reference_pattern().find_iter(&text) {
         let s = m.as_str().to_string();
-        if seen.insert(s.clone()) { out.push(s); }
+        if seen.insert(s.clone()) {
+            out.push(s);
+        }
     }
     out
 }
@@ -185,10 +254,15 @@ pub struct Part {
 }
 
 pub fn encode_multipart(parts: &[Part]) -> (String, Vec<u8>) {
-    let boundary = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)).simple().to_string();
+    let boundary = Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext))
+        .simple()
+        .to_string();
     let mut chunks: Vec<Vec<u8>> = Vec::new();
     for part in parts {
-        let mut header = format!("--{}\r\nContent-Disposition: form-data; name=\"{}\"", boundary, part.name);
+        let mut header = format!(
+            "--{}\r\nContent-Disposition: form-data; name=\"{}\"",
+            boundary, part.name
+        );
         if let Some(filename) = &part.filename {
             header.push_str(&format!("; filename=\"{}\"", filename));
         }
@@ -199,7 +273,9 @@ pub fn encode_multipart(parts: &[Part]) -> (String, Vec<u8>) {
     }
     chunks.push(format!("--{}--\r\n", boundary).into_bytes());
     let mut body = Vec::new();
-    for c in chunks { body.extend_from_slice(&c); }
+    for c in chunks {
+        body.extend_from_slice(&c);
+    }
     (format!("multipart/form-data; boundary={}", boundary), body)
 }
 
@@ -209,9 +285,15 @@ mod tests {
 
     #[test]
     fn content_type_detects_png_and_jpeg() {
-        assert_eq!(content_type_from_bytes(b"\x89PNG\r\n\x1a\nrest"), "image/png");
+        assert_eq!(
+            content_type_from_bytes(b"\x89PNG\r\n\x1a\nrest"),
+            "image/png"
+        );
         assert_eq!(content_type_from_bytes(b"\xff\xd8\xffrest"), "image/jpeg");
-        assert_eq!(content_type_from_bytes(b"hello"), "application/octet-stream");
+        assert_eq!(
+            content_type_from_bytes(b"hello"),
+            "application/octet-stream"
+        );
     }
 
     #[test]
@@ -257,8 +339,18 @@ mod tests {
     #[test]
     fn encode_multipart_structure() {
         let parts = vec![
-            Part { name: "request".into(), content_type: "application/json".into(), content: b"{}".to_vec(), filename: None },
-            Part { name: "asset-0".into(), content_type: "image/png".into(), content: vec![1,2,3], filename: Some("asset-0".into()) },
+            Part {
+                name: "request".into(),
+                content_type: "application/json".into(),
+                content: b"{}".to_vec(),
+                filename: None,
+            },
+            Part {
+                name: "asset-0".into(),
+                content_type: "image/png".into(),
+                content: vec![1, 2, 3],
+                filename: Some("asset-0".into()),
+            },
         ];
         let (ct, body) = encode_multipart(&parts);
         assert!(ct.starts_with("multipart/form-data; boundary="));

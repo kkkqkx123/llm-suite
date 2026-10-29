@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use llm_suite_decision::mock::MockDecisionProvider;
 use llm_suite_decision::runner::{
-    AsyncDecisionCandidate, AsyncDecisionRunner, AsyncExecute, DecisionRunner, DecisionRunnerParams,
-    SyncDecisionCandidate, SyncExecutorOutput,
+    AsyncDecisionCandidate, AsyncDecisionRunner, AsyncExecute, DecisionRunner,
+    DecisionRunnerParams, SyncDecisionCandidate, SyncExecutorOutput,
 };
 use llm_suite_decision::types::{
     ChoiceProbability, ChoiceValue, DecisionAnswer, DecisionResponse, DecisionUsage, NamedAnswer,
@@ -120,9 +120,15 @@ async fn sync_runner_executes_action_then_done() {
         safety_identifier: None,
         state: None,
     };
-    let err = runner.run(&provider, params, 2, None, None).await.unwrap_err();
+    let err = runner
+        .run(&provider, params, 2, None, None)
+        .await
+        .unwrap_err();
     // step_limit because action repeatedly selected until max_steps
-    assert_eq!(err.reason, llm_suite_decision::runner::DecisionRunnerReason::StepLimit);
+    assert_eq!(
+        err.reason,
+        llm_suite_decision::runner::DecisionRunnerReason::StepLimit
+    );
     assert!(executed.load(std::sync::atomic::Ordering::SeqCst) >= 1);
 }
 
@@ -196,9 +202,7 @@ async fn sync_runner_async_executor_error() {
                 SyncDecisionCandidate::Action {
                     id: "act".into(),
                     description: "do".into(),
-                    execute: Arc::new(|| {
-                        SyncExecutorOutput::Awaitable(Box::pin(async {}))
-                    }),
+                    execute: Arc::new(|| SyncExecutorOutput::Awaitable(Box::pin(async {}))),
                 },
                 SyncDecisionCandidate::Done {
                     id: "done".into(),
@@ -214,8 +218,14 @@ async fn sync_runner_async_executor_error() {
         safety_identifier: None,
         state: None,
     };
-    let err = runner.run(&provider, params, 5, None, None).await.unwrap_err();
-    assert_eq!(err.reason, llm_suite_decision::runner::DecisionRunnerReason::AsyncExecutor);
+    let err = runner
+        .run(&provider, params, 5, None, None)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.reason,
+        llm_suite_decision::runner::DecisionRunnerReason::AsyncExecutor
+    );
 }
 
 #[tokio::test]
@@ -242,19 +252,21 @@ async fn async_runner_runs() {
 
     let runner = AsyncDecisionRunner::new(
         || Box::pin(async { "obs".to_string() }),
-        |_obs| Box::pin(async {
-            vec![
-                AsyncDecisionCandidate::Action {
-                    id: "act".into(),
-                    description: "do".into(),
-                    execute: Arc::new(|| Box::pin(async {})),
-                },
-                AsyncDecisionCandidate::Done {
-                    id: "done".into(),
-                    description: "finish".into(),
-                },
-            ]
-        }),
+        |_obs| {
+            Box::pin(async {
+                vec![
+                    AsyncDecisionCandidate::Action {
+                        id: "act".into(),
+                        description: "do".into(),
+                        execute: Arc::new(|| Box::pin(async {})),
+                    },
+                    AsyncDecisionCandidate::Done {
+                        id: "done".into(),
+                        description: "finish".into(),
+                    },
+                ]
+            })
+        },
         None::<fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>>,
     );
 
@@ -273,16 +285,38 @@ async fn invalid_candidates() {
     let provider = MockDecisionProvider::new("m");
     let runner = DecisionRunner::new(
         || "obs".to_string(),
-        |_obs| vec![SyncDecisionCandidate::Done { id: "done".into(), description: "finish".into() }], // only done ok actually valid
+        |_obs| {
+            vec![SyncDecisionCandidate::Done {
+                id: "done".into(),
+                description: "finish".into(),
+            }]
+        }, // only done ok actually valid
         None::<fn(String) -> bool>,
     );
     // invalid: no done
     let runner2 = DecisionRunner::new(
         || "obs".to_string(),
-        |_obs| vec![SyncDecisionCandidate::Action { id: "act".into(), description: "do".into(), execute: Arc::new(|| SyncExecutorOutput::Completed) }],
+        |_obs| {
+            vec![SyncDecisionCandidate::Action {
+                id: "act".into(),
+                description: "do".into(),
+                execute: Arc::new(|| SyncExecutorOutput::Completed),
+            }]
+        },
         None::<fn(String) -> bool>,
     );
-    let params = DecisionRunnerParams { model: "m".into(), input: "task".into(), state: None, safety_identifier: None };
-    let err = runner2.run(&provider, params, 5, None, None).await.unwrap_err();
-    assert_eq!(err.reason, llm_suite_decision::runner::DecisionRunnerReason::InvalidCandidates);
+    let params = DecisionRunnerParams {
+        model: "m".into(),
+        input: "task".into(),
+        state: None,
+        safety_identifier: None,
+    };
+    let err = runner2
+        .run(&provider, params, 5, None, None)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.reason,
+        llm_suite_decision::runner::DecisionRunnerReason::InvalidCandidates
+    );
 }

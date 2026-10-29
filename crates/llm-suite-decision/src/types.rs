@@ -272,7 +272,11 @@ pub fn validate_request(request: &DecisionRequest) -> Result<(), DecisionError> 
                     }
                 }
             }
-            DecisionQuestion::Choice { instructions, choices, .. } => {
+            DecisionQuestion::Choice {
+                instructions,
+                choices,
+                ..
+            } => {
                 if choices.is_empty() || choices.len() > 255 {
                     return Err(DecisionError::InvalidRequest(
                         "choice requires 2 to 255 options".into(),
@@ -294,7 +298,11 @@ pub fn validate_request(request: &DecisionRequest) -> Result<(), DecisionError> 
                     }
                 }
             }
-            DecisionQuestion::Score { instructions, levels, .. } => {
+            DecisionQuestion::Score {
+                instructions,
+                levels,
+                ..
+            } => {
                 if levels.is_empty() {
                     return Err(DecisionError::InvalidRequest(
                         "score requires at least one level".into(),
