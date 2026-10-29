@@ -320,6 +320,9 @@ mod tests {
             timeout_ms: None,
             prompt_caching: None,
             cached_content: None,
+            max_retries: None,
+            retry_delay_ms: None,
+            extra_headers: None,
         };
         // system: 13 letters * 0.25 + 3 spaces * 0.5 = 4.75 -> 5 + 4 = 9;
         // user: 2 + 4 = 6; total 15

@@ -70,16 +70,20 @@ pub fn build_post_json_request(
         .map_err(crate::error::LlmError::HttpError)
 }
 
-/// Apply authentication, custom headers and query parameters to the request.
+/// Apply authentication, identity, custom headers and query parameters to
+/// the request.
 ///
 /// Auth type resolution: `profile.auth_type` wins when set ("native" /
 /// "bearer" / "x-api-key" / "x-goog-api-key"), otherwise `default_auth` is
 /// used. "native" maps to the format-specific header (x-api-key for Anthropic,
 /// x-goog-api-key for Gemini native, Bearer otherwise).
 ///
+/// Header precedence per name: identity defaults (`User-Agent` /
+/// `HTTP-Referer` / `X-Title`) first, then `headers`, then `custom_headers`.
 /// Headers are written once per name: `reqwest` appends duplicate header
-/// values instead of replacing them, so the profile headers are merged into a
-/// single table (`custom_headers` wins over `headers`) before they are set.
+/// values instead of replacing them, so every layer merges into a single
+/// table before it is set. Per-request `LlmRequest.extra_headers` are
+/// applied later by the client and win over all of these.
 pub fn apply_auth_and_headers(
     req_builder: reqwest::RequestBuilder,
     profile: &LlmProfile,
@@ -129,10 +133,22 @@ pub fn apply_auth_and_headers(
 
 /// The profile headers as a single name → value table.
 ///
-/// `custom_headers` overrides `headers` for the same name: the request must
-/// carry exactly one value per header name.
+/// Layering per name: identity defaults first, then `headers`, then
+/// `custom_headers` (most explicit wins). The request must carry exactly one
+/// value per header name.
 fn merged_profile_headers(profile: &LlmProfile) -> Vec<(String, String)> {
     let mut merged: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    if let Some(identity) = profile.identity.as_ref() {
+        if let Some(user_agent) = identity.user_agent.as_deref() {
+            merged.insert("User-Agent".to_string(), user_agent.to_string());
+        }
+        if let Some(app_url) = identity.app_url.as_deref() {
+            merged.insert("HTTP-Referer".to_string(), app_url.to_string());
+        }
+        if let Some(app_name) = identity.app_name.as_deref() {
+            merged.insert("X-Title".to_string(), app_name.to_string());
+        }
+    }
     if let Some(headers) = &profile.headers {
         for (key, value) in headers {
             merged.insert(key.clone(), value.as_str().unwrap_or("").to_string());
@@ -243,6 +259,70 @@ mod tests {
             .unwrap();
         assert_eq!(req.headers().get("x-custom").unwrap(), "v1");
         assert_eq!(req.url().query().unwrap(), "api-version=2024-01");
+    }
+
+    #[test]
+    fn identity_headers_are_injected_once() {
+        let mut profile = profile_with(None);
+        profile.identity = Some(llm_suite_types::llm::LlmIdentity {
+            user_agent: Some("my-app/1.0".to_string()),
+            app_name: Some("my app".to_string()),
+            app_url: Some("https://example.com".to_string()),
+        });
+        let req =
+            reqwest::Client::new().request(reqwest::Method::POST, "https://example.com/messages");
+        let req = apply_auth_and_headers(req, &profile, "bearer")
+            .build()
+            .unwrap();
+        assert_eq!(req.headers().get("User-Agent").unwrap(), "my-app/1.0");
+        assert_eq!(req.headers().get("X-Title").unwrap(), "my app");
+        assert_eq!(
+            req.headers().get("HTTP-Referer").unwrap(),
+            "https://example.com"
+        );
+    }
+
+    #[test]
+    fn custom_headers_win_over_identity_defaults() {
+        let mut profile = profile_with(None);
+        profile.identity = Some(llm_suite_types::llm::LlmIdentity {
+            user_agent: Some("identity/1.0".to_string()),
+            app_name: None,
+            app_url: None,
+        });
+        profile.custom_headers = Some(
+            [("User-Agent".to_string(), serde_json::json!("explicit/2.0"))]
+                .into_iter()
+                .collect(),
+        );
+        let req =
+            reqwest::Client::new().request(reqwest::Method::POST, "https://example.com/messages");
+        let req = apply_auth_and_headers(req, &profile, "bearer")
+            .build()
+            .unwrap();
+        let values: Vec<&str> = req
+            .headers()
+            .get_all("User-Agent")
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect();
+        assert_eq!(
+            values,
+            vec!["explicit/2.0"],
+            "explicit headers must win over identity defaults"
+        );
+    }
+
+    #[test]
+    fn absent_identity_sends_no_identity_header() {
+        let req =
+            reqwest::Client::new().request(reqwest::Method::POST, "https://example.com/messages");
+        let req = apply_auth_and_headers(req, &profile_with(None), "bearer")
+            .build()
+            .unwrap();
+        assert!(req.headers().get("User-Agent").is_none());
+        assert!(req.headers().get("X-Title").is_none());
+        assert!(req.headers().get("HTTP-Referer").is_none());
     }
 
     #[test]

@@ -49,12 +49,34 @@ impl LlmGateway {
         let stored_profile = self.resolve_profile(&request.profile_id)?;
         // Resolve auth first: the effective profile carries the injected
         // key/headers/base_url, and the client cache key is computed from
-        // it so a rotated credential rebuilds the transport.
+        // it so a rotated credential rebuilds the transport. A per-profile
+        // env overlay (Phase 4) shadows the registry context for this
+        // resolution only; explicit keys and stored credentials still win
+        // over it per the documented resolve order.
         let (profile, is_subscription) = match self.auth.as_ref() {
-            Some(registry) => match registry.apply(&stored_profile).await.map_err(auth_error)? {
-                Some(resolved) => (resolved.profile, resolved.is_subscription),
-                None => (stored_profile, false),
-            },
+            Some(registry) => {
+                let overlay: Option<
+                    std::sync::Arc<dyn llm_suite_auth::AuthContext>,
+                > = stored_profile.env.as_ref().filter(|map| !map.is_empty()).map(|map| {
+                    std::sync::Arc::new(llm_suite_auth::OverlayAuthContext::new(
+                        registry.context().clone(),
+                        map.clone(),
+                    )) as std::sync::Arc<dyn llm_suite_auth::AuthContext>
+                });
+                let resolved = match overlay.as_ref() {
+                    Some(context) => {
+                        registry
+                            .apply_with_context(&stored_profile, context)
+                            .await
+                            .map_err(auth_error)?
+                    }
+                    None => registry.apply(&stored_profile).await.map_err(auth_error)?,
+                };
+                match resolved {
+                    Some(resolved) => (resolved.profile, resolved.is_subscription),
+                    None => (stored_profile, false),
+                }
+            }
             None => (stored_profile, false),
         };
         let effective = merge_request(request, &profile)?;

@@ -119,6 +119,22 @@ pub struct LlmProfile {
     /// automatic detection. `None` keeps the codec defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat: Option<super::ProviderCompat>,
+    /// Optional client identity headers (`User-Agent` / `HTTP-Referer` /
+    /// `X-Title`). Explicit fields win per field over the referenced
+    /// provider definition. `None` sends no identity header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<super::LlmIdentity>,
+    /// Optional connection-level HTTP transport tuning (connect timeout,
+    /// TLS opt-outs). Explicit fields win per field over the referenced
+    /// provider definition. `None` keeps the default client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<super::LlmHttpTransport>,
+    /// Optional per-profile environment overlay shadowing the process
+    /// environment during auth resolution (keyed by variable name). Unioned
+    /// with the definition map; profile keys win. Never carries secrets
+    /// itself beyond what the host places there for tests or sandboxes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<std::collections::HashMap<String, String>>,
 }
 
 /// Reference from a profile to a stored credential.

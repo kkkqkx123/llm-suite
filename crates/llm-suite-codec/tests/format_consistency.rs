@@ -48,6 +48,9 @@ fn profile(format: LlmFormat, model: &str) -> LlmProfile {
         circuit_breaker: None,
         auth: None,
         compat: None,
+        identity: None,
+        transport: None,
+        env: None,
     }
 }
 
@@ -108,6 +111,9 @@ fn conversation() -> LlmRequest {
         timeout_ms: None,
         prompt_caching: None,
         cached_content: None,
+        max_retries: None,
+        retry_delay_ms: None,
+        extra_headers: None,
     }
 }
 
@@ -364,6 +370,9 @@ fn empty_request() -> LlmRequest {
         timeout_ms: None,
         prompt_caching: None,
         cached_content: None,
+        max_retries: None,
+        retry_delay_ms: None,
+        extra_headers: None,
     }
 }
 
@@ -702,6 +711,9 @@ fn the_response_envelope_reports_the_reasoning_the_same_way() {
         timeout_ms: None,
         prompt_caching: None,
         cached_content: None,
+        max_retries: None,
+        retry_delay_ms: None,
+        extra_headers: None,
     };
 
     let bodies = [

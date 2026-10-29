@@ -131,6 +131,32 @@ pub fn apply_provider_defaults(
         merged.merge_over(profile_compat);
         *profile_compat = merged;
     }
+    if profile.identity.is_none() {
+        profile.identity = definition.identity.clone();
+    } else if let (Some(profile_identity), Some(definition_identity)) = (
+        profile.identity.as_mut(),
+        definition.identity.as_ref(),
+    ) {
+        let mut merged = definition_identity.clone();
+        merged.merge_over(profile_identity);
+        *profile_identity = merged;
+    }
+    if profile.transport.is_none() {
+        profile.transport = definition.transport.clone();
+    } else if let (Some(profile_transport), Some(definition_transport)) = (
+        profile.transport.as_mut(),
+        definition.transport.as_ref(),
+    ) {
+        let mut merged = definition_transport.clone();
+        merged.merge_over(profile_transport);
+        *profile_transport = merged;
+    }
+    if let Some(definition_env) = definition.env.clone() {
+        let env = profile.env.get_or_insert_with(Default::default);
+        for (key, value) in definition_env {
+            env.entry(key).or_insert(value);
+        }
+    }
     if profile.compat.is_none() {
         let detected = llm_suite_types::llm::ProviderCompat::detect(
             profile
@@ -197,6 +223,9 @@ mod tests {
             circuit_breaker: None,
             auth: None,
             compat: None,
+            identity: None,
+            transport: None,
+            env: None,
         }
     }
 
@@ -221,6 +250,9 @@ mod tests {
             rate_limit: None,
             auth: None,
             compat: None,
+            identity: None,
+            transport: None,
+            env: None,
         }
     }
 
@@ -291,6 +323,80 @@ mod tests {
         profile.proxy = Some("http://override.test:3128".to_string());
         let merged = apply_provider_defaults(profile, &registry).unwrap();
         assert_eq!(merged.proxy.as_deref(), Some("http://override.test:3128"));
+    }
+
+    #[test]
+    fn identity_merges_per_field_with_profile_winning() {
+        let registry = ProviderDefinitionRegistry::new();
+        let mut declared = definition();
+        declared.identity = Some(llm_suite_types::llm::LlmIdentity {
+            user_agent: Some("acme/1.0".to_string()),
+            app_name: Some("acme app".to_string()),
+            app_url: None,
+        });
+        registry.register(declared).unwrap();
+
+        let mut pending = profile("p1");
+        pending.identity = Some(llm_suite_types::llm::LlmIdentity {
+            user_agent: None,
+            app_name: Some("profile app".to_string()),
+            app_url: Some("https://profile.example".to_string()),
+        });
+        let merged = apply_provider_defaults(pending, &registry).unwrap();
+        let identity = merged.identity.expect("identity must merge");
+        assert_eq!(identity.user_agent.as_deref(), Some("acme/1.0"));
+        assert_eq!(identity.app_name.as_deref(), Some("profile app"));
+        assert_eq!(
+            identity.app_url.as_deref(),
+            Some("https://profile.example")
+        );
+    }
+
+    #[test]
+    fn transport_merges_per_field_with_profile_winning() {
+        let registry = ProviderDefinitionRegistry::new();
+        let mut declared = definition();
+        declared.transport = Some(llm_suite_types::llm::LlmHttpTransport {
+            connect_timeout_secs: Some(3),
+            danger_accept_invalid_certs: None,
+        });
+        registry.register(declared).unwrap();
+
+        let mut pending = profile("p1");
+        pending.transport = Some(llm_suite_types::llm::LlmHttpTransport {
+            connect_timeout_secs: None,
+            danger_accept_invalid_certs: Some(true),
+        });
+        let merged = apply_provider_defaults(pending, &registry).unwrap();
+        let transport = merged.transport.expect("transport must merge");
+        assert_eq!(transport.connect_timeout_secs, Some(3));
+        assert_eq!(transport.danger_accept_invalid_certs, Some(true));
+    }
+
+    #[test]
+    fn env_unions_with_profile_keys_winning() {
+        let registry = ProviderDefinitionRegistry::new();
+        let mut declared = definition();
+        declared.env = Some(
+            [
+                ("SHARED".to_string(), "from-definition".to_string()),
+                ("DEF_ONLY".to_string(), "d".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        registry.register(declared).unwrap();
+
+        let mut pending = profile("p1");
+        pending.env = Some(
+            [("SHARED".to_string(), "from-profile".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        let merged = apply_provider_defaults(pending, &registry).unwrap();
+        let env = merged.env.expect("env must merge");
+        assert_eq!(env.get("SHARED").map(String::as_str), Some("from-profile"));
+        assert_eq!(env.get("DEF_ONLY").map(String::as_str), Some("d"));
     }
 
     #[test]

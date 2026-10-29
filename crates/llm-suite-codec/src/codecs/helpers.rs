@@ -309,6 +309,9 @@ mod tests {
             circuit_breaker: None,
             auth: None,
             compat: None,
+            identity: None,
+            transport: None,
+            env: None,
         }
     }
 

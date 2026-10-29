@@ -38,7 +38,17 @@ pub struct LlmClientImpl {
     /// leaf: the observer is a plain callback the gateway wires to its own
     /// metrics sink.
     retry_observer: Option<RetryObserver>,
+    /// Optional per-request fetch hook (Phase 4): rewrites the codec-built
+    /// `reqwest::Request` before it is sent. A plain function pointer, so the
+    /// hot path pays one branch and no dynamic dispatch. Runs after
+    /// `extra_headers` so it observes the final headers; intended for
+    /// tests and middleware that cannot be expressed as headers.
+    fetch_hook: Option<FetchHook>,
 }
+
+/// Rewrites a codec-built request before it is sent (custom fetch escape
+/// hatch). Plain function pointer: `Copy`, no dynamic dispatch.
+pub type FetchHook = fn(reqwest::Request) -> reqwest::Request;
 
 /// Callback invoked with the descriptor of every scheduled retry attempt.
 pub type RetryObserver = Arc<dyn Fn(&RetryAttemptDescriptor) + Send + Sync>;
@@ -50,12 +60,19 @@ impl LlmClientImpl {
             codec,
             profile,
             retry_observer: None,
+            fetch_hook: None,
         }
     }
 
     /// Attach an observer notified on every scheduled retry attempt.
     pub fn with_retry_observer(mut self, observer: RetryObserver) -> Self {
         self.retry_observer = Some(observer);
+        self
+    }
+
+    /// Attach a fetch hook rewriting the codec-built request before send.
+    pub fn with_fetch_hook(mut self, hook: FetchHook) -> Self {
+        self.fetch_hook = Some(hook);
         self
     }
 
@@ -74,11 +91,52 @@ impl LlmClientImpl {
         Duration::from_secs(self.profile.timeout.unwrap_or(60))
     }
 
-    fn retry_policy(&self) -> RetryPolicy {
+    /// Retry policy for one request: per-request overrides win over the
+    /// profile defaults for that call only. A request without overrides
+    /// behaves exactly like the legacy profile-only policy.
+    fn retry_policy_for(&self, request: &LlmRequest) -> RetryPolicy {
         RetryPolicy {
-            max_retries: self.max_retries(),
-            base_delay_ms: self.profile.retry_delay.unwrap_or(1000),
+            max_retries: request.max_retries.unwrap_or_else(|| self.max_retries()),
+            base_delay_ms: request
+                .retry_delay_ms
+                .unwrap_or_else(|| self.profile.retry_delay.unwrap_or(1000)),
             exponential_backoff: true,
+        }
+    }
+
+    /// Merge per-request `extra_headers` into a codec-built request, then
+    /// apply the fetch hook. Ordering: codec auth/profile/identity headers
+    /// first, request headers second (winning per name), fetch hook last.
+    /// Invalid header names/values are skipped with a warning so one bad
+    /// override cannot fail the whole request at build time.
+    fn finalize_request(
+        &self,
+        mut http_request: reqwest::Request,
+        request: &LlmRequest,
+    ) -> reqwest::Request {
+        if let Some(extra) = request.extra_headers.as_ref() {
+            for (name, value) in extra {
+                let rendered = value.as_str().unwrap_or("");
+                match (
+                    reqwest::header::HeaderName::from_bytes(name.as_bytes()),
+                    reqwest::header::HeaderValue::from_str(rendered),
+                ) {
+                    (Ok(header_name), Ok(header_value)) => {
+                        http_request.headers_mut().insert(header_name, header_value);
+                    }
+                    _ => {
+                        tracing::warn!(
+                            header_name = name.as_str(),
+                            "dropping invalid per-request extra header"
+                        );
+                    }
+                }
+            }
+        }
+        if let Some(hook) = self.fetch_hook {
+            hook(http_request)
+        } else {
+            http_request
         }
     }
 
@@ -158,7 +216,8 @@ impl LlmClientImpl {
     ) -> LlmResult<LlmResponseType> {
         let start = Instant::now();
 
-        let http_request = self.codec.build_request(request, &self.profile)?;
+        let http_request =
+            self.finalize_request(self.codec.build_request(request, &self.profile)?, request);
 
         let timeout_dur = self.build_timeout();
         let timeout_ms = timeout_dur.as_millis() as u64;
@@ -204,7 +263,10 @@ impl LlmClientImpl {
         let mut stream_request = request.clone();
         stream_request.stream = Some(true);
 
-        let http_request = self.codec.build_request(&stream_request, &self.profile)?;
+        let http_request = self.finalize_request(
+            self.codec.build_request(&stream_request, &self.profile)?,
+            &stream_request,
+        );
 
         let timeout_dur = self.build_timeout();
         let timeout_ms = timeout_dur.as_millis() as u64;
@@ -257,6 +319,7 @@ impl LlmClientImpl {
             .codec
             .build_count_tokens_request(request, &self.profile)?
         {
+            let http_request = self.finalize_request(http_request, request);
             let timeout_dur = self.build_timeout();
             let timeout_ms = timeout_dur.as_millis() as u64;
             let response = if let Some(ref cancel) = cancel {
@@ -324,7 +387,9 @@ impl LlmClient for LlmClientImpl {
         // through hook handlers, gating through approval, post-processing
         // through trigger templates subscribed to the retry event. The log
         // line keeps attempts visible even with zero subscribers.
-        let policy = self.retry_policy();
+        // Per-request `max_retries` / `retry_delay_ms` win over the profile
+        // defaults for this call only.
+        let policy = self.retry_policy_for(request);
         let cancel_token = cancel.as_ref().map(|c| (c, LlmError::Cancelled));
         llm_suite_common::retry::execute_with_retry_observed(
             Some(&policy),
@@ -354,7 +419,9 @@ impl LlmClient for LlmClientImpl {
         request: &LlmRequest,
         cancel: Option<CancellationToken>,
     ) -> LlmResult<Box<dyn MessageStream>> {
-        let policy = self.retry_policy();
+        // Per-request `max_retries` / `retry_delay_ms` win over the profile
+        // defaults for this call only.
+        let policy = self.retry_policy_for(request);
         let cancel_token = cancel.as_ref().map(|c| (c, LlmError::Cancelled));
         llm_suite_common::retry::execute_with_retry_observed(
             Some(&policy),
@@ -423,6 +490,9 @@ mod tests {
             circuit_breaker: None,
             auth: None,
             compat: None,
+            identity: None,
+            transport: None,
+            env: None,
         }
     }
 
@@ -535,13 +605,14 @@ mod tests {
 
     #[test]
     fn retry_parameters_use_defaults_and_overrides() {
+        let bare_request = test_request("p1");
         let client = LlmClientImpl::new(
             reqwest::Client::new(),
             llm_suite_codec::create_codec(&LlmFormat::OpenaiChat).unwrap(),
             profile("p1"),
         );
         assert_eq!(client.max_retries(), 3);
-        let policy = client.retry_policy();
+        let policy = client.retry_policy_for(&bare_request);
         assert_eq!(policy.max_retries, 3);
         assert_eq!(policy.base_delay_ms, 1000);
         assert!(policy.exponential_backoff);
@@ -555,10 +626,114 @@ mod tests {
             p,
         );
         assert_eq!(client.max_retries(), 5);
-        let policy = client.retry_policy();
+        let policy = client.retry_policy_for(&bare_request);
         assert_eq!(policy.max_retries, 5);
         assert_eq!(policy.base_delay_ms, 250);
         assert!(policy.exponential_backoff);
+    }
+
+    #[test]
+    fn per_request_retry_overrides_win_over_profile() {
+        let mut p = profile("p1");
+        p.max_retries = Some(5);
+        p.retry_delay = Some(250);
+        let client = LlmClientImpl::new(
+            reqwest::Client::new(),
+            llm_suite_codec::create_codec(&LlmFormat::OpenaiChat).unwrap(),
+            p,
+        );
+        let mut request = test_request("p1");
+        request.max_retries = Some(1);
+        request.retry_delay_ms = Some(50);
+        let policy = client.retry_policy_for(&request);
+        assert_eq!(policy.max_retries, 1);
+        assert_eq!(policy.base_delay_ms, 50);
+
+        let bare = test_request("p1");
+        let fallback = client.retry_policy_for(&bare);
+        assert_eq!(fallback.max_retries, 5);
+        assert_eq!(fallback.base_delay_ms, 250);
+    }
+
+    #[test]
+    fn extra_headers_merge_and_fetch_hook_runs_last() {
+        fn hook(mut req: reqwest::Request) -> reqwest::Request {
+            req.headers_mut().insert(
+                reqwest::header::HeaderName::from_static("x-hook"),
+                reqwest::header::HeaderValue::from_static("ran"),
+            );
+            req
+        }
+        let client = LlmClientImpl::new(
+            reqwest::Client::new(),
+            llm_suite_codec::create_codec(&LlmFormat::OpenaiChat).unwrap(),
+            profile("p1"),
+        )
+        .with_fetch_hook(hook);
+        let mut request = test_request("p1");
+        request.extra_headers = Some(
+            [("x-extra".to_string(), serde_json::json!("v1"))]
+                .into_iter()
+                .collect(),
+        );
+        let base = reqwest::Client::new()
+            .request(reqwest::Method::POST, "https://example.com/v1/chat/completions")
+            .build()
+            .unwrap();
+        let finalized = client.finalize_request(base, &request);
+        assert_eq!(finalized.headers().get("x-extra").unwrap(), "v1");
+        assert_eq!(
+            finalized.headers().get("x-hook").unwrap(),
+            "ran",
+            "the fetch hook runs after extra headers"
+        );
+    }
+
+    #[test]
+    fn invalid_extra_headers_are_dropped() {
+        let client = LlmClientImpl::new(
+            reqwest::Client::new(),
+            llm_suite_codec::create_codec(&LlmFormat::OpenaiChat).unwrap(),
+            profile("p1"),
+        );
+        let mut request = test_request("p1");
+        request.extra_headers = Some(
+            [("not a header name".to_string(), serde_json::json!("v1"))]
+                .into_iter()
+                .collect(),
+        );
+        let base = reqwest::Client::new()
+            .request(reqwest::Method::POST, "https://example.com/v1/chat/completions")
+            .build()
+            .unwrap();
+        let finalized = client.finalize_request(base, &request);
+        assert!(
+            finalized.headers().get("not a header name").is_none(),
+            "invalid overrides must not fail the request"
+        );
+    }
+
+    fn test_request(profile_id: &str) -> LlmRequest {
+        LlmRequest {
+            profile_id: profile_id.to_string(),
+            messages: Vec::new(),
+            parameters: None,
+            generation: None,
+            tools: None,
+            tool_call_protocol: None,
+            locked_tool_call_protocol: None,
+            violation_policy: None,
+            execution_id: None,
+            stream: None,
+            dead_loop_detection: None,
+            protocol_auto_converted: None,
+            timeout_ms: None,
+            prompt_caching: None,
+            cached_content: None,
+            max_retries: None,
+            retry_delay_ms: None,
+            extra_headers: None,
+        }
     }
 
     #[test]

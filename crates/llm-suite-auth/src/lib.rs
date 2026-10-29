@@ -27,8 +27,8 @@ pub mod store;
 pub mod file_store;
 
 pub use auth::{
-    ApiKeyAuth, AuthContext, AuthSurfaceInfo, ModelAuth, OAuthAuth, ProviderAuth, ResolveInput,
-    StdAuthContext,
+    ApiKeyAuth, AuthContext, AuthSurfaceInfo, ModelAuth, OAuthAuth, OverlayAuthContext,
+    ProviderAuth, ResolveInput, StdAuthContext,
 };
 pub use credential::{ApiKeyCredential, AuthMethod, Credential, CredentialInfo, OAuthCredential};
 pub use error::{AuthError, AuthResult};

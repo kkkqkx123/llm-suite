@@ -62,6 +62,10 @@ pub struct LlmGateway {
     /// dynamic dispatch). Empty by default; the hot path checks
     /// `is_empty` once per call.
     probe: probe::RequestProbe,
+    /// Optional custom fetch hook rewriting the codec-built request before
+    /// send (Phase 4). A plain function pointer wired into every transport
+    /// client the gateway builds; `None` keeps the direct send path.
+    fetch_hook: Option<llm_suite_client::client::FetchHook>,
 }
 
 impl LlmGateway {
@@ -86,6 +90,7 @@ impl LlmGateway {
             pricing_resolver: None,
             auth: None,
             probe: probe::RequestProbe::default(),
+            fetch_hook: None,
         }
     }
 
@@ -113,6 +118,14 @@ impl LlmGateway {
     /// The currently attached request probe (empty by default).
     pub fn request_probe(&self) -> &probe::RequestProbe {
         &self.probe
+    }
+
+    /// Attach a custom fetch hook rewriting the codec-built request before
+    /// send (tests, header-injecting middleware). Runs after per-request
+    /// `extra_headers`; payload mutation stays on `custom_body`.
+    pub fn with_fetch_hook(mut self, hook: llm_suite_client::client::FetchHook) -> Self {
+        self.fetch_hook = Some(hook);
+        self
     }
 
     /// The codec registry: register custom formats here before the
@@ -203,6 +216,9 @@ mod tests {
             circuit_breaker: None,
             auth: None,
             compat: None,
+            identity: None,
+            transport: None,
+            env: None,
         }
     }
 
@@ -223,6 +239,9 @@ mod tests {
             timeout_ms: None,
             prompt_caching: None,
             cached_content: None,
+            max_retries: None,
+            retry_delay_ms: None,
+            extra_headers: None,
         }
     }
 
@@ -350,6 +369,9 @@ mod tests {
             rate_limit: None,
             auth: None,
             compat: None,
+            identity: None,
+            transport: None,
+            env: None,
         }
     }
 

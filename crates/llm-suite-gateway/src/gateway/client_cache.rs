@@ -21,15 +21,42 @@ pub fn client_cache_prefix(profile_id: &str) -> String {
 /// switching proxies rebuilds the transport instead of reusing a stale
 /// client. Auth-derived fields are folded in as a stable non-secret digest
 /// so an OAuth refresh (or key rotation) rebuilds the transport instead of
-/// reusing a client bound to the old credential.
+/// reusing a client bound to the old credential. Connection-level transport
+/// knobs (connect timeout, invalid-certificate opt-in) are part of the key
+/// for the same reason.
+///
+/// Identity headers, the env overlay and per-request overrides are *not* in
+/// the key: identity/env only affect request headers (already covered via
+/// the auth digest when they change the resolved credential), and
+/// per-request overrides apply after the cached client is fetched.
 pub fn client_cache_key(profile: &LlmProfile) -> String {
     format!(
-        "{}{}::{}::{}::{}",
+        "{}{}::{}::{}::{}::{}",
         client_cache_prefix(&profile.id),
         profile.model,
         profile.proxy.as_deref().unwrap_or(""),
         profile.no_proxy.as_deref().unwrap_or(&[]).join(","),
-        auth_fingerprint(profile)
+        auth_fingerprint(profile),
+        transport_fingerprint(profile)
+    )
+}
+
+/// Stable rendering of the connection-level transport knobs.
+///
+/// Only fields that change the built `reqwest::Client` belong here; the
+/// gateway logs a warning when the invalid-certificate opt-in builds such
+/// a client.
+fn transport_fingerprint(profile: &LlmProfile) -> String {
+    let transport = profile.transport.as_ref();
+    format!(
+        "ct={}::insecure={}",
+        transport
+            .and_then(|t| t.connect_timeout_secs)
+            .map(|secs| secs.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        transport
+            .and_then(|t| t.danger_accept_invalid_certs)
+            .unwrap_or(false)
     )
 }
 
@@ -103,10 +130,24 @@ impl LlmGateway {
                     .and_then(|def| def.no_proxy.clone())
             })
             .unwrap_or_default();
-        let client = llm_suite_proxy::build_http_client(
+        let transport = profile.transport.clone().unwrap_or_default();
+        if transport.danger_accept_invalid_certs.unwrap_or(false) {
+            tracing::warn!(
+                profile_id = profile.id.as_str(),
+                "building HTTP client with invalid TLS certificates accepted; \
+                 enable only for local gateways"
+            );
+        }
+        let client = llm_suite_proxy::build_http_client_with_options(
             profile.timeout.unwrap_or(60),
             profile.proxy.as_deref(),
             &no_proxy,
+            &llm_suite_proxy::HttpTransportOptions {
+                connect_timeout_secs: transport.connect_timeout_secs,
+                danger_accept_invalid_certs: transport
+                    .danger_accept_invalid_certs
+                    .unwrap_or(false),
+            },
         )
         .map_err(|err| LlmError::ProxyError(err.to_string()))?;
 
@@ -127,7 +168,10 @@ impl LlmGateway {
         codec: Arc<dyn llm_suite_codec::LlmCodec>,
         profile: &LlmProfile,
     ) -> LlmClientImpl {
-        let impl_client = LlmClientImpl::new(client, codec, profile.clone());
+        let mut impl_client = LlmClientImpl::new(client, codec, profile.clone());
+        if let Some(hook) = self.fetch_hook {
+            impl_client = impl_client.with_fetch_hook(hook);
+        }
         let Some(metrics) = self.token_metrics.as_ref() else {
             return impl_client;
         };
@@ -197,6 +241,9 @@ mod tests {
             circuit_breaker: None,
             auth: None,
             compat: None,
+            identity: None,
+            transport: None,
+            env: None,
         }
     }
 
@@ -284,5 +331,54 @@ mod tests {
         let a = test_profile();
         let b = test_profile();
         assert_eq!(client_cache_key(&a), client_cache_key(&b));
+    }
+
+    #[test]
+    fn cache_key_changes_when_transport_knobs_rotate() {
+        let base = test_profile();
+        let mut with_timeout = base.clone();
+        with_timeout.transport =
+            Some(llm_suite_types::llm::LlmHttpTransport {
+                connect_timeout_secs: Some(2),
+                danger_accept_invalid_certs: None,
+            });
+        assert_ne!(
+            client_cache_key(&base),
+            client_cache_key(&with_timeout),
+            "connect timeout must rebuild the transport"
+        );
+
+        let mut insecure = base.clone();
+        insecure.transport = Some(llm_suite_types::llm::LlmHttpTransport {
+            connect_timeout_secs: None,
+            danger_accept_invalid_certs: Some(true),
+        });
+        assert_ne!(
+            client_cache_key(&base),
+            client_cache_key(&insecure),
+            "the invalid-certificate opt-in must rebuild the transport"
+        );
+    }
+
+    #[test]
+    fn cache_key_ignores_identity_and_env() {
+        let base = test_profile();
+        let mut attributed = base.clone();
+        attributed.identity = Some(llm_suite_types::llm::LlmIdentity {
+            user_agent: Some("my-app/1.0".to_string()),
+            app_name: Some("my app".to_string()),
+            app_url: None,
+        });
+        attributed.env = Some(
+            [("TEST_KEY".to_string(), "sk-overlay".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        assert_eq!(
+            client_cache_key(&base),
+            client_cache_key(&attributed),
+            "identity headers and the env overlay are request-scoped, \
+             not connection-scoped"
+        );
     }
 }

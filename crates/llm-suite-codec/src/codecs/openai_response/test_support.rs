@@ -33,6 +33,9 @@ pub fn count_profile() -> LlmProfile {
         circuit_breaker: None,
         auth: None,
         compat: None,
+        identity: None,
+        transport: None,
+        env: None,
     }
 }
 
@@ -64,6 +67,9 @@ pub fn count_request() -> LlmRequest {
         timeout_ms: None,
         prompt_caching: None,
         cached_content: None,
+        max_retries: None,
+        retry_delay_ms: None,
+        extra_headers: None,
     }
 }
 
@@ -92,5 +98,8 @@ pub fn minimal_request() -> LlmRequest {
         timeout_ms: None,
         prompt_caching: None,
         cached_content: None,
+        max_retries: None,
+        retry_delay_ms: None,
+        extra_headers: None,
     }
 }

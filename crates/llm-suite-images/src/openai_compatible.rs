@@ -66,10 +66,16 @@ impl OpenAiCompatibleImagesProvider {
     /// Creates a provider; fails fast when the context is incomplete.
     pub fn new(context: ImagesContext) -> Result<Self> {
         context.validate()?;
-        let client = llm_suite_proxy::build_http_client(
+        let client = llm_suite_proxy::build_http_client_with_options(
             context.timeout_secs,
             context.proxy.as_deref(),
             &context.no_proxy,
+            &llm_suite_proxy::HttpTransportOptions {
+                connect_timeout_secs: context.connect_timeout_secs,
+                danger_accept_invalid_certs: context
+                    .danger_accept_invalid_certs
+                    .unwrap_or(false),
+            },
         )
         .map_err(|err| llm_suite_common::ProviderError::Config(err.to_string()))?;
         Ok(Self { context, client })

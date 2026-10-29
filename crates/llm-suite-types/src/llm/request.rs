@@ -73,4 +73,21 @@ pub struct LlmRequest {
     /// Honored by the Gemini native codec; ignored by other codecs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_content: Option<String>,
+    /// Per-request retry budget override. Wins over `LlmProfile.max_retries`
+    /// for this call only; absent keeps the profile default (3). Consumed by
+    /// the client retry policy, so no codec change is needed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u32>,
+    /// Per-request retry base delay in milliseconds. Wins over
+    /// `LlmProfile.retry_delay` for this call only; absent keeps the profile
+    /// default (1000ms). Consumed by the client retry policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_delay_ms: Option<u64>,
+    /// Per-request extra HTTP headers merged after the codec-built request
+    /// (codec auth/profile/identity headers first). Wins per header name for
+    /// this call only; non-string JSON values are rendered as empty strings
+    /// mirroring profile header handling. Consumed by the client, so the
+    /// codec trait stays unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_headers: Option<crate::Metadata>,
 }

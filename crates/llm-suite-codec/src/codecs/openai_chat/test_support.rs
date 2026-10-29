@@ -54,6 +54,9 @@ pub(crate) fn profile() -> LlmProfile {
         circuit_breaker: None,
         auth: None,
         compat: None,
+        identity: None,
+        transport: None,
+        env: None,
     }
 }
 
@@ -86,6 +89,9 @@ pub(crate) fn request_with_format(format: ToolCallProtocol) -> LlmRequest {
         timeout_ms: None,
         prompt_caching: None,
         cached_content: None,
+        max_retries: None,
+        retry_delay_ms: None,
+        extra_headers: None,
     }
 }
 

@@ -61,6 +61,20 @@ pub fn build_proxy(url: &str, no_proxy: &[String]) -> Result<reqwest::Proxy, Pro
     Ok(proxy)
 }
 
+/// Connection-level transport tuning consumed by [`build_http_client_with_options`].
+///
+/// Kept as primitives (not the `llm-suite-types` struct) so this leaf crate
+/// stays dependency-free; the gateway maps `LlmHttpTransport` onto it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HttpTransportOptions {
+    /// TCP/TLS connect timeout in seconds; `None` keeps the reqwest default.
+    pub connect_timeout_secs: Option<u64>,
+    /// Accept invalid TLS certificates (self-signed local gateways). An
+    /// explicit opt-in; the gateway logs a warning when it builds such a
+    /// client.
+    pub danger_accept_invalid_certs: bool,
+}
+
 /// Shared reqwest client construction for the suite's HTTP clients: applies
 /// the timeout, wires the proxy (with its bypass list) when configured, and
 /// builds the client. Proxy failures keep [`ProxyError`] semantics so the
@@ -70,8 +84,32 @@ pub fn build_http_client(
     proxy: Option<&str>,
     no_proxy: &[String],
 ) -> Result<reqwest::Client, ProxyError> {
+    build_http_client_with_options(
+        timeout_secs,
+        proxy,
+        no_proxy,
+        &HttpTransportOptions::default(),
+    )
+}
+
+/// [`build_http_client`] plus the Phase 4 transport knobs: an optional
+/// connect timeout and the invalid-certificate opt-in. Proxy handling and
+/// error semantics are identical; only connection-affecting fields live
+/// here so the transport cache key can cover them exactly.
+pub fn build_http_client_with_options(
+    timeout_secs: u64,
+    proxy: Option<&str>,
+    no_proxy: &[String],
+    options: &HttpTransportOptions,
+) -> Result<reqwest::Client, ProxyError> {
     let mut builder =
         reqwest::Client::builder().timeout(std::time::Duration::from_secs(timeout_secs.max(1)));
+    if let Some(connect_secs) = options.connect_timeout_secs {
+        builder = builder.connect_timeout(std::time::Duration::from_secs(connect_secs.max(1)));
+    }
+    if options.danger_accept_invalid_certs {
+        builder = builder.danger_accept_invalid_certs(true);
+    }
     if let Some(proxy_url) = proxy {
         builder = builder.proxy(build_proxy(proxy_url, no_proxy)?);
     }
@@ -149,6 +187,28 @@ mod tests {
             !rendered.contains("secret") && !rendered.contains("proxy.example.com"),
             "credentials and host must stay out of the message: {rendered}"
         );
+    }
+
+    #[test]
+    fn transport_options_build_a_client() {
+        let options = HttpTransportOptions {
+            connect_timeout_secs: Some(2),
+            danger_accept_invalid_certs: false,
+        };
+        assert!(
+            build_http_client_with_options(60, None, &[], &options).is_ok(),
+            "connect timeout must build"
+        );
+        let insecure = HttpTransportOptions {
+            connect_timeout_secs: None,
+            danger_accept_invalid_certs: true,
+        };
+        assert!(
+            build_http_client_with_options(60, None, &[], &insecure).is_ok(),
+            "invalid-certs opt-in must build"
+        );
+        // Defaults stay backward compatible with the plain constructor.
+        assert!(build_http_client(60, None, &[]).is_ok());
     }
 
     #[test]

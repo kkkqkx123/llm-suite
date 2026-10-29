@@ -430,6 +430,9 @@ mod tests {
             rate_limit: None,
             auth: None,
             compat: None,
+            identity: None,
+            transport: None,
+            env: None,
         }];
         let refreshed = catalog
             .refresh_filtered(&definitions, &Default::default(), |m| {

@@ -54,6 +54,19 @@ pub struct LlmProviderDefinition {
     /// fall back to automatic detection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat: Option<super::ProviderCompat>,
+    /// Default client identity headers shared by profiles on this provider.
+    /// A profile-level `identity` overlays these per field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<super::LlmIdentity>,
+    /// Default connection-level HTTP transport tuning shared by profiles on
+    /// this provider. A profile-level `transport` overlays these per field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<super::LlmHttpTransport>,
+    /// Default environment overlay shadowed by the profile-level `env`
+    /// (profile keys win). Consulted during auth resolution before the
+    /// process environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<std::collections::HashMap<String, String>>,
 }
 
 /// Reference from a provider definition to a registered auth implementation.

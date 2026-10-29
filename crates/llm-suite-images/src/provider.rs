@@ -60,6 +60,15 @@ pub struct ImagesContext {
     /// Extra query parameters appended to every request URL.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub query_params: std::collections::HashMap<String, String>,
+    /// TCP/TLS connect timeout in seconds; `None` keeps the default.
+    /// Mirrors the chat profile transport knob so images calls observe the
+    /// same connection policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_timeout_secs: Option<u64>,
+    /// Accept invalid TLS certificates (self-signed local gateways).
+    /// Explicit opt-in only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub danger_accept_invalid_certs: Option<bool>,
 }
 
 fn default_timeout_secs() -> u64 {
@@ -78,6 +87,8 @@ impl ImagesContext {
             no_proxy: Vec::new(),
             headers: std::collections::HashMap::new(),
             query_params: std::collections::HashMap::new(),
+            connect_timeout_secs: None,
+            danger_accept_invalid_certs: None,
         }
     }
 
@@ -111,6 +122,12 @@ impl ImagesContext {
     /// Sets the proxy URL.
     pub fn with_proxy(mut self, proxy: impl Into<String>) -> Self {
         self.proxy = Some(proxy.into());
+        self
+    }
+
+    /// Sets the TCP/TLS connect timeout in seconds.
+    pub fn with_connect_timeout(mut self, secs: u64) -> Self {
+        self.connect_timeout_secs = Some(secs);
         self
     }
 

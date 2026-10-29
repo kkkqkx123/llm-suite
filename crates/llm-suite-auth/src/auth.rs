@@ -37,6 +37,47 @@ impl AuthContext for StdAuthContext {
     }
 }
 
+/// Per-profile environment overlay shadowing an inner [`AuthContext`] (Phase 4).
+///
+/// The overlay is a plain value (no dynamic dispatch of its own); it wraps
+/// the registry's existing `Arc<dyn AuthContext>`, so no new `dyn` kind is
+/// introduced. Lookup order: the overlay map first, then the inner context.
+/// An overlay entry that is empty hides the variable (resolves to `None`
+/// without consulting the inner context), giving sandboxes and tests an
+/// explicit unset. `file_exists` always delegates to the inner context.
+#[derive(Debug)]
+pub struct OverlayAuthContext {
+    inner: Arc<dyn AuthContext>,
+    overlay: std::collections::HashMap<String, String>,
+}
+
+impl OverlayAuthContext {
+    /// Wrap `inner` with `overlay` (empty values hide the variable).
+    pub fn new(
+        inner: Arc<dyn AuthContext>,
+        overlay: std::collections::HashMap<String, String>,
+    ) -> Self {
+        Self { inner, overlay }
+    }
+}
+
+#[async_trait]
+impl AuthContext for OverlayAuthContext {
+    async fn env(&self, name: &str) -> Option<String> {
+        if let Some(value) = self.overlay.get(name) {
+            if value.is_empty() {
+                return None;
+            }
+            return Some(value.clone());
+        }
+        self.inner.env(name).await
+    }
+
+    async fn file_exists(&self, path: &str) -> bool {
+        self.inner.file_exists(path).await
+    }
+}
+
 fn expand_tilde(path: &str) -> String {
     if path == "~" {
         return home_dir();
@@ -261,5 +302,34 @@ mod tests {
             auth.login_prompt(),
             crate::interaction::AuthPrompt::Secret { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn overlay_shadows_and_hides_variables() {
+        let inner: Arc<dyn AuthContext> = Arc::new(TestContext);
+        let overlay = OverlayAuthContext::new(
+            inner.clone(),
+            [("ACME_API_KEY".to_string(), "sk-overlay".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        assert_eq!(overlay.env("ACME_API_KEY").await.as_deref(), Some("sk-overlay"));
+        assert_eq!(
+            overlay.env("OTHER_KEY").await.as_deref(),
+            None,
+            "missing overlay entries delegate to the inner context"
+        );
+
+        let hiding = OverlayAuthContext::new(
+            inner,
+            [("ACME_API_KEY".to_string(), String::new())]
+                .into_iter()
+                .collect(),
+        );
+        assert_eq!(
+            hiding.env("ACME_API_KEY").await,
+            None,
+            "an empty overlay entry must hide the ambient variable"
+        );
     }
 }

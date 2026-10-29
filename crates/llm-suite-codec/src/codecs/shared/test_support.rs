@@ -42,5 +42,8 @@ pub fn profile_with(auth_type: Option<&str>) -> LlmProfile {
         circuit_breaker: None,
         auth: None,
         compat: None,
+        identity: None,
+        transport: None,
+        env: None,
     }
 }

@@ -36,15 +36,34 @@ impl LlmGateway {
             ));
         }
         let stored = self.resolve_profile(profile_id)?;
+        // Mirror `prepare`: a per-profile env overlay shadows the registry
+        // context for this resolution only.
         let (profile, _) = match self.auth.as_ref() {
-            Some(registry) => match registry
-                .apply(&stored)
-                .await
-                .map_err(|e| LlmError::ConfigError(e.to_string()))?
-            {
-                Some(resolved) => (resolved.profile, resolved.is_subscription),
-                None => (stored, false),
-            },
+            Some(registry) => {
+                let overlay: Option<std::sync::Arc<dyn llm_suite_auth::AuthContext>> =
+                    stored.env.as_ref().filter(|map| !map.is_empty()).map(|map| {
+                        std::sync::Arc::new(llm_suite_auth::OverlayAuthContext::new(
+                            registry.context().clone(),
+                            map.clone(),
+                        ))
+                            as std::sync::Arc<dyn llm_suite_auth::AuthContext>
+                    });
+                let resolved = match overlay.as_ref() {
+                    Some(context) => {
+                        registry.apply_with_context(&stored, context).await.map_err(|e| {
+                            LlmError::ConfigError(e.to_string())
+                        })?
+                    }
+                    None => registry
+                        .apply(&stored)
+                        .await
+                        .map_err(|e| LlmError::ConfigError(e.to_string()))?,
+                };
+                match resolved {
+                    Some(resolved) => (resolved.profile, resolved.is_subscription),
+                    None => (stored, false),
+                }
+            }
             None => (stored, false),
         };
         let context = images_context_for_profile(&profile)?;
@@ -67,8 +86,10 @@ impl LlmGateway {
 ///
 /// The profile `base_url` names the API root (e.g. `https://api.openai.com/v1`);
 /// the images path is appended unless the URL already carries it. Timeout,
-/// proxy, bypass list, extra headers and query params travel verbatim so an
-/// images call observes the same transport policy as chat.
+/// proxy, bypass list, extra headers, query params, client identity and
+/// connection-level transport knobs travel verbatim so an images call
+/// observes the same transport policy as chat. Explicit `custom_headers` win
+/// over identity defaults per header name.
 pub fn images_context_for_profile(
     profile: &LlmProfile,
 ) -> LlmResult<llm_suite_images::ImagesContext> {
@@ -90,11 +111,36 @@ pub fn images_context_for_profile(
     if let Some(no_proxy) = profile.no_proxy.clone() {
         context.no_proxy = no_proxy;
     }
-    for (name, value) in metadata_headers(profile.custom_headers.as_ref()) {
-        context.headers.insert(name, value);
+    if let Some(transport) = profile.transport.as_ref() {
+        context.connect_timeout_secs = transport.connect_timeout_secs;
+        context.danger_accept_invalid_certs = transport.danger_accept_invalid_certs;
+    }
+    // Identity defaults first so explicit headers win per name below.
+    if let Some(identity) = profile.identity.as_ref() {
+        if let Some(user_agent) = identity.user_agent.as_deref() {
+            context
+                .headers
+                .entry("User-Agent".to_string())
+                .or_insert_with(|| user_agent.to_string());
+        }
+        if let Some(app_url) = identity.app_url.as_deref() {
+            context
+                .headers
+                .entry("HTTP-Referer".to_string())
+                .or_insert_with(|| app_url.to_string());
+        }
+        if let Some(app_name) = identity.app_name.as_deref() {
+            context
+                .headers
+                .entry("X-Title".to_string())
+                .or_insert_with(|| app_name.to_string());
+        }
     }
     for (name, value) in metadata_headers(profile.headers.as_ref()) {
-        context.headers.entry(name).or_insert(value);
+        context.headers.insert(name, value);
+    }
+    for (name, value) in metadata_headers(profile.custom_headers.as_ref()) {
+        context.headers.insert(name, value);
     }
     for (name, value) in metadata_headers(profile.query_params.as_ref()) {
         context.query_params.insert(name, value);
@@ -190,6 +236,9 @@ mod tests {
             circuit_breaker: None,
             auth: None,
             compat: None,
+            identity: None,
+            transport: None,
+            env: None,
         }
     }
 
@@ -223,6 +272,56 @@ mod tests {
         assert_eq!(context.api_key.as_deref(), Some("sk-test"));
         assert_eq!(context.proxy.as_deref(), Some("http://127.0.0.1:8080"));
         assert_eq!(context.no_proxy, vec!["localhost".to_string()]);
+    }
+
+    #[test]
+    fn context_carries_identity_and_transport() {
+        let mut pending = profile();
+        pending.identity = Some(llm_suite_types::llm::LlmIdentity {
+            user_agent: Some("my-app/1.0".to_string()),
+            app_name: Some("my app".to_string()),
+            app_url: Some("https://example.com".to_string()),
+        });
+        pending.transport = Some(llm_suite_types::llm::LlmHttpTransport {
+            connect_timeout_secs: Some(2),
+            danger_accept_invalid_certs: Some(true),
+        });
+        let context = images_context_for_profile(&pending).expect("context");
+        assert_eq!(
+            context.headers.get("User-Agent").map(String::as_str),
+            Some("my-app/1.0")
+        );
+        assert_eq!(
+            context.headers.get("X-Title").map(String::as_str),
+            Some("my app")
+        );
+        assert_eq!(
+            context.headers.get("HTTP-Referer").map(String::as_str),
+            Some("https://example.com")
+        );
+        assert_eq!(context.connect_timeout_secs, Some(2));
+        assert_eq!(context.danger_accept_invalid_certs, Some(true));
+    }
+
+    #[test]
+    fn explicit_headers_win_over_identity_in_images_context() {
+        let mut pending = profile();
+        pending.identity = Some(llm_suite_types::llm::LlmIdentity {
+            user_agent: Some("identity/1.0".to_string()),
+            app_name: None,
+            app_url: None,
+        });
+        pending.custom_headers = Some(
+            [("User-Agent".to_string(), serde_json::json!("explicit/2.0"))]
+                .into_iter()
+                .collect(),
+        );
+        let context = images_context_for_profile(&pending).expect("context");
+        assert_eq!(
+            context.headers.get("User-Agent").map(String::as_str),
+            Some("explicit/2.0"),
+            "explicit headers must win over identity defaults"
+        );
     }
 
     #[test]

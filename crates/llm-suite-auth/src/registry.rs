@@ -124,11 +124,29 @@ impl AuthRegistry {
         self.store.delete(provider_id).await
     }
 
+    /// The ambient auth context backing resolution.
+    pub fn context(&self) -> &Arc<dyn AuthContext> {
+        &self.context
+    }
+
     /// Resolve auth for a profile and return the effective profile.
     ///
     /// Returns `None` when the profile carries no auth reference (the caller
     /// keeps its original behavior) or when nothing is configured.
     pub async fn apply(&self, profile: &LlmProfile) -> AuthResult<Option<ResolvedAuth>> {
+        self.apply_with_context(profile, &self.context).await
+    }
+
+    /// [`apply`] with an explicit ambient context. Hosts use this to thread
+    /// a per-profile environment overlay ([`OverlayAuthContext`]) without
+    /// replacing the registry-wide context: pass the registry context
+    /// wrapped in the overlay when `profile.env` is present, the registry
+    /// context itself otherwise.
+    pub async fn apply_with_context(
+        &self,
+        profile: &LlmProfile,
+        context: &Arc<dyn AuthContext>,
+    ) -> AuthResult<Option<ResolvedAuth>> {
         let Some(auth_ref) = profile.auth.as_ref() else {
             return Ok(None);
         };
@@ -142,7 +160,7 @@ impl AuthRegistry {
             ..Default::default()
         };
         let Some(model_auth) =
-            resolve_provider_auth(&entry, self.store.as_ref(), &self.context, &overrides).await?
+            resolve_provider_auth(&entry, self.store.as_ref(), context, &overrides).await?
         else {
             return Ok(None);
         };
@@ -371,6 +389,21 @@ mod tests {
             &self,
             input: crate::auth::ResolveInput<'_>,
         ) -> AuthResult<Option<crate::auth::ModelAuth>> {
+            // Mirror the production `EnvApiKeyAuth` order: an explicit or
+            // stored credential wins, the ambient variable is the fallback.
+            if let Some(credential) = input.credential {
+                if let Some(key) = credential
+                    .as_api_key()
+                    .ok()
+                    .and_then(|credential| credential.key.clone())
+                {
+                    return Ok(Some(crate::auth::ModelAuth {
+                        api_key: Some(key),
+                        source: Some("explicit credential".to_string()),
+                        ..Default::default()
+                    }));
+                }
+            }
             Ok(input
                 .ctx
                 .env("TEST_KEY")
@@ -423,6 +456,9 @@ mod tests {
                 method: None,
             }),
             compat: None,
+            identity: None,
+            transport: None,
+            env: None,
         }
     }
 
@@ -561,5 +597,80 @@ mod tests {
         assert!(surfaces
             .iter()
             .any(|s| s.method == crate::credential::AuthMethod::OAuth));
+    }
+
+    #[tokio::test]
+    async fn env_overlay_shadows_the_inner_context() {
+        use crate::auth::OverlayAuthContext;
+        let registry = registry();
+        registry.register_provider("acme", ProviderAuth::api_key_only(Arc::new(EnvKey)));
+        let overlay: Arc<dyn crate::auth::AuthContext> = Arc::new(OverlayAuthContext::new(
+            registry.context().clone(),
+            [("TEST_KEY".to_string(), "sk-overlay".to_string())]
+                .into_iter()
+                .collect(),
+        ));
+        let resolved = registry
+            .apply_with_context(&profile_with_auth(), &overlay)
+            .await
+            .expect("apply")
+            .expect("resolved");
+        assert_eq!(
+            resolved.profile.api_key.as_deref(),
+            Some("sk-overlay"),
+            "the overlay must shadow the process environment"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_overlay_value_hides_the_variable() {
+        use crate::auth::OverlayAuthContext;
+        let registry = registry();
+        registry.register_provider("acme", ProviderAuth::api_key_only(Arc::new(EnvKey)));
+        let overlay: Arc<dyn crate::auth::AuthContext> = Arc::new(OverlayAuthContext::new(
+            registry.context().clone(),
+            [("TEST_KEY".to_string(), String::new())]
+                .into_iter()
+                .collect(),
+        ));
+        // The process environment almost surely lacks TEST_KEY; either way
+        // the empty overlay must not resolve a key through the inner context.
+        let resolved = registry
+            .apply_with_context(&profile_with_auth(), &overlay)
+            .await
+            .expect("apply");
+        if std::env::var("TEST_KEY").ok().filter(|v| !v.is_empty()).is_some() {
+            assert!(
+                resolved.is_none(),
+                "an empty overlay entry must hide the ambient variable"
+            );
+        } else {
+            assert!(resolved.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_profile_key_still_wins_over_overlay() {
+        use crate::auth::OverlayAuthContext;
+        let registry = registry();
+        registry.register_provider("acme", ProviderAuth::api_key_only(Arc::new(EnvKey)));
+        let overlay: Arc<dyn crate::auth::AuthContext> = Arc::new(OverlayAuthContext::new(
+            registry.context().clone(),
+            [("TEST_KEY".to_string(), "sk-overlay".to_string())]
+                .into_iter()
+                .collect(),
+        ));
+        let mut profile = profile_with_auth();
+        profile.api_key = Some("sk-explicit".to_string());
+        let resolved = registry
+            .apply_with_context(&profile, &overlay)
+            .await
+            .expect("apply")
+            .expect("resolved");
+        assert_eq!(
+            resolved.profile.api_key.as_deref(),
+            Some("sk-explicit"),
+            "an explicit key always wins"
+        );
     }
 }

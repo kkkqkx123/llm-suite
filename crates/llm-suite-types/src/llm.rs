@@ -12,6 +12,7 @@ pub mod request;
 pub mod response;
 pub mod state;
 pub mod tool_call_protocol;
+pub mod transport;
 pub mod usage;
 
 pub use circuit_breaker::*;
@@ -28,4 +29,5 @@ pub use request::*;
 pub use response::*;
 pub use state::*;
 pub use tool_call_protocol::*;
+pub use transport::*;
 pub use usage::*;
