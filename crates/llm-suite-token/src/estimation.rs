@@ -289,8 +289,8 @@ mod tests {
 
         let text = "How are you?";
         let tokens = estimator.estimate_with_config(text);
-        // 9 letters * 0.3 = 2.7 + "?" 1.0 + 2 ws * 0.5 = 4.7 -> 5
-        assert_eq!(tokens, 5, "tokens: {}", tokens);
+        // 9 letters * 0.3 = 2.7 + "?" 0.5 + 2 ws * 0.5 = 4.2 -> 4
+        assert_eq!(tokens, 4, "tokens: {}", tokens);
     }
 
     #[test]
@@ -317,10 +317,10 @@ mod tests {
         let text = "fn foo() -> u32";
         let tokens = estimate_tokens(text);
         // letters: "fnfoou32" = 8 * 0.25 = 2.0
-        // symbols: "()->" = 4 * 1.0 = 4.0
+        // symbols: "()->" = 4 * 0.5 = 2.0
         // whitespace: 3 * 0.5 = 1.5
-        // total 7.5 -> 8
-        assert_eq!(tokens, 8, "tokens: {}", tokens);
+        // total 5.5 -> 6
+        assert_eq!(tokens, 6, "tokens: {}", tokens);
     }
 
     #[test]
