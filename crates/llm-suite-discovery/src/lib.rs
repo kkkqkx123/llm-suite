@@ -52,9 +52,35 @@ impl ModelCatalog {
         let mut out = std::collections::HashMap::new();
         for definition in definitions {
             let key = api_keys.get(&definition.id).map(String::as_str);
-            out.insert(definition.id.clone(), self.list_models(definition, key).await);
+            out.insert(
+                definition.id.clone(),
+                self.list_models(definition, key).await,
+            );
         }
         out
+    }
+
+    /// Refresh every provider listing, then credential-filter the successes.
+    ///
+    /// Same transactional reporting as [`Self::refresh_all`]: every
+    /// definition yields an entry, failures pass through untouched, and only
+    /// successful listings are filtered by `predicate`. The predicate closes
+    /// over the logged-in credential (allow-list, prefix, subscription
+    /// flag); a plain function keeps the call free of trait objects.
+    pub async fn refresh_filtered(
+        &self,
+        definitions: &[LlmProviderDefinition],
+        api_keys: &std::collections::HashMap<String, String>,
+        predicate: impl Fn(&ModelInfo) -> bool,
+    ) -> std::collections::HashMap<String, LlmResult<Vec<ModelInfo>>> {
+        let refreshed = self.refresh_all(definitions, api_keys).await;
+        refreshed
+            .into_iter()
+            .map(|(id, result)| {
+                let filtered = result.map(|models| filter_models(models, &predicate));
+                (id, filtered)
+            })
+            .collect()
     }
 
     /// List the models advertized by a provider definition.
@@ -169,6 +195,31 @@ pub fn filter_models(
     predicate: impl Fn(&ModelInfo) -> bool,
 ) -> Vec<ModelInfo> {
     models.into_iter().filter(|m| predicate(m)).collect()
+}
+
+/// Keep only the models whose id appears in `allowed`.
+///
+/// Convenience over [`filter_models`] for the common credential-filtering
+/// shape: the logged-in credential owns an allow-list of model ids (pi
+/// `filterModels` / `filterAllModels`), and every other entry is dropped.
+/// An empty allow-list keeps nothing; callers that mean "no filtering"
+/// skip this helper instead.
+pub fn filter_models_by_allowlist(
+    models: Vec<ModelInfo>,
+    allowed: &std::collections::HashSet<String>,
+) -> Vec<ModelInfo> {
+    filter_models(models, |m| allowed.contains(&m.id))
+}
+
+/// Keep only the models whose id starts with one of `prefixes`.
+///
+/// Convenience over [`filter_models`] for prefix-scoped credentials
+/// (e.g. an OAuth login that may use `gpt-*` but not internal eval
+/// models). An empty prefix list keeps nothing.
+pub fn filter_models_by_prefix(models: Vec<ModelInfo>, prefixes: &[String]) -> Vec<ModelInfo> {
+    filter_models(models, |m| {
+        prefixes.iter().any(|prefix| m.id.starts_with(prefix))
+    })
 }
 
 /// Join `{base_url}/{api_version}/{path}` tolerating trailing slashes and a
@@ -328,5 +379,69 @@ mod tests {
         let kept = filter_models(models, |m| !m.id.contains("internal"));
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].id, "gpt-4o");
+    }
+
+    fn model_info(id: &str) -> ModelInfo {
+        ModelInfo {
+            id: id.to_string(),
+            name: None,
+            context_window_size: None,
+            metadata: None,
+        }
+    }
+
+    #[test]
+    fn allowlist_keeps_only_listed_ids() {
+        let models = vec![model_info("gpt-4o"), model_info("other")];
+        let allowed: std::collections::HashSet<String> =
+            ["gpt-4o".to_string()].into_iter().collect();
+        let kept = filter_models_by_allowlist(models, &allowed);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, "gpt-4o");
+    }
+
+    #[test]
+    fn prefix_filter_keeps_matching_ids() {
+        let models = vec![model_info("gpt-4o"), model_info("claude-x")];
+        let kept = filter_models_by_prefix(models, &["gpt-".to_string()]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, "gpt-4o");
+    }
+
+    #[tokio::test]
+    async fn refresh_filtered_applies_predicate_to_successes() {
+        use llm_suite_types::llm::{LlmFormat, LlmProviderDefinition, ModelDiscovery};
+        let catalog = ModelCatalog::new();
+        let definitions = vec![LlmProviderDefinition {
+            id: "static".to_string(),
+            name: None,
+            description: None,
+            base_url: None,
+            auth_type: None,
+            default_headers: None,
+            format: LlmFormat::OpenaiChat,
+            model_discovery: Some(ModelDiscovery::StaticList {
+                models: vec![model_info("gpt-4o"), model_info("internal-only")],
+            }),
+            api_version: None,
+            metadata: None,
+            proxy: None,
+            no_proxy: None,
+            rate_limit: None,
+            auth: None,
+            compat: None,
+        }];
+        let refreshed = catalog
+            .refresh_filtered(&definitions, &Default::default(), |m| {
+                !m.id.contains("internal")
+            })
+            .await;
+        let models = refreshed
+            .get("static")
+            .expect("entry")
+            .as_ref()
+            .expect("success");
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "gpt-4o");
     }
 }

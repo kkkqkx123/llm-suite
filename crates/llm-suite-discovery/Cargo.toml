@@ -12,3 +12,6 @@ llm-suite-codec.workspace = true
 llm-suite-types.workspace = true
 serde_json = { workspace = true }
 reqwest = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

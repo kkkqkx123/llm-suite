@@ -19,6 +19,7 @@ llm-suite-codec.workspace = true
 llm-suite-common.workspace = true
 llm-suite-config.workspace = true
 llm-suite-discovery.workspace = true
+llm-suite-images.workspace = true
 llm-suite-message.workspace = true
 llm-suite-proxy.workspace = true
 llm-token.workspace = true
