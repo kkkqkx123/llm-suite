@@ -99,8 +99,13 @@ pub fn transform_for_target(messages: &[Message], target: &TransformTarget) -> V
                 }
             }
             converted.content = strip_cross_model_blocks(&converted.content, target);
-        } else if let Some(calls) = converted.tool_calls.as_mut() {
-            remap_calls(calls, &mut id_map, &mut normalize_id);
+        } else {
+            if let Some(calls) = converted.tool_calls.as_mut() {
+                remap_calls(calls, &mut id_map, &mut normalize_id);
+            }
+            if !target.supports_image {
+                converted.content = downgrade_images(&converted.content);
+            }
         }
 
         if let Some(tool_call_id) = converted.tool_call_id.as_ref() {
@@ -216,7 +221,6 @@ fn strip_cross_model_blocks(
 /// Downgrade image blocks of a same-model move whose target cannot carry
 /// images. Cross-model moves already pass through
 /// `strip_cross_model_blocks`; this covers the remaining case.
-#[allow(dead_code)]
 fn downgrade_images(content: &MessageContentValue) -> MessageContentValue {
     match content {
         MessageContentValue::Text(_) => content.clone(),
