@@ -79,7 +79,17 @@ pub fn parse_openai_chat_response(body: &str) -> LlmResult<LlmResponseType> {
                 .collect()
         });
 
-    let usage = json.get("usage").map(parse_openai_usage);
+    let mut usage = json.get("usage").map(parse_openai_usage);
+    // Aggregating gateways report the billed total next to the usage
+    // object instead of inside it; the usage-level value wins when both
+    // are present.
+    if usage.as_ref().and_then(|u| u.provider_total).is_none() {
+        if let Some(total) = crate::codecs::helpers::parse_provider_total(&json) {
+            if let Some(stats) = usage.as_mut() {
+                stats.provider_total = Some(total);
+            }
+        }
+    }
 
     // A refusal is the provider declining to answer; it is kept apart from
     // the answer text so an empty answer can be told from a refusal.
@@ -169,5 +179,30 @@ mod tests {
         assert_eq!(calls[0].id, "call_1");
         assert_eq!(calls[0].function.name, "get_weather");
         assert_eq!(calls[0].function.arguments, "{}");
+    }
+
+    #[test]
+    fn gateway_cost_extension_becomes_the_provider_total() {
+        let body = r#"{"id":"1","model":"gpt-4o","choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,"cost":0.00012}}"#;
+        let result = parse_openai_chat_response(body).expect("must parse");
+        let usage = result.usage.expect("usage present");
+        assert_eq!(usage.provider_total, Some(0.00012));
+        assert!(usage.total_from_provider());
+    }
+
+    #[test]
+    fn top_level_cost_backfills_a_usage_without_one() {
+        let body = r#"{"id":"1","model":"gpt-4o","choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15},"cost":0.00034}"#;
+        let result = parse_openai_chat_response(body).expect("must parse");
+        let usage = result.usage.expect("usage present");
+        assert_eq!(usage.provider_total, Some(0.00034));
+    }
+
+    #[test]
+    fn usage_level_cost_wins_over_the_top_level_value() {
+        let body = r#"{"id":"1","model":"gpt-4o","choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,"cost":0.5},"cost":0.9}"#;
+        let result = parse_openai_chat_response(body).expect("must parse");
+        let usage = result.usage.expect("usage present");
+        assert_eq!(usage.provider_total, Some(0.5));
     }
 }

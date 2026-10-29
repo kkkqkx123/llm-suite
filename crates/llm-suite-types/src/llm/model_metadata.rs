@@ -37,7 +37,9 @@ pub struct ModelCostTier {
 /// Currency-agnostic: callers decide whether the numbers are USD, CNY or
 /// any other unit. `tiers` is empty for flat pricing; when present the
 /// first tier whose `up_to_tokens` covers the request input wins, and a
-/// `None` tier is the catch-all.
+/// `None` tier is the catch-all. Tier selection math lives in the token
+/// crate (`TokenPricing::rates_for` via `TokenPricing::from_model_cost`);
+/// this struct carries data only so the leaf stays dependency-free.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ModelCost {
     pub input_per_mtok: f64,
@@ -48,24 +50,6 @@ pub struct ModelCost {
     pub cache_write_per_mtok: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tiers: Option<Vec<ModelCostTier>>,
-}
-
-impl ModelCost {
-    /// Rates that apply to a request with the given input volume.
-    pub fn rates_for(&self, input_tokens: u64) -> (f64, f64) {
-        if let Some(tiers) = self.tiers.as_ref() {
-            for tier in tiers {
-                match tier.up_to_tokens {
-                    Some(limit) if input_tokens <= limit => {
-                        return (tier.input_per_mtok, tier.output_per_mtok);
-                    }
-                    None => return (tier.input_per_mtok, tier.output_per_mtok),
-                    _ => continue,
-                }
-            }
-        }
-        (self.input_per_mtok, self.output_per_mtok)
-    }
 }
 
 /// Static catalog entry describing one model.
@@ -106,46 +90,6 @@ impl ModelMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn flat_cost() -> ModelCost {
-        ModelCost {
-            input_per_mtok: 1.0,
-            output_per_mtok: 2.0,
-            cache_read_per_mtok: None,
-            cache_write_per_mtok: None,
-            tiers: None,
-        }
-    }
-
-    #[test]
-    fn flat_cost_uses_base_rates() {
-        assert_eq!(flat_cost().rates_for(1_000_000), (1.0, 2.0));
-    }
-
-    #[test]
-    fn tiered_cost_switches_whole_price_by_input_volume() {
-        let cost = ModelCost {
-            input_per_mtok: 1.0,
-            output_per_mtok: 2.0,
-            cache_read_per_mtok: None,
-            cache_write_per_mtok: None,
-            tiers: Some(vec![
-                ModelCostTier {
-                    up_to_tokens: Some(200_000),
-                    input_per_mtok: 1.0,
-                    output_per_mtok: 2.0,
-                },
-                ModelCostTier {
-                    up_to_tokens: None,
-                    input_per_mtok: 2.0,
-                    output_per_mtok: 4.0,
-                },
-            ]),
-        };
-        assert_eq!(cost.rates_for(100), (1.0, 2.0));
-        assert_eq!(cost.rates_for(200_000), (1.0, 2.0));
-        assert_eq!(cost.rates_for(200_001), (2.0, 4.0));
-    }
 
     #[test]
     fn image_support_follows_modalities() {

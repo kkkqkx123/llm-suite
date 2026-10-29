@@ -4,6 +4,7 @@ use crate::error::LlmResult;
 use llm_suite_types::llm::{
     LlmProfile, LlmRequest, LlmResult as LlmResponseType, MessageStreamEvent,
 };
+use llm_suite_types::message::{Message, MessageRole};
 use llm_suite_types::tool::Tool;
 use reqwest::Method;
 
@@ -22,6 +23,46 @@ pub struct OpenaiChatCodec {
     // Reused across requests; constructing a `reqwest::Client` per call would
     // discard the connection pool and TLS session cache every time.
     client: reqwest::Client,
+}
+
+/// Wire role for system messages: newer endpoints expect `developer`, older
+/// gateways only know `system`. Absent compat keeps the long-standing default.
+fn compat_system_role(profile: &LlmProfile) -> &'static str {
+    if profile
+        .compat
+        .as_ref()
+        .and_then(|c| c.supports_developer_role)
+        == Some(true)
+    {
+        "developer"
+    } else {
+        "system"
+    }
+}
+
+/// Move leading system messages to the front when the endpoint only accepts
+/// them there. Endpoints that allow mid-conversation system messages (or
+/// express no opinion) keep the history order untouched.
+fn enforce_leading_system(history: &mut Vec<Message>, profile: &LlmProfile) {
+    if profile
+        .compat
+        .as_ref()
+        .and_then(|c| c.supports_mid_convo_system_messages)
+        != Some(false)
+    {
+        return;
+    }
+    let mut systems = Vec::new();
+    let mut rest = Vec::with_capacity(history.len());
+    for msg in history.drain(..) {
+        if msg.role == MessageRole::System {
+            systems.push(msg);
+        } else {
+            rest.push(msg);
+        }
+    }
+    systems.extend(rest);
+    *history = systems;
 }
 
 impl Default for OpenaiChatCodec {
@@ -52,20 +93,26 @@ impl OpenaiChatCodec {
         profile: &LlmProfile,
     ) -> LlmResult<serde_json::Value> {
         let use_text_mode = shared::is_text_mode(request);
+        let system_role = compat_system_role(profile);
 
         let messages = if use_text_mode {
             let (_, filtered) =
                 llm_suite_tool_call::tool::protocol::extract_system_message(&request.messages);
             let content = shared::text_mode_system_content(request)?;
             let history = shared::convert_history_for_text_mode(&filtered, request);
-            let mut converted = messages::convert_openai_messages(&history)?;
+            let mut converted =
+                messages::convert_openai_messages_with_system_role(&history, system_role)?;
             if !content.is_empty() {
-                converted.insert(0, serde_json::json!({"role": "system", "content": content}));
+                converted.insert(
+                    0,
+                    serde_json::json!({"role": system_role, "content": content}),
+                );
             }
             converted
         } else {
-            let history = shared::history_with_system_text(request)?;
-            messages::convert_openai_messages(&history)?
+            let mut history = shared::history_with_system_text(request)?;
+            enforce_leading_system(&mut history, profile);
+            messages::convert_openai_messages_with_system_role(&history, system_role)?
         };
 
         let mut body = serde_json::json!({
@@ -75,6 +122,7 @@ impl OpenaiChatCodec {
 
         let generation = shared::resolve_generation(request, profile)?;
         crate::generation::apply_openai_chat(&mut body, &generation)?;
+        crate::generation::apply_compat_strict(&mut body, profile.compat.as_ref());
         shared::merge_and_apply_params(&mut body, profile, &request.parameters);
 
         if !use_text_mode {

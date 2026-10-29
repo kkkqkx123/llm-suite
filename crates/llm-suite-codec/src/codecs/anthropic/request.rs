@@ -64,7 +64,11 @@ pub fn build_body(request: &LlmRequest, profile: &LlmProfile) -> LlmResult<serde
         None => profile.prompt_caching.as_ref(),
     };
     if let Some(caching_config) = caching_config {
-        caching::apply_prompt_caching(&mut body, caching_config);
+        caching::apply_prompt_caching_with_compat(
+            &mut body,
+            caching_config,
+            profile.compat.as_ref(),
+        );
     }
 
     Ok(body)
@@ -417,5 +421,54 @@ mod tests {
             .find(|block| block.get("cache_control").is_some())
             .expect("the breakpoint must be placed");
         assert_eq!(marked["type"], serde_json::json!("text"));
+    }
+
+    #[test]
+    fn long_retention_falls_back_when_the_endpoint_rejects_it() {
+        let req = request(
+            vec![
+                msg(MessageRole::System, "You are a helper"),
+                msg(MessageRole::User, "Hi"),
+            ],
+            None,
+        );
+        let mut rejecting = profile();
+        rejecting.prompt_caching = Some(LlmPromptCaching {
+            ttl: Some("1h".to_string()),
+        });
+        rejecting.compat = Some(llm_suite_types::llm::ProviderCompat {
+            supports_long_cache_retention: Some(false),
+            ..Default::default()
+        });
+        let body = build_body(&req, &rejecting).expect("must build");
+        assert_eq!(
+            body["system"][0]["cache_control"],
+            serde_json::json!({"type": "ephemeral"}),
+            "the ttl marker must be omitted, leaving the provider default"
+        );
+    }
+
+    #[test]
+    fn long_retention_is_kept_without_compat_objection() {
+        let req = request(
+            vec![
+                msg(MessageRole::System, "You are a helper"),
+                msg(MessageRole::User, "Hi"),
+            ],
+            None,
+        );
+        let mut keeping = profile();
+        keeping.prompt_caching = Some(LlmPromptCaching {
+            ttl: Some("1h".to_string()),
+        });
+        keeping.compat = Some(llm_suite_types::llm::ProviderCompat {
+            supports_long_cache_retention: Some(true),
+            ..Default::default()
+        });
+        let body = build_body(&req, &keeping).expect("must build");
+        assert_eq!(
+            body["system"][0]["cache_control"],
+            serde_json::json!({"type": "ephemeral", "ttl": "1h"})
+        );
     }
 }

@@ -161,7 +161,7 @@ pub fn parse_anthropic_response(body: &str) -> LlmResult<LlmResponseType> {
         }
     }
 
-    let usage = json.get("usage").map(|u| {
+    let mut usage = json.get("usage").map(|u| {
         let input = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         let output = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         let cache_read = u
@@ -193,9 +193,16 @@ pub fn parse_anthropic_response(body: &str) -> LlmResult<LlmResponseType> {
             prompt_tokens_cost: None,
             completion_tokens_cost: None,
             total_cost: None,
-            provider_total: None,
+            provider_total: crate::codecs::helpers::parse_provider_total(u),
         }
     });
+    if usage.as_ref().and_then(|u| u.provider_total).is_none() {
+        if let Some(total) = crate::codecs::helpers::parse_provider_total(&json) {
+            if let Some(stats) = usage.as_mut() {
+                stats.provider_total = Some(total);
+            }
+        }
+    }
 
     let message = llm_suite_types::message::Message {
         id: llm_suite_types::Id::new(),

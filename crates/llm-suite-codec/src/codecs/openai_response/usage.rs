@@ -38,6 +38,6 @@ pub fn parse_responses_usage(u: &serde_json::Value) -> TokenUsageStats {
         prompt_tokens_cost: None,
         completion_tokens_cost: None,
         total_cost: None,
-        provider_total: None,
+        provider_total: crate::codecs::helpers::parse_provider_total(u),
     }
 }

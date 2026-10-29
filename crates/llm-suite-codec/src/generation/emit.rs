@@ -4,6 +4,40 @@ use llm_suite_types::llm::generation::{
     LlmGenerationParams, LlmServiceTier, LlmThinkingConfig, LlmToolChoice, ResponseFormatKind,
     ThinkingLevel, ToolChoiceMode,
 };
+use llm_suite_types::llm::ProviderCompat;
+
+/// Downgrade `strict: true` structured-output markers when the endpoint
+/// cannot honor them.
+///
+/// Some OpenAI-compatible gateways reject `strict: true`; with
+/// `supports_strict_mode == Some(false)` the request still carries the
+/// schema, only the strict marker is relaxed to `false`. Any other compat
+/// (including absent) leaves the body untouched.
+pub fn apply_compat_strict(body: &mut serde_json::Value, compat: Option<&ProviderCompat>) {
+    if compat.and_then(|c| c.supports_strict_mode) != Some(false) {
+        return;
+    }
+    // Chat Completions nests the marker under `response_format.json_schema`.
+    if let Some(marker) = body
+        .get_mut("response_format")
+        .and_then(|v| v.get_mut("json_schema"))
+        .and_then(|v| v.get_mut("strict"))
+    {
+        if marker == &serde_json::json!(true) {
+            *marker = serde_json::json!(false);
+        }
+    }
+    // The Responses API keeps it flat under `text.format`.
+    if let Some(marker) = body
+        .get_mut("text")
+        .and_then(|v| v.get_mut("format"))
+        .and_then(|v| v.get_mut("strict"))
+    {
+        if marker == &serde_json::json!(true) {
+            *marker = serde_json::json!(false);
+        }
+    }
+}
 
 /// Chat Completions names a function through a nested `function` object.
 fn emit_tool_choice_openai_chat(choice: &LlmToolChoice) -> serde_json::Value {

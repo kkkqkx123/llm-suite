@@ -8,7 +8,11 @@ use super::generation::LlmMaxTokenField;
 /// default". An explicit `Some` on the profile wins over the definition,
 /// which wins over [`ProviderCompat::detect`]. New fields must be added
 /// only together with a codec branch that reads them; dead metadata is
-/// rejected.
+/// rejected. Current consumers: `supports_developer_role` (OpenAI Chat
+/// message roles), `supports_strict_mode` (OpenAI Chat/Responses strict
+/// markers), `supports_mid_convo_system_messages` (OpenAI Chat system
+/// placement), `supports_long_cache_retention` (Anthropic cache ttl),
+/// `max_tokens_field` (OpenAI Chat output-limit field via generation).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ProviderCompat {
     /// Whether the OpenAI Chat wire format may send the `developer` role.

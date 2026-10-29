@@ -217,6 +217,35 @@ fn truncate(s: &str) -> String {
 /// list-valued fields (`messages`, `tools`, `stop`) whose content is built by
 /// the codec, and concatenating a custom-body array with the built one would
 /// produce a malformed request.
+/// Billing total reported by the provider itself, when present.
+///
+/// The official usage shapes carry no such field; OpenAI-compatible
+/// gateways (OpenRouter and aggregators) attach it as a numeric `cost`,
+/// `total_cost` or `provider_cost` extension next to the counters. A
+/// non-numeric or negative value is ignored so a malformed extension can
+/// never poison cost accounting. String-encoded numbers are accepted
+/// because some gateways serialize the decimal as a string.
+pub fn parse_provider_total(usage: &serde_json::Value) -> Option<f64> {
+    for key in ["cost", "total_cost", "provider_cost"] {
+        let Some(value) = usage.get(key) else {
+            continue;
+        };
+        let parsed = if let Some(number) = value.as_f64() {
+            Some(number)
+        } else if let Some(text) = value.as_str() {
+            text.parse::<f64>().ok()
+        } else {
+            continue;
+        };
+        if let Some(total) = parsed {
+            if total.is_finite() && total >= 0.0 {
+                return Some(total);
+            }
+        }
+    }
+    None
+}
+
 pub fn deep_merge(target: &serde_json::Value, source: &serde_json::Value) -> serde_json::Value {
     match (target, source) {
         (serde_json::Value::Object(t), serde_json::Value::Object(s)) => {
@@ -481,6 +510,33 @@ mod tests {
         assert_eq!(
             guess_media_type("gs://bucket/clip.mp4", "image/png"),
             "video/mp4"
+        );
+    }
+
+    #[test]
+    fn provider_total_reads_gateway_cost_extensions() {
+        assert_eq!(
+            parse_provider_total(&serde_json::json!({"cost": 0.5})),
+            Some(0.5)
+        );
+        assert_eq!(
+            parse_provider_total(&serde_json::json!({"total_cost": 1.25})),
+            Some(1.25)
+        );
+        assert_eq!(
+            parse_provider_total(&serde_json::json!({"provider_cost": "0.75"})),
+            Some(0.75),
+            "string-encoded decimals are accepted"
+        );
+        assert_eq!(parse_provider_total(&serde_json::json!({})), None);
+        assert_eq!(
+            parse_provider_total(&serde_json::json!({"cost": -1.0})),
+            None,
+            "a negative total must never poison accounting"
+        );
+        assert_eq!(
+            parse_provider_total(&serde_json::json!({"cost": "n/a"})),
+            None
         );
     }
 }

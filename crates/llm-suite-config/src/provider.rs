@@ -77,6 +77,23 @@ pub fn apply_provider_defaults(
     providers: &ProviderDefinitionRegistry,
 ) -> LlmResult<LlmProfile> {
     let Some(provider_id) = profile.provider_id.clone() else {
+        // Standalone profiles carry no definition to merge, but the narrow
+        // auto-detection still applies so a directly configured local
+        // gateway keeps working without an explicit compat block.
+        if profile.compat.is_none() {
+            let detected = llm_suite_types::llm::ProviderCompat::detect(
+                profile.base_url.as_deref(),
+                &profile.format,
+            );
+            if !detected.is_empty() {
+                tracing::debug!(
+                    profile_id = profile.id.as_str(),
+                    base_url = profile.base_url.as_deref().unwrap_or(""),
+                    "auto-detected provider compat; explicit config wins"
+                );
+                profile.compat = Some(detected);
+            }
+        }
         return Ok(profile);
     };
     let definition = providers.get(&provider_id).ok_or_else(|| {
@@ -133,20 +150,18 @@ pub fn apply_provider_defaults(
     }
     if profile.identity.is_none() {
         profile.identity = definition.identity.clone();
-    } else if let (Some(profile_identity), Some(definition_identity)) = (
-        profile.identity.as_mut(),
-        definition.identity.as_ref(),
-    ) {
+    } else if let (Some(profile_identity), Some(definition_identity)) =
+        (profile.identity.as_mut(), definition.identity.as_ref())
+    {
         let mut merged = definition_identity.clone();
         merged.merge_over(profile_identity);
         *profile_identity = merged;
     }
     if profile.transport.is_none() {
         profile.transport = definition.transport.clone();
-    } else if let (Some(profile_transport), Some(definition_transport)) = (
-        profile.transport.as_mut(),
-        definition.transport.as_ref(),
-    ) {
+    } else if let (Some(profile_transport), Some(definition_transport)) =
+        (profile.transport.as_mut(), definition.transport.as_ref())
+    {
         let mut merged = definition_transport.clone();
         merged.merge_over(profile_transport);
         *profile_transport = merged;
@@ -346,10 +361,7 @@ mod tests {
         let identity = merged.identity.expect("identity must merge");
         assert_eq!(identity.user_agent.as_deref(), Some("acme/1.0"));
         assert_eq!(identity.app_name.as_deref(), Some("profile app"));
-        assert_eq!(
-            identity.app_url.as_deref(),
-            Some("https://profile.example")
-        );
+        assert_eq!(identity.app_url.as_deref(), Some("https://profile.example"));
     }
 
     #[test]
@@ -434,5 +446,67 @@ mod tests {
         custom_profile.provider_id = Some("custom".to_string());
         custom_profile.format = LlmFormat::Custom("acme_chat".to_string());
         assert!(apply_provider_defaults(custom_profile, &registry).is_ok());
+    }
+
+    #[test]
+    fn compat_merges_per_field_with_profile_winning() {
+        use llm_suite_types::llm::generation::LlmMaxTokenField;
+        use llm_suite_types::llm::ProviderCompat;
+        let registry = ProviderDefinitionRegistry::new();
+        let mut declared = definition();
+        declared.compat = Some(ProviderCompat {
+            supports_developer_role: Some(false),
+            supports_strict_mode: Some(true),
+            max_tokens_field: Some(LlmMaxTokenField::MaxCompletionTokens),
+            ..Default::default()
+        });
+        registry.register(declared).unwrap();
+
+        let mut pending = profile("p1");
+        pending.compat = Some(ProviderCompat {
+            supports_developer_role: Some(true),
+            ..Default::default()
+        });
+        let merged = apply_provider_defaults(pending, &registry).unwrap();
+        let compat = merged.compat.expect("compat must merge");
+        assert_eq!(compat.supports_developer_role, Some(true));
+        assert_eq!(compat.supports_strict_mode, Some(true));
+        assert_eq!(
+            compat.max_tokens_field,
+            Some(LlmMaxTokenField::MaxCompletionTokens)
+        );
+    }
+
+    #[test]
+    fn local_gateway_detects_legacy_field_without_a_definition() {
+        use llm_suite_types::llm::generation::LlmMaxTokenField;
+        let registry = ProviderDefinitionRegistry::new();
+        let mut standalone = profile("local");
+        standalone.provider_id = None;
+        standalone.base_url = Some("http://localhost:11434/v1".to_string());
+        let merged = apply_provider_defaults(standalone, &registry).unwrap();
+        assert_eq!(
+            merged.compat.and_then(|c| c.max_tokens_field),
+            Some(LlmMaxTokenField::MaxTokens)
+        );
+    }
+
+    #[test]
+    fn explicit_compat_wins_over_detection() {
+        use llm_suite_types::llm::generation::LlmMaxTokenField;
+        use llm_suite_types::llm::ProviderCompat;
+        let registry = ProviderDefinitionRegistry::new();
+        let mut standalone = profile("local");
+        standalone.provider_id = None;
+        standalone.base_url = Some("http://localhost:11434/v1".to_string());
+        standalone.compat = Some(ProviderCompat {
+            max_tokens_field: Some(LlmMaxTokenField::MaxCompletionTokens),
+            ..Default::default()
+        });
+        let merged = apply_provider_defaults(standalone, &registry).unwrap();
+        assert_eq!(
+            merged.compat.and_then(|c| c.max_tokens_field),
+            Some(LlmMaxTokenField::MaxCompletionTokens)
+        );
     }
 }

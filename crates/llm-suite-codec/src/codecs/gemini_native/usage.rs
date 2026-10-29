@@ -51,6 +51,6 @@ pub fn parse_usage_metadata(u: &serde_json::Value) -> llm_suite_types::llm::Toke
         prompt_tokens_cost: None,
         completion_tokens_cost: None,
         total_cost: None,
-        provider_total: None,
+        provider_total: crate::codecs::helpers::parse_provider_total(u),
     }
 }

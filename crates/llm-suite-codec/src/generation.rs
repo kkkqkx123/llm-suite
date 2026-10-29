@@ -7,8 +7,8 @@ pub mod parse;
 pub mod validate;
 
 pub use emit::{
-    apply_anthropic, apply_gemini_generation_config, apply_openai_chat, apply_openai_responses,
-    gemini_schema_value, gemini_tool_config,
+    apply_anthropic, apply_compat_strict, apply_gemini_generation_config, apply_openai_chat,
+    apply_openai_responses, gemini_schema_value, gemini_tool_config,
 };
 pub use parse::{is_typed_param_key, parse_legacy_generation};
 pub use validate::{validate_generation, ANTHROPIC_DEFAULT_MAX_TOKENS};
@@ -428,5 +428,54 @@ mod tests {
         let parsed = parse_legacy_generation(&legacy);
         assert_eq!(parsed.temperature, Some(0.9));
         assert_eq!(parsed.max_tokens, Some(256));
+    }
+
+    #[test]
+    fn strict_markers_are_relaxed_only_when_the_endpoint_rejects_them() {
+        use llm_suite_types::llm::ProviderCompat;
+        let rejecting = ProviderCompat {
+            supports_strict_mode: Some(false),
+            ..Default::default()
+        };
+        let accepting = ProviderCompat {
+            supports_strict_mode: Some(true),
+            ..Default::default()
+        };
+        // Chat Completions shape.
+        let mut chat = serde_json::json!({
+            "response_format": {"type": "json_schema",
+                "json_schema": {"name": "r", "schema": {}, "strict": true}}
+        });
+        apply_compat_strict(&mut chat, Some(&rejecting));
+        assert_eq!(
+            chat["response_format"]["json_schema"]["strict"],
+            serde_json::json!(false)
+        );
+        let mut kept = chat.clone();
+        kept["response_format"]["json_schema"]["strict"] = serde_json::json!(true);
+        apply_compat_strict(&mut kept, Some(&accepting));
+        assert_eq!(
+            kept["response_format"]["json_schema"]["strict"],
+            serde_json::json!(true)
+        );
+        let mut silent = kept.clone();
+        apply_compat_strict(&mut silent, None);
+        assert_eq!(
+            silent["response_format"]["json_schema"]["strict"],
+            serde_json::json!(true)
+        );
+        // Responses shape.
+        let mut responses = serde_json::json!({
+            "text": {"format": {"type": "json_schema", "strict": true}}
+        });
+        apply_compat_strict(&mut responses, Some(&rejecting));
+        assert_eq!(
+            responses["text"]["format"]["strict"],
+            serde_json::json!(false)
+        );
+        // Bodies without a marker stay untouched.
+        let mut bare = serde_json::json!({"model": "m"});
+        apply_compat_strict(&mut bare, Some(&rejecting));
+        assert!(bare.get("response_format").is_none());
     }
 }

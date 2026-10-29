@@ -44,6 +44,7 @@ pub fn build_body(request: &LlmRequest, profile: &LlmProfile) -> LlmResult<serde
 
     let generation = super::super::shared::resolve_generation(request, profile)?;
     crate::generation::apply_openai_responses(&mut body, &generation)?;
+    crate::generation::apply_compat_strict(&mut body, profile.compat.as_ref());
     super::super::shared::merge_and_apply_params(&mut body, profile, &request.parameters);
 
     if !use_text_mode {
@@ -164,6 +165,29 @@ mod tests {
         assert_eq!(format["name"], serde_json::json!("answer"));
         assert_eq!(format["strict"], serde_json::json!(true));
         assert!(format.get("json_schema").is_none(), "{body:?}");
+    }
+
+    #[test]
+    fn strict_is_relaxed_when_the_endpoint_rejects_it() {
+        let codec = OpenaiResponseCodec::new();
+        let mut request = count_request();
+        request.generation = Some(llm_suite_types::llm::generation::LlmGenerationParams {
+            response_format: Some(llm_suite_types::llm::generation::LlmResponseFormat {
+                kind: Some(llm_suite_types::llm::generation::ResponseFormatKind::JsonSchema),
+                name: Some("answer".to_string()),
+                schema: Some(serde_json::json!({"type": "object"})),
+                strict: Some(true),
+            }),
+            ..Default::default()
+        });
+        let mut profile = count_profile();
+        profile.compat = Some(llm_suite_types::llm::ProviderCompat {
+            supports_strict_mode: Some(false),
+            ..Default::default()
+        });
+        let built = codec.build_request(&request, &profile).expect("must build");
+        let body = request_body(&built);
+        assert_eq!(body["text"]["format"]["strict"], serde_json::json!(false));
     }
 
     #[test]

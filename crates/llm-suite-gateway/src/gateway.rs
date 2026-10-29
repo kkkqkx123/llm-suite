@@ -17,6 +17,7 @@ pub(crate) mod client_cache;
 pub(crate) mod dispatch;
 pub(crate) mod images;
 pub(crate) mod metrics;
+pub(crate) mod migrate;
 pub(crate) mod mock;
 pub(crate) mod prepare;
 pub(crate) mod probe;

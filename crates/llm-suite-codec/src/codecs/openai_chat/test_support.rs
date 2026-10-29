@@ -411,4 +411,118 @@ mod tests {
             "https://example.openai.azure.com/openai/deployments/gpt4/chat/completions?api-version=2024-01"
         );
     }
+
+    #[test]
+    fn developer_role_replaces_system_when_the_endpoint_expects_it() {
+        let codec = OpenaiChatCodec::new();
+        let mut p = profile();
+        p.compat = Some(llm_suite_types::llm::ProviderCompat {
+            supports_developer_role: Some(true),
+            ..Default::default()
+        });
+        let body = codec
+            .build_body(&request_with_format(ToolCallProtocol::Native), &p)
+            .unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["role"], serde_json::json!("developer"));
+        assert_eq!(
+            messages[0]["content"],
+            serde_json::json!("You are a helper")
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|m| m["role"] != serde_json::json!("system")),
+            "no system role may remain: {messages:?}"
+        );
+    }
+
+    #[test]
+    fn system_role_stays_default_without_compat() {
+        let codec = OpenaiChatCodec::new();
+        let body = codec
+            .build_body(&request_with_format(ToolCallProtocol::Native), &profile())
+            .unwrap();
+        assert_eq!(body["messages"][0]["role"], serde_json::json!("system"));
+    }
+
+    #[test]
+    fn text_mode_system_insertion_follows_the_developer_role() {
+        let codec = OpenaiChatCodec::new();
+        let mut p = profile();
+        p.compat = Some(llm_suite_types::llm::ProviderCompat {
+            supports_developer_role: Some(true),
+            ..Default::default()
+        });
+        let body = codec
+            .build_body(&request_with_format(ToolCallProtocol::Xml), &p)
+            .unwrap();
+        assert_eq!(body["messages"][0]["role"], serde_json::json!("developer"));
+    }
+
+    #[test]
+    fn mid_conversation_systems_move_first_when_the_endpoint_requires_it() {
+        let codec = OpenaiChatCodec::new();
+        let mut req = request_with_format(ToolCallProtocol::Native);
+        req.messages = vec![
+            text_msg(MessageRole::User, "first question"),
+            text_msg(MessageRole::System, "late instruction"),
+            text_msg(MessageRole::User, "second question"),
+        ];
+        let mut p = profile();
+        p.compat = Some(llm_suite_types::llm::ProviderCompat {
+            supports_mid_convo_system_messages: Some(false),
+            ..Default::default()
+        });
+        let body = codec.build_body(&req, &p).unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["role"], serde_json::json!("system"));
+        assert!(
+            messages[1..]
+                .iter()
+                .all(|m| m["role"] != serde_json::json!("system")),
+            "only the leading system may remain: {messages:?}"
+        );
+    }
+
+    #[test]
+    fn mid_conversation_order_is_kept_without_compat() {
+        let codec = OpenaiChatCodec::new();
+        let mut req = request_with_format(ToolCallProtocol::Native);
+        req.messages = vec![
+            text_msg(MessageRole::User, "first question"),
+            text_msg(MessageRole::System, "late instruction"),
+            text_msg(MessageRole::User, "second question"),
+        ];
+        let body = codec.build_body(&req, &profile()).unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        let roles: Vec<&str> = messages.iter().filter_map(|m| m["role"].as_str()).collect();
+        assert_eq!(roles, vec!["user", "system", "user"]);
+    }
+
+    #[test]
+    fn strict_response_format_is_relaxed_when_the_endpoint_rejects_it() {
+        use llm_suite_types::llm::generation::{LlmResponseFormat, ResponseFormatKind};
+        let codec = OpenaiChatCodec::new();
+        let mut req = request_with_format(ToolCallProtocol::Native);
+        req.generation = Some(llm_suite_types::llm::generation::LlmGenerationParams {
+            response_format: Some(LlmResponseFormat {
+                kind: Some(ResponseFormatKind::JsonSchema),
+                name: Some("answer".to_string()),
+                schema: Some(serde_json::json!({"type": "object"})),
+                strict: Some(true),
+            }),
+            ..Default::default()
+        });
+        let mut p = profile();
+        p.compat = Some(llm_suite_types::llm::ProviderCompat {
+            supports_strict_mode: Some(false),
+            ..Default::default()
+        });
+        let body = codec.build_body(&req, &p).unwrap();
+        assert_eq!(
+            body["response_format"]["json_schema"]["strict"],
+            serde_json::json!(false)
+        );
+    }
 }

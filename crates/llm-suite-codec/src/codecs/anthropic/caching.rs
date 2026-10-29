@@ -1,12 +1,35 @@
 //! Prompt-caching breakpoints on the Anthropic request body.
 
-use llm_suite_types::llm::LlmPromptCaching;
+use llm_suite_types::llm::{LlmPromptCaching, ProviderCompat};
 
 /// Apply prompt-caching breakpoints (official `CacheControlEphemeralParam`
 /// shape: `{"type": "ephemeral", "ttl": "5m" | "1h"}`) on the last tool
 /// declaration, the system block, the first message and the last message
-/// — the four breakpoints the API allows.
-pub fn apply_prompt_caching(body: &mut serde_json::Value, caching: &LlmPromptCaching) {
+/// — the four breakpoints the API allows — honoring the endpoint compat.
+///
+/// Endpoints that reject the long retention (`supports_long_cache_retention
+/// == Some(false)`) get the provider-default retention instead of `1h`:
+/// the `ttl` marker is omitted, which the API reads as its default. Any
+/// other ttl value, and any other compat, passes through untouched.
+pub fn apply_prompt_caching_with_compat(
+    body: &mut serde_json::Value,
+    caching: &LlmPromptCaching,
+    compat: Option<&ProviderCompat>,
+) {
+    let long_retention_rejected =
+        compat.and_then(|c| c.supports_long_cache_retention) == Some(false);
+    let effective_ttl = match (&caching.ttl, long_retention_rejected) {
+        (Some(ttl), true) if ttl == "1h" => {
+            tracing::debug!("endpoint rejects long cache retention; using default retention");
+            None
+        }
+        (ttl, _) => ttl.clone(),
+    };
+    let effective = LlmPromptCaching { ttl: effective_ttl };
+    apply_with_ttl(body, &effective);
+}
+
+fn apply_with_ttl(body: &mut serde_json::Value, caching: &LlmPromptCaching) {
     let mut control = serde_json::json!({"type": "ephemeral"});
     if let Some(ttl) = &caching.ttl {
         control["ttl"] = serde_json::json!(ttl);

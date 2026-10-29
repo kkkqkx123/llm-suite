@@ -211,7 +211,14 @@ pub fn parse_response_inner(body: &str) -> LlmResult<LlmResponseType> {
         }
     }
 
-    let usage = json.get("usage").map(parse_responses_usage);
+    let mut usage = json.get("usage").map(parse_responses_usage);
+    if usage.as_ref().and_then(|u| u.provider_total).is_none() {
+        if let Some(total) = crate::codecs::helpers::parse_provider_total(&json) {
+            if let Some(stats) = usage.as_mut() {
+                stats.provider_total = Some(total);
+            }
+        }
+    }
 
     let message = llm_suite_types::message::Message {
         id: llm_suite_types::Id::new(),

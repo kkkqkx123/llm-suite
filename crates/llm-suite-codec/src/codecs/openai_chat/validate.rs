@@ -11,7 +11,7 @@ use llm_suite_types::message::{MessageContent, MessageContentValue, MessageRole}
 /// as inline blocks, so this only applies to native (non-text) requests.
 ///
 /// A message whose result lives in a rich `ToolResult` block is not checked:
-/// `convert_openai_messages` turns that block into a standalone `tool`
+/// the message converter turns that block into a standalone `tool`
 /// message that carries the id, and the source message itself never reaches
 /// the wire as a `tool` entry.
 pub fn validate_openai_chat_messages(request: &LlmRequest) -> LlmResult<()> {
