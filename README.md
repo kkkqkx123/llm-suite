@@ -49,7 +49,7 @@ The crates form a strict DAG from protocol leaves up to the gateway:
 | `llm-suite-client` | Transport layer: an async client trait plus a reqwest-backed HTTP implementation (SSE streaming supported), stream accumulation, a dead-loop guard for pathological streams, a generic usage sink, and feature-gated scripted/TCP mocks for testing. |
 | `llm-suite-chat-basic` | A minimal OpenAI-compatible `/chat/completions` client: request building, retry with backoff, client-side rate limiting, and both blocking and streaming calls. Intentionally codec-free for simple use cases. |
 | `llm-suite-embedding` | Embedding capability: a provider trait plus an OpenAI-compatible HTTP implementation covering OpenAI, Gemini, Azure and Ollama endpoints, with a text preprocessing pipeline. |
-| `llm-suite-rerank` | Rerank capability: a Cohere-compatible dedicated `/rerank` provider and a generative (LLM-based) reranker, with result fusion strategies. |
+| `llm-suite-decision` | Decision capability: OpenAI `/decisions` and Jev/TypeSafe `/v1/systemone` clients, shared question/answer types, config, mock provider. |
 | `llm-suite-config` | Configuration layer: provider definition registry, named profiles, model catalog (loaded from JSON) and request merging that applies profile/provider/model defaults onto outgoing requests. |
 | `llm-suite-gateway` | The orchestration entry point (`LlmGateway`): mandatory profile resolution, request merging, client caching, mock routing for tests, and metrics hooks. Host code talks only to this crate. |
 

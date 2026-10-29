@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/llm-suite-common",
+    "crates/llm-suite-decision",
     "crates/llm-suite-types",
     "crates/llm-suite-embedding",
     "crates/llm-suite-chat-basic",
