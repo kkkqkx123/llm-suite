@@ -3,15 +3,12 @@
 //! Provides fast token count estimation supporting ASCII, CJK, and other Unicode.
 //! Used across the codebase for LLM request sizing, chunking, and content compression.
 
-/// Tokens per ASCII symbol (punctuation) character (default: 1.0)
+/// Tokens per ASCII symbol (punctuation) character (default: 0.5)
 ///
 /// Symbols like `->`, `(`, `{` are typically tokenized separately from
 /// identifiers. Counting them at the latin factor would underestimate
-/// code-heavy text. 1.0 per symbol is the conservative single value shared
-/// with the host token estimation: it errs toward over-counting, which
-/// protects batch budgets against provider 400s rather than silently
-/// truncating provider context.
-pub const SYMBOL_FACTOR: f32 = 1.0;
+/// code-heavy text; 0.5 per symbol approximates standalone punctuation tokens.
+pub const SYMBOL_FACTOR: f32 = 0.5;
 
 /// Tokens per message metadata overhead (role, separators, etc.)
 pub const MESSAGE_OVERHEAD_TOKENS: u32 = 4;
