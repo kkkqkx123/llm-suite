@@ -24,6 +24,15 @@ impl LlmGateway {
 
         let prepared = self.prepare(request).await?;
         self.admit(&prepared).await?;
+        if let Some(on_request) = self.probe.on_request {
+            on_request(&prepared.effective, &prepared.profile);
+        }
+        tracing::debug!(
+            profile_id = prepared.profile.id.as_str(),
+            model = prepared.profile.model.as_str(),
+            message_count = prepared.effective.messages.len(),
+            "llm request dispatched"
+        );
         let start = std::time::Instant::now();
         let timeout_ms = prepared.effective.timeout_ms;
         let result = bound(timeout_ms, async {
@@ -32,6 +41,9 @@ impl LlmGateway {
         .await;
         Self::record_breaker(prepared.breaker.as_ref(), &result);
         let duration_ms = start.elapsed().as_millis() as f64;
+        if let Some(on_response) = self.probe.on_response {
+            on_response(&prepared.effective, &result, duration_ms);
+        }
         let context = self.call_context(&prepared);
         match &result {
             Ok(response) => {
@@ -57,6 +69,15 @@ impl LlmGateway {
 
         let prepared = self.prepare(request).await?;
         self.admit(&prepared).await?;
+        if let Some(on_request) = self.probe.on_request {
+            on_request(&prepared.effective, &prepared.profile);
+        }
+        tracing::debug!(
+            profile_id = prepared.profile.id.as_str(),
+            model = prepared.profile.model.as_str(),
+            message_count = prepared.effective.messages.len(),
+            "llm stream request dispatched"
+        );
         let start = std::time::Instant::now();
         let timeout_ms = prepared.effective.timeout_ms;
         // The per-request bound covers stream establishment only (including
@@ -71,6 +92,9 @@ impl LlmGateway {
         .await;
         Self::record_breaker(prepared.breaker.as_ref(), &stream);
         let duration_ms = start.elapsed().as_millis() as f64;
+        if let Some(on_stream_start) = self.probe.on_stream_start {
+            on_stream_start(&prepared.effective, stream.is_ok(), duration_ms);
+        }
         let context = self.call_context(&prepared);
         match &stream {
             Ok(_) => {

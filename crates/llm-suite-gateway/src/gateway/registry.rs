@@ -2,9 +2,9 @@
 
 use llm_suite_auth::AuthRegistry;
 use llm_suite_codec::error::LlmResult;
-use llm_suite_config::catalog::ModelCatalog;
 use llm_suite_config::profile::ProfileManager;
 use llm_suite_config::provider::{apply_provider_defaults, ProviderDefinitionRegistry};
+use llm_suite_discovery::ModelCatalog;
 use llm_suite_types::llm::LlmProfile;
 use std::sync::Arc;
 

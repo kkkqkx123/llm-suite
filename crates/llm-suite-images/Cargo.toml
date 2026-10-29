@@ -1,0 +1,29 @@
+[package]
+name = "llm-suite-images"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Image generation client for LLM providers"
+
+[features]
+default = []
+# Feature-gated mock provider for tests.
+mock = []
+
+[dependencies]
+llm-suite-common.workspace = true
+llm-suite-proxy.workspace = true
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+reqwest = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+async-trait = { workspace = true }

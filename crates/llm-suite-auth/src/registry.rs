@@ -422,6 +422,7 @@ mod tests {
                 provider_id: "acme".to_string(),
                 method: None,
             }),
+            compat: None,
         }
     }
 

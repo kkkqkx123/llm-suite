@@ -1,266 +1,124 @@
-use llm_suite_types::llm::{LlmProviderDefinition, ModelDiscovery, ModelInfo};
+//! Profile-side catalog helpers (no network).
+//!
+//! The network half of discovery (`ModelCatalog`, endpoint joining,
+//! extraction, credential filtering) lives in `llm-suite-discovery`.
+//! What stays here is pure and dependency-free: bridging a caller-supplied
+//! model catalog slice into profile defaults. The caller builds the slice
+//! from its own pricing table or discovery results, so this crate never
+//! carries concrete provider or model data.
 
-use llm_suite_codec::error::{LlmError, LlmResult};
+use llm_suite_types::llm::{LlmProfile, ModelMetadata};
 
-/// Default path of the models endpoint below the version segment.
-pub const DEFAULT_MODELS_PATH: &str = "models";
-/// Default extraction rule covering OpenAI-style `{ "data": [{ "id": .. }] }`.
-pub const DEFAULT_MODELS_JSON_PATH: &str = "data[*].id";
-
-/// Off-hot-path model listing for a provider definition.
+/// Fill profile gaps from a model catalog slice.
 ///
-/// Serves CLI listing, API listing and assembly-time checks. Discovery
-/// failures are reported as errors to the caller; callers at assembly time
-/// degrade them to warnings and never block profile registration.
-#[derive(Clone)]
-pub struct ModelCatalog {
-    client: reqwest::Client,
-}
-
-impl ModelCatalog {
-    pub fn new() -> Self {
-        Self {
-            client: reqwest::Client::new(),
+/// Only fills `context_window_size` when the profile leaves it empty and
+/// an entry matches `profile.model` exactly (optionally scoped by
+/// `profile.provider_id`). Never overwrites explicit config.
+pub fn apply_catalog_metadata(mut profile: LlmProfile, catalog: &[ModelMetadata]) -> LlmProfile {
+    if profile.context_window_size.is_some() {
+        return profile;
+    }
+    if let Some(entry) = catalog_entry_for_profile(&profile, catalog) {
+        if let Some(window) = entry.context_window {
+            profile.context_window_size = Some(window);
         }
     }
-
-    /// List the models advertized by a provider definition.
-    ///
-    /// `api_key` carries the effective profile key when the caller has one;
-    /// definitions without remote discovery return without using it.
-    pub async fn list_models(
-        &self,
-        definition: &LlmProviderDefinition,
-        api_key: Option<&str>,
-    ) -> LlmResult<Vec<ModelInfo>> {
-        let discovery = definition
-            .model_discovery
-            .clone()
-            .unwrap_or(ModelDiscovery::Disabled);
-        match discovery {
-            ModelDiscovery::Disabled => Ok(Vec::new()),
-            ModelDiscovery::StaticList { models } => Ok(models),
-            ModelDiscovery::ModelsEndpoint { path, json_path } => {
-                let base_url = definition.base_url.clone().ok_or_else(|| {
-                    LlmError::ConfigError(format!(
-                        "Provider '{}' has no base_url for model discovery",
-                        definition.id
-                    ))
-                })?;
-                let url = join_models_url(
-                    &base_url,
-                    definition.api_version.as_deref(),
-                    path.as_deref(),
-                );
-                let mut request = self.client.get(&url);
-                request = apply_discovery_auth(
-                    request,
-                    definition.auth_type.as_deref().unwrap_or("native"),
-                    api_key,
-                );
-                if let Some(headers) = definition.default_headers.as_ref() {
-                    for (key, value) in headers {
-                        request = request.header(key, value.as_str().unwrap_or(""));
-                    }
-                }
-                let response = request.send().await?;
-                let status = response.status();
-                let body = response.text().await.unwrap_or_default();
-                if !status.is_success() {
-                    return Err(LlmError::ProviderError {
-                        status: Some(status.as_u16()),
-                        message: body,
-                        retry_after_ms: None,
-                    });
-                }
-                let json: serde_json::Value = serde_json::from_str(&body)?;
-                Ok(extract_models(
-                    &json,
-                    json_path.as_deref().unwrap_or(DEFAULT_MODELS_JSON_PATH),
-                ))
-            }
-            ModelDiscovery::CustomEndpoint {
-                url,
-                method,
-                headers,
-                json_path,
-            } => {
-                let method = method.as_deref().unwrap_or("GET");
-                let mut request = self.client.request(
-                    method.parse().map_err(|_| {
-                        LlmError::ConfigError(format!(
-                            "Provider '{}' has an invalid discovery method '{}'",
-                            definition.id, method
-                        ))
-                    })?,
-                    &url,
-                );
-                if let Some(headers) = headers.as_ref() {
-                    for (key, value) in headers {
-                        request = request.header(key, value.as_str().unwrap_or(""));
-                    }
-                }
-                let response = request.send().await?;
-                let status = response.status();
-                let body = response.text().await.unwrap_or_default();
-                if !status.is_success() {
-                    return Err(LlmError::ProviderError {
-                        status: Some(status.as_u16()),
-                        message: body,
-                        retry_after_ms: None,
-                    });
-                }
-                let json: serde_json::Value = serde_json::from_str(&body)?;
-                Ok(extract_models(
-                    &json,
-                    json_path.as_deref().unwrap_or(DEFAULT_MODELS_JSON_PATH),
-                ))
-            }
-        }
-    }
+    profile
 }
 
-impl Default for ModelCatalog {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Join `{base_url}/{api_version}/{path}` tolerating trailing slashes and a
-/// base URL that already ends with the version segment.
-pub fn join_models_url(base_url: &str, api_version: Option<&str>, path: Option<&str>) -> String {
-    let mut url = base_url.trim_end_matches('/').to_string();
-    let version = api_version.unwrap_or("v1");
-    if !version.is_empty() && !url.ends_with(&format!("/{version}")) {
-        url.push('/');
-        url.push_str(version);
-    }
-    let path = path.unwrap_or(DEFAULT_MODELS_PATH);
-    if !path.is_empty() {
-        url.push('/');
-        url.push_str(path.trim_start_matches('/'));
-    }
-    url
-}
-
-fn apply_discovery_auth(
-    request: reqwest::RequestBuilder,
-    auth_type: &str,
-    api_key: Option<&str>,
-) -> reqwest::RequestBuilder {
-    let Some(api_key) = api_key else {
-        return request;
-    };
-    match auth_type {
-        "x-api-key" => request.header("x-api-key", api_key),
-        "x-goog-api-key" => request.header("x-goog-api-key", api_key),
-        _ => request.header("Authorization", format!("Bearer {api_key}")),
-    }
-}
-
-/// Extract model ids from a JSON document following a `a.b[*].c` rule.
-///
-/// A `[*]` segment maps over arrays; a trailing scalar segment yields ids
-/// directly, while objects yield their `id` field when present.
-pub fn extract_models(value: &serde_json::Value, json_path: &str) -> Vec<ModelInfo> {
-    let segments: Vec<&str> = json_path.split('.').collect();
-    let mut current = vec![value];
-    for segment in segments {
-        let mut next = Vec::new();
-        if let Some(key) = segment.strip_suffix("[*]") {
-            for item in current {
-                let target = if key.is_empty() { item } else { &item[key] };
-                if let Some(array) = target.as_array() {
-                    next.extend(array.iter());
-                }
-            }
-        } else {
-            for item in current {
-                let target = &item[segment];
-                if !target.is_null() {
-                    next.push(target);
-                }
-            }
-        }
-        current = next;
-    }
-    current
-        .into_iter()
-        .filter_map(|item| {
-            if let Some(id) = item.as_str() {
-                Some(ModelInfo {
-                    id: id.to_string(),
-                    name: None,
-                    context_window_size: None,
-                    metadata: None,
-                })
-            } else {
-                item.get("id")
-                    .and_then(|id| id.as_str())
-                    .map(|id| ModelInfo {
-                        id: id.to_string(),
-                        name: item
-                            .get("name")
-                            .and_then(|name| name.as_str())
-                            .map(String::from),
-                        context_window_size: None,
-                        metadata: None,
-                    })
-            }
-        })
-        .collect()
+/// Look up the catalog entry a profile resolves to, if any.
+pub fn catalog_entry_for_profile<'a>(
+    profile: &LlmProfile,
+    catalog: &'a [ModelMetadata],
+) -> Option<&'a ModelMetadata> {
+    catalog.iter().find(|m| {
+        m.id == profile.model
+            && profile
+                .provider_id
+                .as_ref()
+                .map(|id| id == &m.provider_id)
+                .unwrap_or(true)
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use llm_suite_types::llm::{InputModality, LlmFormat, ModelType};
 
-    #[test]
-    fn joins_endpoint_without_duplicating_version() {
-        assert_eq!(
-            join_models_url("https://api.test.com", None, None),
-            "https://api.test.com/v1/models"
-        );
-        assert_eq!(
-            join_models_url("https://api.test.com/", Some("v1"), Some("models")),
-            "https://api.test.com/v1/models"
-        );
-        assert_eq!(
-            join_models_url("https://api.test.com/v1", None, None),
-            "https://api.test.com/v1/models"
-        );
-        assert_eq!(
-            join_models_url("https://api.test.com", Some("v1beta"), None),
-            "https://api.test.com/v1beta/models"
-        );
+    fn test_profile(model: &str, provider_id: Option<&str>) -> LlmProfile {
+        LlmProfile {
+            id: "p".to_string(),
+            name: "p".to_string(),
+            format: LlmFormat::OpenaiChat,
+            provider_id: provider_id.map(str::to_string),
+            model: model.to_string(),
+            api_key: None,
+            base_url: None,
+            parameters: None,
+            generation: None,
+            timeout: None,
+            max_retries: None,
+            retry_delay: None,
+            headers: None,
+            metadata: None,
+            tool_call_protocol: None,
+            auth_type: None,
+            custom_headers: None,
+            custom_body: None,
+            custom_body_enabled: None,
+            query_params: None,
+            stream_options: None,
+            prompt_caching: None,
+            context_window_size: None,
+            proxy: None,
+            no_proxy: None,
+            circuit_breaker: None,
+            auth: None,
+            compat: None,
+        }
+    }
+
+    fn test_entry(id: &str, provider_id: &str, window: Option<u32>) -> ModelMetadata {
+        ModelMetadata {
+            id: id.to_string(),
+            provider_id: provider_id.to_string(),
+            model_type: ModelType::Chat,
+            format: None,
+            context_window: window,
+            max_output_tokens: None,
+            input_modalities: vec![InputModality::Text],
+            reasoning: false,
+            thinking_levels: Vec::new(),
+            cost: None,
+        }
     }
 
     #[test]
-    fn extracts_openai_style_ids() {
-        let body: serde_json::Value = serde_json::json!({
-            "data": [{"id": "a"}, {"id": "b"}]
-        });
-        let models = extract_models(&body, "data[*].id");
-        assert_eq!(
-            models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
-            vec!["a", "b"]
-        );
+    fn fill_only_fills_missing_window() {
+        let catalog = vec![test_entry("m1", "p1", Some(128_000))];
+        let filled = apply_catalog_metadata(test_profile("m1", Some("p1")), &catalog);
+        assert_eq!(filled.context_window_size, Some(128_000));
+
+        let mut explicit = filled.clone();
+        explicit.context_window_size = Some(8_000);
+        let kept = apply_catalog_metadata(explicit, &catalog);
+        assert_eq!(kept.context_window_size, Some(8_000));
+
+        let untouched = apply_catalog_metadata(test_profile("missing", Some("p1")), &catalog);
+        assert_eq!(untouched.context_window_size, None);
     }
 
     #[test]
-    fn extracts_object_ids_with_names() {
-        let body: serde_json::Value = serde_json::json!({
-            "models": [{"id": "m1", "name": "First"}]
-        });
-        let models = extract_models(&body, "models[*]");
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id, "m1");
-        assert_eq!(models[0].name.as_deref(), Some("First"));
-    }
-
-    #[test]
-    fn unknown_paths_yield_empty() {
-        let body: serde_json::Value = serde_json::json!({"data": []});
-        assert!(extract_models(&body, "missing[*].id").is_empty());
+    fn provider_scoping_disambiguates_shared_model_names() {
+        let catalog = vec![
+            test_entry("shared", "a", Some(10)),
+            test_entry("shared", "b", Some(20)),
+        ];
+        let filled = apply_catalog_metadata(test_profile("shared", Some("b")), &catalog);
+        assert_eq!(filled.context_window_size, Some(20));
+        // Without a provider scope the first matching entry wins.
+        let unscoped = apply_catalog_metadata(test_profile("shared", None), &catalog);
+        assert_eq!(unscoped.context_window_size, Some(10));
     }
 }

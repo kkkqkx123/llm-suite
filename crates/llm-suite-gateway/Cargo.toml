@@ -18,6 +18,7 @@ llm-suite-client.workspace = true
 llm-suite-codec.workspace = true
 llm-suite-common.workspace = true
 llm-suite-config.workspace = true
+llm-suite-discovery.workspace = true
 llm-suite-message.workspace = true
 llm-suite-proxy.workspace = true
 llm-token.workspace = true
@@ -27,6 +28,7 @@ reqwest = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 serde_json = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 llm-suite-client = { workspace = true, features = ["mock"] }

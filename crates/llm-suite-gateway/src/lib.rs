@@ -3,3 +3,4 @@
 pub mod gateway;
 
 pub use gateway::LlmGateway;
+pub use gateway::RequestProbe;

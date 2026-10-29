@@ -1,0 +1,14 @@
+[package]
+name = "llm-suite-discovery"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Network model discovery for llm-suite providers"
+
+[dependencies]
+llm-suite-codec.workspace = true
+llm-suite-types.workspace = true
+serde_json = { workspace = true }
+reqwest = { workspace = true }

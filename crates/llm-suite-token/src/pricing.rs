@@ -46,6 +46,32 @@ pub struct TokenPricing {
 }
 
 impl TokenPricing {
+    /// Build a pricing table from a catalog [`ModelCost`].
+    ///
+    /// The catalog form is the host-facing shape (single cache-write
+    /// rate, tiers without a TTL split); the 5-minute write rate carries
+    /// the catalog write price and the 1-hour bucket stays empty for
+    /// callers that track the TTL split themselves.
+    pub fn from_model_cost(cost: &llm_suite_types::llm::ModelCost) -> Self {
+        Self {
+            input_per_mtok: cost.input_per_mtok,
+            output_per_mtok: cost.output_per_mtok,
+            cache_read_per_mtok: cost.cache_read_per_mtok,
+            cache_write_5m_per_mtok: cost.cache_write_per_mtok,
+            cache_write_1h_per_mtok: None,
+            tiers: cost.tiers.as_ref().map(|tiers| {
+                tiers
+                    .iter()
+                    .map(|tier| TokenPricingTier {
+                        up_to_tokens: tier.up_to_tokens,
+                        input_per_mtok: tier.input_per_mtok,
+                        output_per_mtok: tier.output_per_mtok,
+                    })
+                    .collect()
+            }),
+        }
+    }
+
     /// Rates that apply to a request with the given input volume: the
     /// first tier covering the volume wins, otherwise the base rates.
     pub fn rates_for(&self, input_tokens: u64) -> (f64, f64) {
@@ -374,5 +400,34 @@ mod tests {
         let baseline = compute_baseline_cost(&stats, &pricing, CacheTokenScope::SeparateFromPrompt);
         // 10 uncached + 80 cached read + 15 cached write at the input rate.
         assert!((baseline - (105.0 * 3.0 / 1e6 + 20.0 * 15.0 / 1e6)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn from_model_cost_carries_rates_and_tiers() {
+        use llm_suite_types::llm::{ModelCost, ModelCostTier};
+        let cost = ModelCost {
+            input_per_mtok: 3.0,
+            output_per_mtok: 15.0,
+            cache_read_per_mtok: Some(0.3),
+            cache_write_per_mtok: Some(3.75),
+            tiers: Some(vec![
+                ModelCostTier {
+                    up_to_tokens: Some(200_000),
+                    input_per_mtok: 3.0,
+                    output_per_mtok: 15.0,
+                },
+                ModelCostTier {
+                    up_to_tokens: None,
+                    input_per_mtok: 6.0,
+                    output_per_mtok: 22.5,
+                },
+            ]),
+        };
+        let pricing = TokenPricing::from_model_cost(&cost);
+        assert_eq!(pricing.input_per_mtok, 3.0);
+        assert_eq!(pricing.cache_write_5m_per_mtok, Some(3.75));
+        assert_eq!(pricing.cache_write_1h_per_mtok, None);
+        assert_eq!(pricing.rates_for(100), (3.0, 15.0));
+        assert_eq!(pricing.rates_for(500_000), (6.0, 22.5));
     }
 }

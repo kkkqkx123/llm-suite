@@ -6,16 +6,19 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use llm_suite_client::SharedLlmMetricsSink;
 use llm_suite_codec::CodecRegistry;
-use llm_suite_config::catalog::ModelCatalog;
 use llm_suite_config::profile::ProfileManager;
 use llm_suite_config::provider::ProviderDefinitionRegistry;
+use llm_suite_discovery::ModelCatalog;
 use llm_token::PricingResolver;
+
+pub use probe::RequestProbe;
 
 pub(crate) mod client_cache;
 pub(crate) mod dispatch;
 pub(crate) mod metrics;
 pub(crate) mod mock;
 pub(crate) mod prepare;
+pub(crate) mod probe;
 pub(crate) mod registry;
 pub(crate) mod resilience;
 
@@ -54,6 +57,10 @@ pub struct LlmGateway {
     /// for profiles carrying an auth reference. Zero overhead when absent:
     /// profiles without a reference keep their static-key behavior.
     auth: Option<Arc<llm_suite_auth::AuthRegistry>>,
+    /// Optional request observation hooks (concrete `fn` pointers, no
+    /// dynamic dispatch). Empty by default; the hot path checks
+    /// `is_empty` once per call.
+    probe: probe::RequestProbe,
 }
 
 impl LlmGateway {
@@ -77,6 +84,7 @@ impl LlmGateway {
             token_metrics: None,
             pricing_resolver: None,
             auth: None,
+            probe: probe::RequestProbe::default(),
         }
     }
 
@@ -91,6 +99,19 @@ impl LlmGateway {
     pub fn with_pricing_resolver(mut self, resolver: Arc<dyn PricingResolver>) -> Self {
         self.pricing_resolver = Some(resolver);
         self
+    }
+
+    /// Attach request observation hooks (concrete `fn` pointers, no dynamic
+    /// dispatch). The gateway invokes them around dispatch; `None` hooks
+    /// cost a single branch check.
+    pub fn with_request_probe(mut self, probe: probe::RequestProbe) -> Self {
+        self.probe = probe;
+        self
+    }
+
+    /// The currently attached request probe (empty by default).
+    pub fn request_probe(&self) -> &probe::RequestProbe {
+        &self.probe
     }
 
     /// The codec registry: register custom formats here before the

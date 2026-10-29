@@ -7,12 +7,14 @@ members = [
     "crates/llm-suite-embedding",
     "crates/llm-suite-chat-basic",
     "crates/llm-suite-rerank",
+    "crates/llm-suite-images",
     "crates/llm-suite-tool-call",
     "crates/llm-suite-token",
     "crates/llm-suite-message",
     "crates/llm-suite-codec",
     "crates/llm-suite-client",
     "crates/llm-suite-config",
+    "crates/llm-suite-discovery",
     "crates/llm-suite-gateway",
     "crates/llm-suite-proxy",
     "crates/llm-suite-auth",
@@ -39,8 +41,10 @@ llm-suite-codec = { version = "0.1.0", path = "crates/llm-suite-codec" }
 llm-suite-embedding = { version = "0.1.0", path = "crates/llm-suite-embedding" }
 llm-suite-chat-basic = { version = "0.1.0", path = "crates/llm-suite-chat-basic" }
 llm-suite-rerank = { version = "0.1.0", path = "crates/llm-suite-rerank" }
+llm-suite-images = { version = "0.1.0", path = "crates/llm-suite-images" }
 llm-suite-client = { version = "0.1.0", path = "crates/llm-suite-client" }
 llm-suite-config = { version = "0.1.0", path = "crates/llm-suite-config" }
+llm-suite-discovery = { version = "0.1.0", path = "crates/llm-suite-discovery" }
 llm-suite-gateway = { version = "0.1.0", path = "crates/llm-suite-gateway" }
 # Alias kept for the gateway's existing `llm_token::` call sites.
 llm-token = { package = "llm-suite-token", version = "0.1.0", path = "crates/llm-suite-token" }
