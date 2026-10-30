@@ -11,16 +11,26 @@ use llm_suite_types::llm::{LlmProfile, ModelMetadata};
 
 /// Fill profile gaps from a model catalog slice.
 ///
-/// Only fills `context_window_size` when the profile leaves it empty and
-/// an entry matches `profile.model` exactly (optionally scoped by
-/// `profile.provider_id`). Never overwrites explicit config.
+/// Only fills `context_window_size` and `max_output_tokens` when the profile
+/// leaves them empty and an entry matches `profile.model` exactly (optionally
+/// scoped by `profile.provider_id`). Never overwrites explicit config.
+/// `format` is never auto-filled here: silently switching the wire format
+/// would change codec, auth headers and endpoint semantics, so a mismatch
+/// is reported by the caller instead.
 pub fn apply_catalog_metadata(mut profile: LlmProfile, catalog: &[ModelMetadata]) -> LlmProfile {
-    if profile.context_window_size.is_some() {
+    if profile.context_window_size.is_some() && profile.max_output_tokens.is_some() {
         return profile;
     }
     if let Some(entry) = catalog_entry_for_profile(&profile, catalog) {
-        if let Some(window) = entry.context_window {
-            profile.context_window_size = Some(window);
+        if profile.context_window_size.is_none() {
+            if let Some(window) = entry.context_window {
+                profile.context_window_size = Some(window);
+            }
+        }
+        if profile.max_output_tokens.is_none() {
+            if let Some(max_output) = entry.max_output_tokens {
+                profile.max_output_tokens = Some(max_output);
+            }
         }
     }
     profile
@@ -71,6 +81,7 @@ mod tests {
             stream_options: None,
             prompt_caching: None,
             context_window_size: None,
+            max_output_tokens: None,
             proxy: None,
             no_proxy: None,
             circuit_breaker: None,
@@ -110,6 +121,22 @@ mod tests {
 
         let untouched = apply_catalog_metadata(test_profile("missing", Some("p1")), &catalog);
         assert_eq!(untouched.context_window_size, None);
+    }
+
+    #[test]
+    fn fill_fills_max_output_tokens_without_overwriting_explicit() {
+        let mut entry = test_entry("m1", "p1", Some(128_000));
+        entry.max_output_tokens = Some(8_192);
+        let catalog = vec![entry];
+        let filled = apply_catalog_metadata(test_profile("m1", Some("p1")), &catalog);
+        assert_eq!(filled.context_window_size, Some(128_000));
+        assert_eq!(filled.max_output_tokens, Some(8_192));
+
+        let mut explicit = filled.clone();
+        explicit.max_output_tokens = Some(4_096);
+        let kept = apply_catalog_metadata(explicit, &catalog);
+        assert_eq!(kept.max_output_tokens, Some(4_096));
+        assert_eq!(kept.context_window_size, Some(128_000));
     }
 
     #[test]

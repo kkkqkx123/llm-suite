@@ -190,6 +190,7 @@ mod tests {
             stream_options: None,
             prompt_caching: None,
             context_window_size: None,
+            max_output_tokens: None,
             proxy: None,
             no_proxy: None,
             circuit_breaker: None,

@@ -99,6 +99,16 @@ pub struct LlmProfile {
     /// 256000 (Gemini 2.5 Pro), 1048576 (Gemini 2.5 Pro extended).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window_size: Option<u32>,
+    /// Model's maximum output token limit in tokens.
+    ///
+    /// This is a **model capability** hint, distinct from the per-request
+    /// `generation.max_tokens` output limit that actually travels the wire.
+    /// Consumers are runtime context budgeting, UI display and
+    /// `assemble_check`/bootstrap backfill; the wire side keeps using
+    /// `generation.max_tokens` (Anthropic falls back to
+    /// `ANTHROPIC_DEFAULT_MAX_TOKENS` when unset).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
     /// Optional proxy URL (http/https/socks5) applied to the HTTP client.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy: Option<String>,
