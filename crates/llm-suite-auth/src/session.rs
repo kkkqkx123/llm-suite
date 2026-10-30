@@ -466,6 +466,7 @@ mod tests {
                 client_id: "cid".to_string(),
                 scope: None,
                 is_subscription: true,
+                token_content_type: crate::oauth::TokenRequestContentType::Form,
             },
             "dc".to_string(),
             "WDJB-MJHT".to_string(),
@@ -495,6 +496,7 @@ mod tests {
             scope: None,
             loopback: false,
             is_subscription: false,
+            token_content_type: crate::oauth::TokenRequestContentType::Form,
         })
         .await
         .expect("start");

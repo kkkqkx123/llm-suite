@@ -10,7 +10,7 @@ use serde::Deserialize;
 use crate::credential::OAuthCredential;
 use crate::error::{AuthError, AuthResult};
 use crate::interaction::AuthEvent;
-use crate::oauth::{credential_from_token, form_body, TokenResponse};
+use crate::oauth::{credential_from_token, token_request, TokenRequestContentType, TokenResponse};
 
 /// Default polling interval when the server omits one.
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -24,6 +24,10 @@ pub struct DeviceFlowConfig {
     pub scope: Option<String>,
     /// Whether access through this flow is backed by a subscription.
     pub is_subscription: bool,
+    /// Token endpoint body encoding. The device authorization request itself
+    /// stays `application/x-www-form-urlencoded` per RFC 8628; this flag only
+    /// governs the token poll (and refresh) request.
+    pub token_content_type: TokenRequestContentType,
 }
 
 /// Device authorization endpoint response.
@@ -75,13 +79,17 @@ pub async fn start(
     if let Some(scope) = config.scope.as_deref() {
         form.push(("scope", scope));
     }
-    let response = client
-        .post(&config.device_authorization_url)
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(form_body(&form))
-        .send()
-        .await
-        .map_err(|e| AuthError::Transport(e.to_string()))?;
+    // RFC 8628 device authorization requests are always form-encoded;
+    // `token_content_type` only governs the token poll below.
+    let response = token_request(
+        &client,
+        &config.device_authorization_url,
+        TokenRequestContentType::Form,
+        &form,
+    )
+    .send()
+    .await
+    .map_err(|e| AuthError::Transport(e.to_string()))?;
     let status = response.status();
     let body = response
         .text()
@@ -177,16 +185,15 @@ impl DeviceFlowPending {
             ("device_code", self.device_code.as_str()),
             ("client_id", self.config.client_id.as_str()),
         ];
-        let response = self
-            .client
-            .post(&self.config.token_url)
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .body(form_body(
-                &form.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>(),
-            ))
-            .send()
-            .await
-            .map_err(|e| AuthError::Transport(e.to_string()))?;
+        let response = token_request(
+            &self.client,
+            &self.config.token_url,
+            self.config.token_content_type,
+            &form,
+        )
+        .send()
+        .await
+        .map_err(|e| AuthError::Transport(e.to_string()))?;
         let status = response.status();
         let body = response
             .text()
@@ -238,6 +245,7 @@ mod tests {
             client_id: "cid".to_string(),
             scope: None,
             is_subscription: true,
+            token_content_type: TokenRequestContentType::Form,
         };
         let pending = DeviceFlowPending {
             config,

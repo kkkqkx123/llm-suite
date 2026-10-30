@@ -15,7 +15,7 @@ use tokio::net::TcpListener;
 
 use crate::credential::OAuthCredential;
 use crate::error::{AuthError, AuthResult};
-use crate::oauth::{credential_from_token, form_body, TokenResponse};
+use crate::oauth::{credential_from_token, token_request, TokenRequestContentType, TokenResponse};
 
 /// A PKCE verifier/challenge pair.
 #[derive(Debug, Clone)]
@@ -50,6 +50,10 @@ pub struct PkceConfig {
     pub loopback: bool,
     /// Whether access through this flow is backed by a subscription.
     pub is_subscription: bool,
+    /// Token endpoint body encoding. `Form` is the RFC 6749 default;
+    /// `Json` covers providers that require a JSON token request with the
+    /// same fields (e.g. Anthropic).
+    pub token_content_type: TokenRequestContentType,
 }
 
 /// A started PKCE flow awaiting the authorization code.
@@ -250,13 +254,15 @@ impl PkcePending {
             ("client_id", self.config.client_id.as_str()),
             ("code_verifier", self.verifier.as_str()),
         ];
-        let response = client
-            .post(&self.config.token_url)
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .body(form_body(&form))
-            .send()
-            .await
-            .map_err(|e| AuthError::Transport(e.to_string()))?;
+        let response = token_request(
+            client,
+            &self.config.token_url,
+            self.config.token_content_type,
+            &form,
+        )
+        .send()
+        .await
+        .map_err(|e| AuthError::Transport(e.to_string()))?;
         let status = response.status();
         let body = response
             .text()
@@ -332,6 +338,7 @@ mod tests {
             scope: Some("api".to_string()),
             loopback: false,
             is_subscription: true,
+            token_content_type: crate::oauth::TokenRequestContentType::Form,
         })
         .await
         .expect("start");
@@ -353,6 +360,7 @@ mod tests {
             scope: None,
             loopback: true,
             is_subscription: false,
+            token_content_type: crate::oauth::TokenRequestContentType::Form,
         })
         .await
         .expect("start");
@@ -387,6 +395,7 @@ mod tests {
             scope: None,
             loopback: true,
             is_subscription: false,
+            token_content_type: crate::oauth::TokenRequestContentType::Form,
         })
         .await
         .expect("start");
