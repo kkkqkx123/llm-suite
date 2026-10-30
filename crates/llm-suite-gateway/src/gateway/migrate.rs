@@ -28,6 +28,24 @@ impl LlmGateway {
         from_profile_id: Option<&str>,
         to_profile_id: &str,
     ) -> Vec<Message> {
+        self.migrate_history_for_profile_with_image_support(
+            messages,
+            from_profile_id,
+            to_profile_id,
+            true,
+        )
+    }
+
+    /// Variant of [`Self::migrate_history_for_profile`] that lets the caller
+    /// refine the target's image capability from a model catalog instead of
+    /// assuming every wire format carries images.
+    pub fn migrate_history_for_profile_with_image_support(
+        &self,
+        messages: &[Message],
+        from_profile_id: Option<&str>,
+        to_profile_id: &str,
+        supports_image: bool,
+    ) -> Vec<Message> {
         let Some(target) = self.profiles.get(to_profile_id) else {
             return messages.to_vec();
         };
@@ -35,7 +53,10 @@ impl LlmGateway {
             .and_then(|id| self.profiles.get(id))
             .map(|source| source.model == target.model && source.format == target.format)
             .unwrap_or(false);
-        let wire_target = TransformTarget::for_format(&target.format, same_model);
+        let wire_target = TransformTarget {
+            supports_image,
+            same_model,
+        };
         transform_for_target(messages, &wire_target)
     }
 }

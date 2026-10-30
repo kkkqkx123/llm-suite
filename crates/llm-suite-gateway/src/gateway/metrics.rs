@@ -136,7 +136,13 @@ impl TokenUsageSink for CostEnrichingSink {
                     &resolved.pricing,
                     resolved.scope,
                 ));
+            } else if enriched.usage.total_cost.is_none() {
+                // Keep a provider-reported billing total usable even when no
+                // catalog pricing is available for this model.
+                enriched.usage.total_cost = enriched.usage.provider_total;
             }
+        } else if enriched.usage.total_cost.is_none() {
+            enriched.usage.total_cost = enriched.usage.provider_total;
         }
         self.inner.record_token_usage(&enriched);
     }

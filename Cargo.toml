@@ -5,7 +5,6 @@ members = [
     "crates/llm-suite-decision",
     "crates/llm-suite-types",
     "crates/llm-suite-embedding",
-    "crates/llm-suite-chat-basic",
     "crates/llm-suite-rerank",
     "crates/llm-suite-images",
     "crates/llm-suite-tool-call",
@@ -39,7 +38,6 @@ llm-suite-message = { version = "0.1.0", path = "crates/llm-suite-message" }
 llm-suite-tool-call = { version = "0.1.0", path = "crates/llm-suite-tool-call" }
 llm-suite-codec = { version = "0.1.0", path = "crates/llm-suite-codec" }
 llm-suite-embedding = { version = "0.1.0", path = "crates/llm-suite-embedding" }
-llm-suite-chat-basic = { version = "0.1.0", path = "crates/llm-suite-chat-basic" }
 llm-suite-rerank = { version = "0.1.0", path = "crates/llm-suite-rerank" }
 llm-suite-images = { version = "0.1.0", path = "crates/llm-suite-images" }
 llm-suite-client = { version = "0.1.0", path = "crates/llm-suite-client" }

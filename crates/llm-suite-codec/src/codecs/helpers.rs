@@ -225,20 +225,68 @@ fn truncate(s: &str) -> String {
 /// non-numeric or negative value is ignored so a malformed extension can
 /// never poison cost accounting. String-encoded numbers are accepted
 /// because some gateways serialize the decimal as a string.
+fn parse_cost_value(value: &serde_json::Value) -> Option<f64> {
+    let parsed = if let Some(number) = value.as_f64() {
+        Some(number)
+    } else if let Some(text) = value.as_str() {
+        text.parse::<f64>().ok()
+    } else {
+        None
+    };
+    parsed.filter(|total| total.is_finite() && *total >= 0.0)
+}
+
+/// Billing total reported by the provider itself, when present.
+///
+/// The official usage shapes carry no such field; OpenAI-compatible
+/// gateways (OpenRouter and aggregators) attach it as a numeric `cost`,
+/// `total_cost` or `provider_cost` extension next to the counters. A
+/// non-numeric or negative value is ignored so a malformed extension can
+/// never poison cost accounting. String-encoded numbers are accepted
+/// because some gateways serialize the decimal as a string.
+///
+/// OpenRouter additionally reports BYOK upstream costs under
+/// `cost_details`; in that case the billed total is `cost` plus the
+/// upstream inference cost, mirroring pi's `applyOpenRouterReportedCost`.
 pub fn parse_provider_total(usage: &serde_json::Value) -> Option<f64> {
-    for key in ["cost", "total_cost", "provider_cost"] {
-        let Some(value) = usage.get(key) else {
-            continue;
-        };
-        let parsed = if let Some(number) = value.as_f64() {
-            Some(number)
-        } else if let Some(text) = value.as_str() {
-            text.parse::<f64>().ok()
-        } else {
-            continue;
-        };
-        if let Some(total) = parsed {
-            if total.is_finite() && total >= 0.0 {
+    // OpenRouter BYOK: the charged total is the gateway cost plus the
+    // upstream provider cost. Handle this before the generic single-field
+    // fallback so a BYOK response is not under-counted.
+    if let Some(cost) = usage.get("cost").and_then(parse_cost_value) {
+        let is_byok = usage.get("is_byok").and_then(|value| value.as_bool());
+        if is_byok == Some(true) {
+            if let Some(details) = usage.get("cost_details") {
+                let upstream = details
+                    .get("upstream_inference_cost")
+                    .and_then(parse_cost_value)
+                    .or_else(|| {
+                        let prompt = details
+                            .get("upstream_inference_prompt_cost")
+                            .and_then(parse_cost_value)?;
+                        let completion = details
+                            .get("upstream_inference_completions_cost")
+                            .and_then(parse_cost_value)?;
+                        Some(prompt + completion)
+                    });
+                if let Some(upstream) = upstream {
+                    return Some(cost + upstream);
+                }
+            }
+        }
+        if is_byok != Some(true) {
+            return Some(cost);
+        }
+    }
+
+    for key in [
+        "cost",
+        "total_cost",
+        "provider_cost",
+        "billed_cost",
+        "total_price",
+    ] {
+        if let Some(value) = usage.get(key) {
+            if let Some(total) = parse_cost_value(value) {
                 return Some(total);
             }
         }
