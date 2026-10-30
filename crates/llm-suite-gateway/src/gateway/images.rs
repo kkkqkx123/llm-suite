@@ -40,8 +40,11 @@ impl LlmGateway {
         // context for this resolution only.
         let (profile, _) = match self.auth.as_ref() {
             Some(registry) => {
-                let overlay: Option<std::sync::Arc<dyn llm_suite_auth::AuthContext>> =
-                    stored.env.as_ref().filter(|map| !map.is_empty()).map(|map| {
+                let overlay: Option<std::sync::Arc<dyn llm_suite_auth::AuthContext>> = stored
+                    .env
+                    .as_ref()
+                    .filter(|map| !map.is_empty())
+                    .map(|map| {
                         std::sync::Arc::new(llm_suite_auth::OverlayAuthContext::new(
                             registry.context().clone(),
                             map.clone(),
@@ -49,11 +52,10 @@ impl LlmGateway {
                             as std::sync::Arc<dyn llm_suite_auth::AuthContext>
                     });
                 let resolved = match overlay.as_ref() {
-                    Some(context) => {
-                        registry.apply_with_context(&stored, context).await.map_err(|e| {
-                            LlmError::ConfigError(e.to_string())
-                        })?
-                    }
+                    Some(context) => registry
+                        .apply_with_context(&stored, context)
+                        .await
+                        .map_err(|e| LlmError::ConfigError(e.to_string()))?,
                     None => registry
                         .apply(&stored)
                         .await

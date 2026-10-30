@@ -8,9 +8,7 @@ use std::collections::VecDeque;
 use async_trait::async_trait;
 
 use crate::error::Result;
-use crate::provider::{
-    ImageData, ImageGenerationProvider, ImagesOptions, ImagesResult,
-};
+use crate::provider::{ImageData, ImageGenerationProvider, ImagesOptions, ImagesResult};
 use llm_suite_common::ProviderError;
 
 /// One scripted step: either a successful generation or an injected error.
@@ -61,11 +59,7 @@ impl MockImageGenerationProvider {
 
 #[async_trait]
 impl ImageGenerationProvider for MockImageGenerationProvider {
-    async fn generate_images(
-        &self,
-        prompt: &str,
-        options: &ImagesOptions,
-    ) -> Result<ImagesResult> {
+    async fn generate_images(&self, prompt: &str, options: &ImagesOptions) -> Result<ImagesResult> {
         self.calls
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
@@ -83,10 +77,7 @@ impl ImageGenerationProvider for MockImageGenerationProvider {
                 let images = (0..count)
                     .map(|index| ImageData {
                         b64_json: None,
-                        url: Some(format!(
-                            "mock://{}/{index}",
-                            prompt.replace(' ', "-")
-                        )),
+                        url: Some(format!("mock://{}/{index}", prompt.replace(' ', "-"))),
                         revised_prompt: None,
                     })
                     .collect();

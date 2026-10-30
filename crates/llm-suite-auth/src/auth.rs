@@ -313,7 +313,10 @@ mod tests {
                 .into_iter()
                 .collect(),
         );
-        assert_eq!(overlay.env("ACME_API_KEY").await.as_deref(), Some("sk-overlay"));
+        assert_eq!(
+            overlay.env("ACME_API_KEY").await.as_deref(),
+            Some("sk-overlay")
+        );
         assert_eq!(
             overlay.env("OTHER_KEY").await.as_deref(),
             None,

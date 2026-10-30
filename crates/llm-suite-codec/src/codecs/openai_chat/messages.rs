@@ -294,8 +294,8 @@ mod tests {
         super::super::validate::validate_openai_chat_messages(&request)
             .expect("a rich tool result must not be rejected");
 
-        let converted =
-            convert_openai_messages_with_system_role(&request.messages, "system").expect("conversion must succeed");
+        let converted = convert_openai_messages_with_system_role(&request.messages, "system")
+            .expect("conversion must succeed");
         let tool_message = converted
             .iter()
             .find(|m| m["role"] == serde_json::json!("tool"))
@@ -325,7 +325,8 @@ mod tests {
             metadata: None,
         };
 
-        let converted = convert_openai_messages_with_system_role(&[tool], "system").expect("conversion must succeed");
+        let converted = convert_openai_messages_with_system_role(&[tool], "system")
+            .expect("conversion must succeed");
         let tool_message = converted
             .iter()
             .find(|m| m["role"] == serde_json::json!("tool"))
@@ -412,9 +413,8 @@ mod tests {
             metadata: None,
         };
 
-        let out =
-            convert_openai_messages_with_system_role(&[assistant, tool], "system")
-                .expect("conversion must succeed");
+        let out = convert_openai_messages_with_system_role(&[assistant, tool], "system")
+            .expect("conversion must succeed");
 
         // Assistant message must carry tool_calls and must NOT contain any
         // illegal `tool_use` / `tool_result` content part.
@@ -457,7 +457,8 @@ mod tests {
             thinking_signature: None,
             metadata: None,
         };
-        let out = convert_openai_messages_with_system_role(&[user], "system").expect("must convert");
+        let out =
+            convert_openai_messages_with_system_role(&[user], "system").expect("must convert");
         let part = &out[0]["content"][0];
         assert_eq!(part["type"], serde_json::json!("input_audio"));
         assert_eq!(part["input_audio"]["format"], serde_json::json!("wav"));
@@ -483,7 +484,8 @@ mod tests {
             thinking_signature: None,
             metadata: None,
         };
-        let err = convert_openai_messages_with_system_role(&[user], "system").expect_err("only wav and mp3 are accepted");
+        let err = convert_openai_messages_with_system_role(&[user], "system")
+            .expect_err("only wav and mp3 are accepted");
         assert!(format!("{err}").contains("mp3"), "{err}");
     }
 
@@ -507,7 +509,8 @@ mod tests {
             thinking_signature: None,
             metadata: None,
         };
-        let err = convert_openai_messages_with_system_role(&[user], "system").expect_err("chat has no image file id");
+        let err = convert_openai_messages_with_system_role(&[user], "system")
+            .expect_err("chat has no image file id");
         assert!(format!("{err}").contains("file"), "{err}");
     }
 
@@ -536,7 +539,8 @@ mod tests {
             thinking_signature: None,
             metadata: None,
         };
-        let out = convert_openai_messages_with_system_role(&[base64_user], "system").expect("must convert");
+        let out = convert_openai_messages_with_system_role(&[base64_user], "system")
+            .expect("must convert");
         let part = &out[0]["content"][0];
         assert_eq!(part["type"], serde_json::json!("file"));
         assert_eq!(part["file"]["file_data"], serde_json::json!("QUJD"));
@@ -564,7 +568,8 @@ mod tests {
             thinking_signature: None,
             metadata: None,
         };
-        let out = convert_openai_messages_with_system_role(&[id_user], "system").expect("must convert");
+        let out =
+            convert_openai_messages_with_system_role(&[id_user], "system").expect("must convert");
         assert_eq!(
             out[0]["content"][0]["file"]["file_id"],
             serde_json::json!("file_1")
@@ -595,7 +600,8 @@ mod tests {
             thinking_signature: None,
             metadata: None,
         };
-        let err = convert_openai_messages_with_system_role(&[user], "system").expect_err("no URL form on chat file parts");
+        let err = convert_openai_messages_with_system_role(&[user], "system")
+            .expect_err("no URL form on chat file parts");
         assert!(format!("{err}").contains("file_id"), "{err}");
     }
 
@@ -619,7 +625,8 @@ mod tests {
             thinking_signature: None,
             metadata: None,
         };
-        let out = convert_openai_messages_with_system_role(&[user], "system").expect("must convert");
+        let out =
+            convert_openai_messages_with_system_role(&[user], "system").expect("must convert");
         assert_eq!(
             out[0]["content"][0]["image_url"]["detail"],
             serde_json::json!("high")
@@ -657,9 +664,8 @@ mod tests {
                 .expect("must convert");
         assert_eq!(renamed[0]["role"], serde_json::json!("developer"));
         assert_eq!(renamed[1]["role"], serde_json::json!("user"));
-        let kept =
-            convert_openai_messages_with_system_role(&[system, user], "system")
-                .expect("must convert");
+        let kept = convert_openai_messages_with_system_role(&[system, user], "system")
+            .expect("must convert");
         assert_eq!(kept[0]["role"], serde_json::json!("system"));
     }
 }

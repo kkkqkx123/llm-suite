@@ -72,9 +72,7 @@ impl OpenAiCompatibleImagesProvider {
             &context.no_proxy,
             &llm_suite_proxy::HttpTransportOptions {
                 connect_timeout_secs: context.connect_timeout_secs,
-                danger_accept_invalid_certs: context
-                    .danger_accept_invalid_certs
-                    .unwrap_or(false),
+                danger_accept_invalid_certs: context.danger_accept_invalid_certs.unwrap_or(false),
             },
         )
         .map_err(|err| llm_suite_common::ProviderError::Config(err.to_string()))?;
@@ -116,11 +114,7 @@ impl OpenAiCompatibleImagesProvider {
 
 #[async_trait]
 impl ImageGenerationProvider for OpenAiCompatibleImagesProvider {
-    async fn generate_images(
-        &self,
-        prompt: &str,
-        options: &ImagesOptions,
-    ) -> Result<ImagesResult> {
+    async fn generate_images(&self, prompt: &str, options: &ImagesOptions) -> Result<ImagesResult> {
         if prompt.is_empty() {
             return Err(llm_suite_common::ProviderError::InvalidRequest(
                 "prompt is required".to_string(),
@@ -137,9 +131,10 @@ impl ImageGenerationProvider for OpenAiCompatibleImagesProvider {
         if !self.context.query_params.is_empty() {
             outgoing = outgoing.query(&self.context.query_params);
         }
-        let response = outgoing.send().await.map_err(|err| {
-            llm_suite_common::ProviderError::Transport(err.to_string())
-        })?;
+        let response = outgoing
+            .send()
+            .await
+            .map_err(|err| llm_suite_common::ProviderError::Transport(err.to_string()))?;
         let status = response.status();
         if !status.is_success() {
             let retry_after = response
@@ -151,17 +146,17 @@ impl ImageGenerationProvider for OpenAiCompatibleImagesProvider {
             return Err(llm_suite_common::ProviderError::Provider {
                 status: status.as_u16(),
                 message: body,
-                retry_after_ms: llm_suite_common::parse_retry_after_ms(
-                    retry_after.as_deref(),
-                ),
+                retry_after_ms: llm_suite_common::parse_retry_after_ms(retry_after.as_deref()),
             });
         }
-        let decoded: ImagesResponse = response.json().await.map_err(|err| {
-            llm_suite_common::ProviderError::Decode(err.to_string())
-        })?;
+        let decoded: ImagesResponse = response
+            .json()
+            .await
+            .map_err(|err| llm_suite_common::ProviderError::Decode(err.to_string()))?;
         let result = self.parse_response(decoded)?;
         let expected = options.count.unwrap_or(1) as usize;
-        if result.images.len() != expected && !(options.count.is_none() && !result.images.is_empty())
+        if result.images.len() != expected
+            && !(options.count.is_none() && !result.images.is_empty())
         {
             // Providers may return fewer images than requested under load;
             // surface the mismatch instead of silently accepting it.
@@ -212,8 +207,7 @@ mod tests {
 
     #[test]
     fn build_request_carries_prompt_and_options() {
-        let provider =
-            OpenAiCompatibleImagesProvider::new(test_context()).expect("valid context");
+        let provider = OpenAiCompatibleImagesProvider::new(test_context()).expect("valid context");
         let request = provider.build_request(
             "a cat",
             &ImagesOptions {
@@ -231,8 +225,7 @@ mod tests {
 
     #[test]
     fn parse_response_maps_data_entries() {
-        let provider =
-            OpenAiCompatibleImagesProvider::new(test_context()).expect("valid context");
+        let provider = OpenAiCompatibleImagesProvider::new(test_context()).expect("valid context");
         let result = provider
             .parse_response(ImagesResponse {
                 created: Some(1),

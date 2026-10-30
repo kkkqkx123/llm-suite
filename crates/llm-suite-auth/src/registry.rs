@@ -640,7 +640,11 @@ mod tests {
             .apply_with_context(&profile_with_auth(), &overlay)
             .await
             .expect("apply");
-        if std::env::var("TEST_KEY").ok().filter(|v| !v.is_empty()).is_some() {
+        if std::env::var("TEST_KEY")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .is_some()
+        {
             assert!(
                 resolved.is_none(),
                 "an empty overlay entry must hide the ambient variable"

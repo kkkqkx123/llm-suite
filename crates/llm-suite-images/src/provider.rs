@@ -94,17 +94,12 @@ impl ImagesContext {
 
     /// OpenAI endpoint preset (`https://api.openai.com/v1/images/generations`).
     pub fn openai(api_key: impl Into<String>, model: impl Into<String>) -> Self {
-        Self::new("https://api.openai.com/v1/images/generations", model)
-            .with_api_key(api_key)
+        Self::new("https://api.openai.com/v1/images/generations", model).with_api_key(api_key)
     }
 
     /// OpenRouter endpoint preset (`https://openrouter.ai/api/v1/images/generations`).
     pub fn openrouter(api_key: impl Into<String>, model: impl Into<String>) -> Self {
-        Self::new(
-            "https://openrouter.ai/api/v1/images/generations",
-            model,
-        )
-        .with_api_key(api_key)
+        Self::new("https://openrouter.ai/api/v1/images/generations", model).with_api_key(api_key)
     }
 
     /// Sets the bearer API key.
@@ -220,11 +215,7 @@ pub struct ImagesResult {
 #[async_trait]
 pub trait ImageGenerationProvider: Send + Sync {
     /// Generates images for a text prompt.
-    async fn generate_images(
-        &self,
-        prompt: &str,
-        options: &ImagesOptions,
-    ) -> Result<ImagesResult>;
+    async fn generate_images(&self, prompt: &str, options: &ImagesOptions) -> Result<ImagesResult>;
 
     /// Model name served by this provider.
     fn model_name(&self) -> &str;

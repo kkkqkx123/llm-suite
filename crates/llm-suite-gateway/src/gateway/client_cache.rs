@@ -144,9 +144,7 @@ impl LlmGateway {
             &no_proxy,
             &llm_suite_proxy::HttpTransportOptions {
                 connect_timeout_secs: transport.connect_timeout_secs,
-                danger_accept_invalid_certs: transport
-                    .danger_accept_invalid_certs
-                    .unwrap_or(false),
+                danger_accept_invalid_certs: transport.danger_accept_invalid_certs.unwrap_or(false),
             },
         )
         .map_err(|err| LlmError::ProxyError(err.to_string()))?;
@@ -338,11 +336,10 @@ mod tests {
     fn cache_key_changes_when_transport_knobs_rotate() {
         let base = test_profile();
         let mut with_timeout = base.clone();
-        with_timeout.transport =
-            Some(llm_suite_types::llm::LlmHttpTransport {
-                connect_timeout_secs: Some(2),
-                danger_accept_invalid_certs: None,
-            });
+        with_timeout.transport = Some(llm_suite_types::llm::LlmHttpTransport {
+            connect_timeout_secs: Some(2),
+            danger_accept_invalid_certs: None,
+        });
         assert_ne!(
             client_cache_key(&base),
             client_cache_key(&with_timeout),

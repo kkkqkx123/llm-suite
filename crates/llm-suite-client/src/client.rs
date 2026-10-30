@@ -678,7 +678,10 @@ mod tests {
                 .collect(),
         );
         let base = reqwest::Client::new()
-            .request(reqwest::Method::POST, "https://example.com/v1/chat/completions")
+            .request(
+                reqwest::Method::POST,
+                "https://example.com/v1/chat/completions",
+            )
             .build()
             .unwrap();
         let finalized = client.finalize_request(base, &request);
@@ -704,7 +707,10 @@ mod tests {
                 .collect(),
         );
         let base = reqwest::Client::new()
-            .request(reqwest::Method::POST, "https://example.com/v1/chat/completions")
+            .request(
+                reqwest::Method::POST,
+                "https://example.com/v1/chat/completions",
+            )
             .build()
             .unwrap();
         let finalized = client.finalize_request(base, &request);

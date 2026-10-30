@@ -7,8 +7,8 @@
 //! header injection stays on `metadata` / `custom_body`, which already
 //! travel through the codec.
 
-use llm_suite_types::llm::{LlmProfile, LlmRequest, LlmResult as LlmResponseType};
 use llm_suite_codec::error::LlmError;
+use llm_suite_types::llm::{LlmProfile, LlmRequest, LlmResult as LlmResponseType};
 
 /// Observation hooks for one gateway call.
 ///
@@ -31,9 +31,7 @@ pub struct RequestProbe {
 impl RequestProbe {
     /// True when no hook is set; the gateway skips every probe branch.
     pub fn is_empty(&self) -> bool {
-        self.on_request.is_none()
-            && self.on_response.is_none()
-            && self.on_stream_start.is_none()
+        self.on_request.is_none() && self.on_response.is_none() && self.on_stream_start.is_none()
     }
 }
 

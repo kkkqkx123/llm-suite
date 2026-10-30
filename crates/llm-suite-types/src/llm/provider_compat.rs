@@ -178,7 +178,10 @@ mod tests {
             "https://generativelanguage.googleapis.com/v1beta",
         ] {
             let compat = ProviderCompat::detect(Some(url), &LlmFormat::OpenaiChat);
-            assert!(compat.is_empty(), "hosted endpoint must stay neutral: {url}");
+            assert!(
+                compat.is_empty(),
+                "hosted endpoint must stay neutral: {url}"
+            );
         }
     }
 

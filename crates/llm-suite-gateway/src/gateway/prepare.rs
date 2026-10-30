@@ -55,21 +55,23 @@ impl LlmGateway {
         // over it per the documented resolve order.
         let (profile, is_subscription) = match self.auth.as_ref() {
             Some(registry) => {
-                let overlay: Option<
-                    std::sync::Arc<dyn llm_suite_auth::AuthContext>,
-                > = stored_profile.env.as_ref().filter(|map| !map.is_empty()).map(|map| {
-                    std::sync::Arc::new(llm_suite_auth::OverlayAuthContext::new(
-                        registry.context().clone(),
-                        map.clone(),
-                    )) as std::sync::Arc<dyn llm_suite_auth::AuthContext>
-                });
+                let overlay: Option<std::sync::Arc<dyn llm_suite_auth::AuthContext>> =
+                    stored_profile
+                        .env
+                        .as_ref()
+                        .filter(|map| !map.is_empty())
+                        .map(|map| {
+                            std::sync::Arc::new(llm_suite_auth::OverlayAuthContext::new(
+                                registry.context().clone(),
+                                map.clone(),
+                            ))
+                                as std::sync::Arc<dyn llm_suite_auth::AuthContext>
+                        });
                 let resolved = match overlay.as_ref() {
-                    Some(context) => {
-                        registry
-                            .apply_with_context(&stored_profile, context)
-                            .await
-                            .map_err(auth_error)?
-                    }
+                    Some(context) => registry
+                        .apply_with_context(&stored_profile, context)
+                        .await
+                        .map_err(auth_error)?,
                     None => registry.apply(&stored_profile).await.map_err(auth_error)?,
                 };
                 match resolved {
