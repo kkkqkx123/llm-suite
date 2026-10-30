@@ -17,6 +17,13 @@ use llm_suite_types::llm::{LlmProfile, ModelMetadata};
 /// `format` is never auto-filled here: silently switching the wire format
 /// would change codec, auth headers and endpoint semantics, so a mismatch
 /// is reported by the caller instead.
+///
+/// The provider scoping assumes both sides share one namespace. Entries
+/// derived from the LiteLLM table carry upstream namespaces (`openai`,
+/// `azure`, ...) while profiles carry local ids (`builtin-openai`, ...),
+/// so LiteLLM callers must first select the provider-specific entry (such
+/// as through the catalog metadata lookup) and then fill from it directly
+/// instead of routing a single pre-selected entry through this matcher.
 pub fn apply_catalog_metadata(mut profile: LlmProfile, catalog: &[ModelMetadata]) -> LlmProfile {
     if profile.context_window_size.is_some() && profile.max_output_tokens.is_some() {
         return profile;

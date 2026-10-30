@@ -61,9 +61,15 @@ pub struct ModelCost {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ModelMetadata {
     pub id: String,
+    /// Namespace of the data source (such as the upstream catalog
+    /// provider), not a local provider id. Consumers must never match
+    /// this against profile provider ids across namespaces.
     pub provider_id: String,
     #[serde(default)]
     pub model_type: ModelType,
+    /// Informational wire-format hint only. Registration backfills never
+    /// apply it: switching codecs implicitly would change auth, headers
+    /// and endpoint semantics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<super::LlmFormat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -76,6 +82,8 @@ pub struct ModelMetadata {
     pub reasoning: bool,
     #[serde(default)]
     pub thinking_levels: Vec<super::generation::ThinkingLevel>,
+    /// Always `None` from catalog resolvers: token cost travels the
+    /// pricing-resolver path only, never duplicated here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<ModelCost>,
 }
