@@ -170,6 +170,19 @@ mod tests {
     }
 
     #[test]
+    fn hosted_providers_have_no_opinion() {
+        for url in [
+            "https://api.openai.com/v1",
+            "https://openrouter.ai/api/v1",
+            "https://api.anthropic.com/v1",
+            "https://generativelanguage.googleapis.com/v1beta",
+        ] {
+            let compat = ProviderCompat::detect(Some(url), &LlmFormat::OpenaiChat);
+            assert!(compat.is_empty(), "hosted endpoint must stay neutral: {url}");
+        }
+    }
+
+    #[test]
     fn detect_only_applies_to_openai_chat() {
         let compat =
             ProviderCompat::detect(Some("http://localhost:11434/v1"), &LlmFormat::Anthropic);
