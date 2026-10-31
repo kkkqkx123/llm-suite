@@ -74,6 +74,11 @@ pub async fn resolve_provider_auth(
             })
             .await
         }
+        Some(Credential::Proxy(_)) => {
+            // Proxy credentials live under route-derived keys, never under
+            // model provider ids; a proxy entry here is a type mismatch.
+            Err(AuthError::CredentialTypeNotHandled(entry.id.clone()))
+        }
         Some(Credential::OAuth(credential)) => {
             let auth = entry
                 .auth

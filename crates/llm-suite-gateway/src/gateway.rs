@@ -21,6 +21,7 @@ pub(crate) mod migrate;
 pub(crate) mod mock;
 pub(crate) mod prepare;
 pub(crate) mod probe;
+pub(crate) mod proxy_auth;
 pub(crate) mod registry;
 pub(crate) mod resilience;
 

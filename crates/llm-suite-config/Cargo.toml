@@ -9,6 +9,7 @@ description = "Configuration and provider registry for llm-suite"
 
 [dependencies]
 llm-suite-codec.workspace = true
+llm-suite-proxy.workspace = true
 llm-suite-types.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }

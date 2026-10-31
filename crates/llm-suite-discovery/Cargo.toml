@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Network model discovery for llm-suite providers"
 
 [dependencies]
+llm-suite-auth.workspace = true
 llm-suite-codec.workspace = true
 llm-suite-proxy.workspace = true
 llm-suite-types.workspace = true

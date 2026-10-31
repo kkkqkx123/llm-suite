@@ -81,6 +81,12 @@ impl LlmGateway {
             }
             None => (stored_profile, false),
         };
+        // Resolve the proxy credential after model auth: the effective
+        // profile carries the transient composed address while the registry
+        // keeps the route-only form. Anonymous routes pass through.
+        let mut profile = profile;
+        profile.proxy =
+            super::proxy_auth::effective_proxy_url(self.auth.as_deref(), &profile).await?;
         let effective = merge_request(request, &profile)?;
         let client = self.get_or_create_client(&profile)?;
         let breaker = self.breaker_for(&profile);

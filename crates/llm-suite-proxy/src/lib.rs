@@ -36,8 +36,83 @@ pub enum ProxyError {
     MissingHost,
     #[error("proxy URL could not be parsed")]
     Unparseable,
+    #[error("proxy URL must not embed credentials; store them as a proxy credential instead")]
+    UserinfoForbidden,
     #[error("{0}")]
     ClientBuild(String),
+}
+
+/// True when the configured route address embeds `userinfo` credentials.
+///
+/// Persisted profiles and definitions must be route-only; secrets live in
+/// the credential store under a key derived from the route. The composed
+/// in-memory address is the only place userinfo may appear.
+pub fn has_userinfo(url: &str) -> bool {
+    let trimmed = url.trim();
+    let Some((_, rest)) = trimmed.split_once("://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    authority.contains('@')
+}
+
+/// Reject route addresses that embed credentials, for persisted configs.
+///
+/// The error carries no address material so credentials never reach logs.
+pub fn reject_userinfo(url: &str) -> Result<(), ProxyError> {
+    if has_userinfo(url) {
+        return Err(ProxyError::UserinfoForbidden);
+    }
+    Ok(())
+}
+
+/// Credential store key for the proxy at `route`.
+///
+/// The key is routing material only, safe to list and compare. One route
+/// shares one credential across every profile pointing at it.
+pub fn credential_key(route: &str) -> String {
+    format!("proxy:{}", route.trim())
+}
+
+/// Compose the in-memory proxy address from a route plus stored credentials.
+///
+/// Percent-encodes the username and password so reserved characters cannot
+/// break the authority section. The result is transient: callers pass it
+/// to [`build_proxy`] and never persist it.
+pub fn compose_proxy_url(
+    route: &str,
+    username: &str,
+    password: &str,
+) -> Result<String, ProxyError> {
+    let trimmed = route.trim();
+    let Some((scheme, rest)) = trimmed.split_once("://") else {
+        return Err(ProxyError::Unparseable);
+    };
+    if rest.is_empty() {
+        return Err(ProxyError::MissingHost);
+    }
+    if has_userinfo(trimmed) {
+        return Err(ProxyError::UserinfoForbidden);
+    }
+    Ok(format!(
+        "{}://{}:{}@{}",
+        scheme,
+        encode_userinfo(username),
+        encode_userinfo(password),
+        rest
+    ))
+}
+
+fn encode_userinfo(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for b in value.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 /// Builds a reqwest proxy from a URL plus an optional bypass list.
@@ -216,6 +291,36 @@ mod tests {
         );
         // Defaults stay backward compatible with the plain constructor.
         assert!(build_http_client(60, None, &[]).is_ok());
+    }
+
+    #[test]
+    fn userinfo_detection_guards_persisted_routes() {
+        assert!(!has_userinfo("http://127.0.0.1:7890"));
+        assert!(has_userinfo("http://user:secret@127.0.0.1:7890"));
+        assert!(reject_userinfo("http://127.0.0.1:7890").is_ok());
+        assert_eq!(
+            reject_userinfo("http://user:secret@127.0.0.1:7890").err(),
+            Some(ProxyError::UserinfoForbidden)
+        );
+        assert_eq!(
+            credential_key("http://127.0.0.1:7890"),
+            "proxy:http://127.0.0.1:7890"
+        );
+    }
+
+    #[test]
+    fn composed_address_carries_credentials_transiently() {
+        let composed =
+            compose_proxy_url("http://127.0.0.1:7890", "corp-user", "s3cret").expect("compose");
+        assert_eq!(composed, "http://corp-user:s3cret@127.0.0.1:7890");
+        assert!(build_proxy(&composed, &[]).is_ok());
+        let encoded =
+            compose_proxy_url("http://127.0.0.1:7890", "u@corp", "p:ss").expect("compose");
+        assert_eq!(encoded, "http://u%40corp:p%3Ass@127.0.0.1:7890");
+        assert_eq!(
+            compose_proxy_url("http://user:pw@127.0.0.1:7890", "a", "b").err(),
+            Some(ProxyError::UserinfoForbidden)
+        );
     }
 
     #[test]

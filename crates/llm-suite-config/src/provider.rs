@@ -30,6 +30,14 @@ impl ProviderDefinitionRegistry {
                 "Provider definition validation failed: 'id' is required".to_string(),
             ));
         }
+        if let Some(proxy) = definition.proxy.as_deref() {
+            llm_suite_proxy::reject_userinfo(proxy).map_err(|_| {
+                LlmError::ConfigError(format!(
+                    "Provider '{}' proxy must be route-only; store credentials as a proxy credential instead",
+                    definition.id
+                ))
+            })?;
+        }
         if let LlmFormat::Custom(name) = &definition.format {
             if name.trim().is_empty() {
                 return Err(LlmError::ConfigError(format!(
@@ -283,6 +291,14 @@ mod tests {
         assert!(registry.register(bad).is_err());
         let mut bad = definition();
         bad.format = LlmFormat::Custom("  ".to_string());
+        assert!(registry.register(bad).is_err());
+    }
+
+    #[test]
+    fn register_rejects_embedded_proxy_credentials() {
+        let registry = ProviderDefinitionRegistry::new();
+        let mut bad = definition();
+        bad.proxy = Some("http://user:secret@127.0.0.1:8080".to_string());
         assert!(registry.register(bad).is_err());
     }
 

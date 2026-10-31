@@ -46,18 +46,27 @@ impl ModelCatalog {
     /// through reqwest defaults), otherwise a client built from the
     /// definition proxy, bypass list and transport knobs. Build failures
     /// map to `ProxyError` exactly like the gateway so credentials never
-    /// leak into error strings.
+    /// leak into error strings. `proxy_creds` carries stored proxy
+    /// credentials keyed by the credential store key; the matching entry
+    /// is composed transiently and never persisted.
     fn client_for(
         &self,
         definition: &LlmProviderDefinition,
+        proxy_creds: &std::collections::HashMap<String, llm_suite_auth::ProxyCredential>,
     ) -> LlmResult<reqwest::Client> {
-        let Some(proxy) = definition.proxy.as_deref() else {
+        let Some(route) = definition.proxy.as_deref() else {
             return Ok(self.client.clone());
+        };
+        let key = llm_suite_proxy::credential_key(route);
+        let effective = match proxy_creds.get(&key) {
+            Some(cred) => llm_suite_proxy::compose_proxy_url(route, &cred.username, &cred.password)
+                .map_err(|err| LlmError::ProxyError(err.to_string()))?,
+            None => route.to_string(),
         };
         let transport = definition.transport.clone().unwrap_or_default();
         llm_suite_proxy::build_http_client_with_options(
             PROXIED_DISCOVERY_TIMEOUT_SECS,
-            Some(proxy),
+            Some(effective.as_str()),
             &definition.no_proxy.clone().unwrap_or_default(),
             &llm_suite_proxy::HttpTransportOptions {
                 connect_timeout_secs: transport.connect_timeout_secs,
@@ -75,17 +84,20 @@ impl ModelCatalog {
     /// single unreachable endpoint never blocks the remaining providers.
     /// `api_keys` maps provider id to the effective key for that
     /// provider; missing entries list without authentication.
+    /// `proxy_creds` maps proxy credential keys to stored credentials;
+    /// missing entries list anonymously through the route.
     pub async fn refresh_all(
         &self,
         definitions: &[LlmProviderDefinition],
         api_keys: &std::collections::HashMap<String, String>,
+        proxy_creds: &std::collections::HashMap<String, llm_suite_auth::ProxyCredential>,
     ) -> std::collections::HashMap<String, LlmResult<Vec<ModelInfo>>> {
         let mut out = std::collections::HashMap::new();
         for definition in definitions {
             let key = api_keys.get(&definition.id).map(String::as_str);
             out.insert(
                 definition.id.clone(),
-                self.list_models(definition, key).await,
+                self.list_models(definition, key, proxy_creds).await,
             );
         }
         out
@@ -102,9 +114,10 @@ impl ModelCatalog {
         &self,
         definitions: &[LlmProviderDefinition],
         api_keys: &std::collections::HashMap<String, String>,
+        proxy_creds: &std::collections::HashMap<String, llm_suite_auth::ProxyCredential>,
         predicate: impl Fn(&ModelInfo) -> bool,
     ) -> std::collections::HashMap<String, LlmResult<Vec<ModelInfo>>> {
-        let refreshed = self.refresh_all(definitions, api_keys).await;
+        let refreshed = self.refresh_all(definitions, api_keys, proxy_creds).await;
         refreshed
             .into_iter()
             .map(|(id, result)| {
@@ -122,6 +135,7 @@ impl ModelCatalog {
         &self,
         definition: &LlmProviderDefinition,
         api_key: Option<&str>,
+        proxy_creds: &std::collections::HashMap<String, llm_suite_auth::ProxyCredential>,
     ) -> LlmResult<Vec<ModelInfo>> {
         let discovery = definition
             .model_discovery
@@ -142,7 +156,7 @@ impl ModelCatalog {
                     definition.api_version.as_deref(),
                     path.as_deref(),
                 );
-                let mut request = self.client_for(definition)?.get(&url);
+                let mut request = self.client_for(definition, proxy_creds)?.get(&url);
                 request = apply_discovery_auth(
                     request,
                     definition.auth_type.as_deref().unwrap_or("native"),
@@ -176,7 +190,7 @@ impl ModelCatalog {
                 json_path,
             } => {
                 let method = method.as_deref().unwrap_or("GET");
-                let mut request = self.client_for(definition)?.request(
+                let mut request = self.client_for(definition, proxy_creds)?.request(
                     method.parse().map_err(|_| {
                         LlmError::ConfigError(format!(
                             "Provider '{}' has an invalid discovery method '{}'",
@@ -443,6 +457,7 @@ mod tests {
     fn client_selection_follows_definition_proxy() {
         use llm_suite_types::llm::{LlmFormat, LlmProviderDefinition};
         let catalog = ModelCatalog::new();
+        let empty_creds = std::collections::HashMap::new();
         let plain = LlmProviderDefinition {
             id: "plain".to_string(),
             name: None,
@@ -464,7 +479,7 @@ mod tests {
             env: None,
         };
         assert!(
-            catalog.client_for(&plain).is_ok(),
+            catalog.client_for(&plain, &empty_creds).is_ok(),
             "definitions without an explicit proxy reuse the shared client"
         );
         let proxied = LlmProviderDefinition {
@@ -472,8 +487,46 @@ mod tests {
             ..plain
         };
         assert!(
-            catalog.client_for(&proxied).is_ok(),
+            catalog.client_for(&proxied, &empty_creds).is_ok(),
             "a usable definition proxy builds a dedicated client"
+        );
+    }
+
+    #[test]
+    fn stored_proxy_credential_composes_discovery_transport() {
+        use llm_suite_types::llm::{LlmFormat, LlmProviderDefinition};
+        let catalog = ModelCatalog::new();
+        let definition = LlmProviderDefinition {
+            id: "proxied".to_string(),
+            name: None,
+            description: None,
+            base_url: None,
+            auth_type: None,
+            default_headers: None,
+            format: LlmFormat::OpenaiChat,
+            model_discovery: None,
+            api_version: None,
+            metadata: None,
+            proxy: Some("http://127.0.0.1:8080".to_string()),
+            no_proxy: None,
+            rate_limit: None,
+            auth: None,
+            compat: None,
+            identity: None,
+            transport: None,
+            env: None,
+        };
+        let mut creds = std::collections::HashMap::new();
+        creds.insert(
+            llm_suite_proxy::credential_key("http://127.0.0.1:8080"),
+            llm_suite_auth::ProxyCredential {
+                username: "corp-user".to_string(),
+                password: "s3cret".to_string(),
+            },
+        );
+        assert!(
+            catalog.client_for(&definition, &creds).is_ok(),
+            "a stored proxy credential composes transiently"
         );
     }
 
@@ -505,7 +558,7 @@ mod tests {
             env: None,
         };
         let error = catalog
-            .list_models(&definition, None)
+            .list_models(&definition, None, &Default::default())
             .await
             .expect_err("an unusable proxy must fail before any network use");
         let message = match error {
@@ -545,9 +598,12 @@ mod tests {
             env: None,
         }];
         let refreshed = catalog
-            .refresh_filtered(&definitions, &Default::default(), |m| {
-                !m.id.contains("internal")
-            })
+            .refresh_filtered(
+                &definitions,
+                &Default::default(),
+                &Default::default(),
+                |m| !m.id.contains("internal"),
+            )
             .await;
         let models = refreshed
             .get("static")

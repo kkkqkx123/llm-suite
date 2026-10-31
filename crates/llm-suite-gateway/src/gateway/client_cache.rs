@@ -17,9 +17,10 @@ pub fn client_cache_prefix(profile_id: &str) -> String {
     format!("{profile_id}::")
 }
 
-/// Cache key for the transport client. The proxy is part of the key so
-/// switching proxies rebuilds the transport instead of reusing a stale
-/// client. Auth-derived fields are folded in as a stable non-secret digest
+/// Cache key for the transport client. The proxy route and its credential
+/// are part of the key as a stable non-secret digest, so switching proxies
+/// or rotating the proxy password rebuilds the transport instead of reusing
+/// a stale client. Auth-derived fields are folded in as a stable non-secret digest
 /// so an OAuth refresh (or key rotation) rebuilds the transport instead of
 /// reusing a client bound to the old credential. Connection-level transport
 /// knobs (connect timeout, invalid-certificate opt-in) are part of the key
@@ -34,11 +35,36 @@ pub fn client_cache_key(profile: &LlmProfile) -> String {
         "{}{}::{}::{}::{}::{}",
         client_cache_prefix(&profile.id),
         profile.model,
-        profile.proxy.as_deref().unwrap_or(""),
+        proxy_fingerprint(profile),
         profile.no_proxy.as_deref().unwrap_or(&[]).join(","),
         auth_fingerprint(profile),
         transport_fingerprint(profile)
     )
+}
+
+/// Stable non-secret digest of the effective proxy address.
+///
+/// The effective address may transiently carry credentials composed from
+/// the store, so the raw string never enters the key. Route changes and
+/// password rotations both change the digest and rebuild the transport.
+fn proxy_fingerprint(profile: &LlmProfile) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    let mut mix = |bytes: &[u8]| {
+        for b in bytes {
+            hash ^= *b as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(0x100000001b3);
+    };
+    match profile.proxy.as_deref() {
+        Some(proxy) => {
+            mix(b"proxy");
+            mix(proxy.as_bytes());
+        }
+        None => mix(b"no-proxy"),
+    }
+    format!("{hash:016x}")
 }
 
 /// Stable rendering of the connection-level transport knobs.
@@ -349,6 +375,31 @@ mod tests {
             client_cache_key(&base),
             client_cache_key(&insecure),
             "the invalid-certificate opt-in must rebuild the transport"
+        );
+    }
+
+    #[test]
+    fn cache_key_hides_proxy_secrets_and_rebuilds_on_rotation() {
+        let mut composed = test_profile();
+        composed.proxy = Some("http://corp-user:s3cret@127.0.0.1:8080".to_string());
+        let key = client_cache_key(&composed);
+        assert!(
+            !key.contains("s3cret") && !key.contains("corp-user"),
+            "proxy credentials must stay out of the key: {key}"
+        );
+        let mut rotated = test_profile();
+        rotated.proxy = Some("http://corp-user:n3w@127.0.0.1:8080".to_string());
+        assert_ne!(
+            key,
+            client_cache_key(&rotated),
+            "proxy password rotation must rebuild the transport"
+        );
+        let mut moved_route = test_profile();
+        moved_route.proxy = Some("http://127.0.0.1:9090".to_string());
+        assert_ne!(
+            client_cache_key(&test_profile()),
+            client_cache_key(&moved_route),
+            "proxy route change must rebuild the transport"
         );
     }
 

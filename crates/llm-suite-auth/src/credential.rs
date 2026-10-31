@@ -15,6 +15,7 @@ pub enum AuthMethod {
     ApiKey,
     #[serde(rename = "oauth")]
     OAuth,
+    Proxy,
 }
 
 impl fmt::Display for AuthMethod {
@@ -22,6 +23,7 @@ impl fmt::Display for AuthMethod {
         match self {
             Self::ApiKey => f.write_str("api_key"),
             Self::OAuth => f.write_str("oauth"),
+            Self::Proxy => f.write_str("proxy"),
         }
     }
 }
@@ -43,6 +45,14 @@ pub struct ApiKeyCredential {
     pub key: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+}
+
+/// Proxy basic-auth credential. Stored under a key derived from the proxy
+/// route address, never inside profile or definition files.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ProxyCredential {
+    pub username: String,
+    pub password: String,
 }
 
 /// OAuth credential. `expires` is a Unix-milliseconds absolute timestamp
@@ -80,6 +90,7 @@ pub enum Credential {
     ApiKey(ApiKeyCredential),
     #[serde(rename = "oauth")]
     OAuth(OAuthCredential),
+    Proxy(ProxyCredential),
 }
 
 impl Credential {
@@ -88,6 +99,7 @@ impl Credential {
         match self {
             Self::ApiKey(_) => AuthMethod::ApiKey,
             Self::OAuth(_) => AuthMethod::OAuth,
+            Self::Proxy(_) => AuthMethod::Proxy,
         }
     }
 
@@ -104,7 +116,7 @@ impl Credential {
     pub fn as_api_key(&self) -> AuthResult<&ApiKeyCredential> {
         match self {
             Self::ApiKey(c) => Ok(c),
-            Self::OAuth(_) => Err(AuthError::MalformedCredential(
+            _ => Err(AuthError::MalformedCredential(
                 "expected api_key credential".to_string(),
             )),
         }
@@ -114,8 +126,18 @@ impl Credential {
     pub fn as_oauth(&self) -> AuthResult<&OAuthCredential> {
         match self {
             Self::OAuth(c) => Ok(c),
-            Self::ApiKey(_) => Err(AuthError::MalformedCredential(
+            _ => Err(AuthError::MalformedCredential(
                 "expected oauth credential".to_string(),
+            )),
+        }
+    }
+
+    /// Borrow as a proxy credential, failing on type mismatch.
+    pub fn as_proxy(&self) -> AuthResult<&ProxyCredential> {
+        match self {
+            Self::Proxy(c) => Ok(c),
+            _ => Err(AuthError::MalformedCredential(
+                "expected proxy credential".to_string(),
             )),
         }
     }
@@ -176,5 +198,24 @@ mod tests {
     fn auth_method_display() {
         assert_eq!(AuthMethod::ApiKey.to_string(), "api_key");
         assert_eq!(AuthMethod::OAuth.to_string(), "oauth");
+        assert_eq!(AuthMethod::Proxy.to_string(), "proxy");
+    }
+
+    #[test]
+    fn proxy_credential_roundtrip_and_info() {
+        let cred = Credential::Proxy(ProxyCredential {
+            username: "corp-user".to_string(),
+            password: "s3cret".to_string(),
+        });
+        let json = serde_json::to_string(&cred).expect("serialize");
+        assert!(json.contains("\"type\":\"proxy\""));
+        let back: Credential = serde_json::from_str(&json).expect("deserialize");
+        let info = back.info("proxy:http://127.0.0.1:8080");
+        assert_eq!(info.method, AuthMethod::Proxy);
+        assert!(!info.is_subscription);
+        let proxy = back.as_proxy().expect("proxy");
+        assert_eq!(proxy.username, "corp-user");
+        assert!(back.as_api_key().is_err());
+        assert!(back.as_oauth().is_err());
     }
 }

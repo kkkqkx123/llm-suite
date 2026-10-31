@@ -119,6 +119,14 @@ pub fn validate_profile(profile: &LlmProfile) -> LlmResult<()> {
     if let Some(ref gen) = profile.generation {
         validate_generation_params(gen, &profile.format, &profile.id)?;
     }
+    if let Some(proxy) = profile.proxy.as_deref() {
+        llm_suite_proxy::reject_userinfo(proxy).map_err(|_| {
+            LlmError::ConfigError(format!(
+                "Profile '{}' proxy must be route-only; store credentials as a proxy credential instead",
+                profile.id
+            ))
+        })?;
+    }
     Ok(())
 }
 
@@ -206,6 +214,16 @@ mod tests {
         let mut p = valid_profile();
         p.id = id.to_string();
         p
+    }
+
+    #[test]
+    fn embedded_proxy_credentials_are_rejected() {
+        let mut embedded = valid_profile();
+        embedded.proxy = Some("http://user:secret@127.0.0.1:8080".to_string());
+        assert!(validate_profile(&embedded).is_err());
+        let mut route_only = valid_profile();
+        route_only.proxy = Some("http://127.0.0.1:8080".to_string());
+        assert!(validate_profile(&route_only).is_ok());
     }
 
     #[test]

@@ -30,7 +30,9 @@ pub use auth::{
     ApiKeyAuth, AuthContext, AuthSurfaceInfo, ModelAuth, OAuthAuth, OverlayAuthContext,
     ProviderAuth, ResolveInput, StdAuthContext,
 };
-pub use credential::{ApiKeyCredential, AuthMethod, Credential, CredentialInfo, OAuthCredential};
+pub use credential::{
+    ApiKeyCredential, AuthMethod, Credential, CredentialInfo, OAuthCredential, ProxyCredential,
+};
 pub use error::{AuthError, AuthResult};
 pub use interaction::{
     AuthEvent, AuthInfoLink, AuthInteraction, AuthPrompt, AuthPromptOption, NullInteraction,

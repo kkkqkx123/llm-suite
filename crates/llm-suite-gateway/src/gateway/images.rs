@@ -68,6 +68,9 @@ impl LlmGateway {
             }
             None => (stored, false),
         };
+        let mut profile = profile;
+        profile.proxy =
+            super::proxy_auth::effective_proxy_url(self.auth.as_deref(), &profile).await?;
         let context = images_context_for_profile(&profile)?;
         tracing::debug!(
             profile_id = profile.id.as_str(),
