@@ -119,17 +119,11 @@ impl LlmGateway {
         }
 
         let codec = self.codecs.get_by_format(&profile.format)?;
-        let no_proxy = profile
-            .no_proxy
-            .clone()
-            .or_else(|| {
-                profile
-                    .provider_id
-                    .as_ref()
-                    .and_then(|id| self.providers.get(id))
-                    .and_then(|def| def.no_proxy.clone())
-            })
-            .unwrap_or_default();
+        // Profiles reaching the transport are merged snapshots: definition
+        // defaults (including the bypass list) were folded in at
+        // registration, so the transport reads the profile only and keeps
+        // a single merge point.
+        let no_proxy = profile.no_proxy.clone().unwrap_or_default();
         let transport = profile.transport.clone().unwrap_or_default();
         if transport.danger_accept_invalid_certs.unwrap_or(false) {
             tracing::warn!(

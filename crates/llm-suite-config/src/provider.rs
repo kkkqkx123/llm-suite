@@ -133,6 +133,9 @@ pub fn apply_provider_defaults(
     if profile.proxy.is_none() {
         profile.proxy = definition.proxy.clone();
     }
+    if profile.no_proxy.is_none() {
+        profile.no_proxy = definition.no_proxy.clone();
+    }
     if let Some(default_headers) = definition.default_headers.clone() {
         let custom_headers = profile.custom_headers.get_or_insert_with(Default::default);
         for (key, value) in default_headers {
@@ -262,7 +265,7 @@ mod tests {
             api_version: None,
             metadata: None,
             proxy: Some("http://proxy.acme.test:8080".to_string()),
-            no_proxy: None,
+            no_proxy: Some(vec!["internal.acme.test".to_string()]),
             rate_limit: None,
             auth: None,
             compat: None,
@@ -298,6 +301,10 @@ mod tests {
         );
         assert_eq!(merged.auth_type.as_deref(), Some("bearer"));
         assert_eq!(merged.proxy.as_deref(), Some("http://proxy.acme.test:8080"));
+        assert_eq!(
+            merged.no_proxy.as_deref(),
+            Some(vec!["internal.acme.test".to_string()]).as_deref()
+        );
         assert_eq!(
             merged.custom_headers.as_ref().unwrap().get("x-tenant"),
             Some(&serde_json::json!("t1"))
@@ -339,6 +346,19 @@ mod tests {
         profile.proxy = Some("http://override.test:3128".to_string());
         let merged = apply_provider_defaults(profile, &registry).unwrap();
         assert_eq!(merged.proxy.as_deref(), Some("http://override.test:3128"));
+    }
+
+    #[test]
+    fn explicit_bypass_list_wins_over_definition() {
+        let registry = ProviderDefinitionRegistry::new();
+        registry.register(definition()).unwrap();
+        let mut profile = profile("p1");
+        profile.no_proxy = Some(vec!["override.test".to_string()]);
+        let merged = apply_provider_defaults(profile, &registry).unwrap();
+        assert_eq!(
+            merged.no_proxy.as_deref(),
+            Some(vec!["override.test".to_string()]).as_deref()
+        );
     }
 
     #[test]

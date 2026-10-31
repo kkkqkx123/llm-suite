@@ -5,13 +5,20 @@
 //! the accepted schemes, the bypass list, timeouts and the failure messages
 //! behave identically across the suite instead of drifting per crate.
 //!
-//! Two rules are deliberate:
+//! Three rules are deliberate:
 //!
 //! - Error messages never contain the configured URL: a proxy URL commonly
 //!   carries credentials in its userinfo part, which must not reach logs or
 //!   operator-facing error strings.
 //! - A bypass list lives next to the proxy instead of being inferred, so a
 //!   host decides locally which of its traffic is proxied.
+//! - Proxy selection is explicit configuration first, environment second,
+//!   direct last: a configured URL wins; without one the client keeps the
+//!   reqwest default and honors the standard `ALL_PROXY` / `HTTPS_PROXY` /
+//!   `HTTP_PROXY` / `NO_PROXY` environment variables; a configured URL
+//!   disables the environment for that client. This module never re-reads
+//!   the environment itself, so the precedence stays the reqwest default
+//!   instead of a second hand-rolled copy.
 
 use thiserror::Error;
 

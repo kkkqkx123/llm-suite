@@ -18,6 +18,11 @@ use llm_suite_codec::error::{LlmError, LlmResult};
 pub const DEFAULT_MODELS_PATH: &str = "models";
 /// Default extraction rule covering OpenAI-style `{ "data": [{ "id": .. }] }`.
 pub const DEFAULT_MODELS_JSON_PATH: &str = "data[*].id";
+/// Request timeout for discovery calls that carry an explicit proxy,
+/// matching the gateway default. The shared client keeps reqwest defaults;
+/// only the explicitly proxied path sets a bound so a stalled proxy cannot
+/// hang assembly-time checks forever.
+const PROXIED_DISCOVERY_TIMEOUT_SECS: u64 = 60;
 
 /// Off-hot-path model listing for a provider definition.
 ///
@@ -34,6 +39,32 @@ impl ModelCatalog {
         Self {
             client: reqwest::Client::new(),
         }
+    }
+
+    /// Transport for one provider definition: the shared client when no
+    /// explicit proxy is configured (environment proxies still apply
+    /// through reqwest defaults), otherwise a client built from the
+    /// definition proxy, bypass list and transport knobs. Build failures
+    /// map to `ProxyError` exactly like the gateway so credentials never
+    /// leak into error strings.
+    fn client_for(
+        &self,
+        definition: &LlmProviderDefinition,
+    ) -> LlmResult<reqwest::Client> {
+        let Some(proxy) = definition.proxy.as_deref() else {
+            return Ok(self.client.clone());
+        };
+        let transport = definition.transport.clone().unwrap_or_default();
+        llm_suite_proxy::build_http_client_with_options(
+            PROXIED_DISCOVERY_TIMEOUT_SECS,
+            Some(proxy),
+            &definition.no_proxy.clone().unwrap_or_default(),
+            &llm_suite_proxy::HttpTransportOptions {
+                connect_timeout_secs: transport.connect_timeout_secs,
+                danger_accept_invalid_certs: transport.danger_accept_invalid_certs.unwrap_or(false),
+            },
+        )
+        .map_err(|err| LlmError::ProxyError(err.to_string()))
     }
 
     /// Refresh the model listings of many provider definitions at once.
@@ -111,7 +142,7 @@ impl ModelCatalog {
                     definition.api_version.as_deref(),
                     path.as_deref(),
                 );
-                let mut request = self.client.get(&url);
+                let mut request = self.client_for(definition)?.get(&url);
                 request = apply_discovery_auth(
                     request,
                     definition.auth_type.as_deref().unwrap_or("native"),
@@ -145,7 +176,7 @@ impl ModelCatalog {
                 json_path,
             } => {
                 let method = method.as_deref().unwrap_or("GET");
-                let mut request = self.client.request(
+                let mut request = self.client_for(definition)?.request(
                     method.parse().map_err(|_| {
                         LlmError::ConfigError(format!(
                             "Provider '{}' has an invalid discovery method '{}'",
@@ -406,6 +437,85 @@ mod tests {
         let kept = filter_models_by_prefix(models, &["gpt-".to_string()]);
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].id, "gpt-4o");
+    }
+
+    #[test]
+    fn client_selection_follows_definition_proxy() {
+        use llm_suite_types::llm::{LlmFormat, LlmProviderDefinition};
+        let catalog = ModelCatalog::new();
+        let plain = LlmProviderDefinition {
+            id: "plain".to_string(),
+            name: None,
+            description: None,
+            base_url: None,
+            auth_type: None,
+            default_headers: None,
+            format: LlmFormat::OpenaiChat,
+            model_discovery: None,
+            api_version: None,
+            metadata: None,
+            proxy: None,
+            no_proxy: None,
+            rate_limit: None,
+            auth: None,
+            compat: None,
+            identity: None,
+            transport: None,
+            env: None,
+        };
+        assert!(
+            catalog.client_for(&plain).is_ok(),
+            "definitions without an explicit proxy reuse the shared client"
+        );
+        let proxied = LlmProviderDefinition {
+            proxy: Some("http://127.0.0.1:8080".to_string()),
+            ..plain
+        };
+        assert!(
+            catalog.client_for(&proxied).is_ok(),
+            "a usable definition proxy builds a dedicated client"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_definition_proxy_fails_as_proxy_error() {
+        use llm_suite_types::llm::{LlmFormat, LlmProviderDefinition, ModelDiscovery};
+        let catalog = ModelCatalog::new();
+        let definition = LlmProviderDefinition {
+            id: "bad-proxy".to_string(),
+            name: None,
+            description: None,
+            base_url: Some("https://api.test.com".to_string()),
+            auth_type: None,
+            default_headers: None,
+            format: LlmFormat::OpenaiChat,
+            model_discovery: Some(ModelDiscovery::ModelsEndpoint {
+                path: None,
+                json_path: None,
+            }),
+            api_version: None,
+            metadata: None,
+            proxy: Some("ftp://user:secret@127.0.0.1:2121".to_string()),
+            no_proxy: None,
+            rate_limit: None,
+            auth: None,
+            compat: None,
+            identity: None,
+            transport: None,
+            env: None,
+        };
+        let error = catalog
+            .list_models(&definition, None)
+            .await
+            .expect_err("an unusable proxy must fail before any network use");
+        let message = match error {
+            LlmError::ProxyError(message) => message,
+            other => panic!("unsupported scheme must fail as a proxy error, got {other:?}"),
+        };
+        assert!(
+            !message.contains("secret") && !message.contains("127.0.0.1"),
+            "credentials must stay out of the message: {message}"
+        );
     }
 
     #[tokio::test]
