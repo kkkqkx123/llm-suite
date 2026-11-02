@@ -29,16 +29,94 @@ const PROXIED_DISCOVERY_TIMEOUT_SECS: u64 = 60;
 /// Serves CLI listing, API listing and assembly-time checks. Discovery
 /// failures are reported as errors to the caller; callers at assembly time
 /// degrade them to warnings and never block profile registration.
+///
+/// Successful remote listings are cached per provider plus base URL for a
+/// few minutes so repeated UI polling and assembly-time checks share one
+/// network result. Explicit refresh bypasses the cache.
 #[derive(Clone)]
 pub struct ModelCatalog {
     client: reqwest::Client,
+    cache: std::sync::Arc<std::sync::Mutex<CacheState>>,
+}
+
+/// In-memory discovery cache state owned by `ModelCatalog`.
+#[derive(Default)]
+struct CacheState {
+    entries: std::collections::HashMap<String, CachedListing>,
+}
+
+/// One cached provider listing with its fetch time.
+#[derive(Clone)]
+struct CachedListing {
+    fetched_at: std::time::Instant,
+    models: Vec<ModelInfo>,
+}
+
+/// How long a cached listing is reused before going stale.
+const MODEL_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Cache key covering endpoint identity so base URL edits invalidate.
+fn cache_key_for(definition: &LlmProviderDefinition) -> String {
+    format!(
+        "{}|{}",
+        definition.id,
+        definition.base_url.as_deref().unwrap_or_default()
+    )
 }
 
 impl ModelCatalog {
     pub fn new() -> Self {
         Self {
             client: reqwest::Client::new(),
+            cache: std::sync::Arc::new(std::sync::Mutex::new(CacheState::default())),
         }
+    }
+
+    /// Drop the cached listing for one provider definition.
+    pub fn invalidate(&self, definition: &LlmProviderDefinition) {
+        let key = cache_key_for(definition);
+        if let Ok(mut state) = self.cache.lock() {
+            state.entries.remove(&key);
+        }
+    }
+
+    /// Cached listing wrapper: fresh cache wins unless `force_refresh`.
+    /// Static and disabled definitions bypass the cache entirely.
+    pub async fn list_models_cached(
+        &self,
+        definition: &LlmProviderDefinition,
+        api_key: Option<&str>,
+        proxy_creds: &std::collections::HashMap<String, llm_suite_auth::ProxyCredential>,
+        force_refresh: bool,
+    ) -> LlmResult<Vec<ModelInfo>> {
+        if matches!(
+            definition.model_discovery.clone().unwrap_or(ModelDiscovery::Disabled),
+            ModelDiscovery::Disabled | ModelDiscovery::StaticList { .. }
+        ) {
+            return self.list_models(definition, api_key, proxy_creds).await;
+        }
+        if !force_refresh {
+            let key = cache_key_for(definition);
+            if let Ok(state) = self.cache.lock() {
+                if let Some(entry) = state.entries.get(&key) {
+                    if entry.fetched_at.elapsed() < MODEL_CACHE_TTL {
+                        return Ok(entry.models.clone());
+                    }
+                }
+            }
+        }
+        let models = self.list_models(definition, api_key, proxy_creds).await?;
+        let key = cache_key_for(definition);
+        if let Ok(mut state) = self.cache.lock() {
+            state.entries.insert(
+                key,
+                CachedListing {
+                    fetched_at: std::time::Instant::now(),
+                    models: models.clone(),
+                },
+            );
+        }
+        Ok(models)
     }
 
     /// Transport for one provider definition: the shared client when no
@@ -333,6 +411,7 @@ pub fn extract_models(value: &serde_json::Value, json_path: &str) -> Vec<ModelIn
                     id: id.to_string(),
                     name: None,
                     context_window_size: None,
+                    max_output_tokens: None,
                     metadata: None,
                 })
             } else {
@@ -345,6 +424,7 @@ pub fn extract_models(value: &serde_json::Value, json_path: &str) -> Vec<ModelIn
                             .and_then(|name| name.as_str())
                             .map(String::from),
                         context_window_size: None,
+                        max_output_tokens: None,
                         metadata: None,
                     })
             }
@@ -412,12 +492,14 @@ mod tests {
                 id: "gpt-4o".to_string(),
                 name: None,
                 context_window_size: None,
+                max_output_tokens: None,
                 metadata: None,
             },
             ModelInfo {
                 id: "internal-only".to_string(),
                 name: None,
                 context_window_size: None,
+                max_output_tokens: None,
                 metadata: None,
             },
         ];
@@ -431,6 +513,7 @@ mod tests {
             id: id.to_string(),
             name: None,
             context_window_size: None,
+            max_output_tokens: None,
             metadata: None,
         }
     }
