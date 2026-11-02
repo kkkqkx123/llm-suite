@@ -280,6 +280,16 @@ impl ModelCatalog {
                     })?,
                     &url,
                 );
+                request = apply_discovery_auth(
+                    request,
+                    definition.auth_type.as_deref().unwrap_or("native"),
+                    api_key,
+                );
+                if let Some(headers) = definition.default_headers.as_ref() {
+                    for (key, value) in headers {
+                        request = request.header(key, value.as_str().unwrap_or(""));
+                    }
+                }
                 if let Some(headers) = headers.as_ref() {
                     for (key, value) in headers {
                         request = request.header(key, value.as_str().unwrap_or(""));
