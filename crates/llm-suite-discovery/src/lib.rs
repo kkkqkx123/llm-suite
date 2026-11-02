@@ -90,7 +90,10 @@ impl ModelCatalog {
         force_refresh: bool,
     ) -> LlmResult<Vec<ModelInfo>> {
         if matches!(
-            definition.model_discovery.clone().unwrap_or(ModelDiscovery::Disabled),
+            definition
+                .model_discovery
+                .clone()
+                .unwrap_or(ModelDiscovery::Disabled),
             ModelDiscovery::Disabled | ModelDiscovery::StaticList { .. }
         ) {
             return self.list_models(definition, api_key, proxy_creds).await;
