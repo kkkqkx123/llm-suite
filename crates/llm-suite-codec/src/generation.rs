@@ -479,4 +479,76 @@ mod tests {
         apply_compat_strict(&mut bare, Some(&rejecting));
         assert!(bare.get("response_format").is_none());
     }
+
+    fn thinking_with_map(
+        level: ThinkingLevel,
+        value_map: Option<
+            std::collections::HashMap<String, Option<serde_json::Value>>,
+        >,
+        sampling: Option<std::collections::HashMap<String, serde_json::Value>>,
+    ) -> LlmGenerationParams {
+        LlmGenerationParams {
+            thinking: Some(LlmThinkingConfig {
+                level: Some(level),
+                value_map,
+                sampling_by_level: sampling,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn thinking_value_map_overrides_the_builtin_wire_value() {
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "high".to_string(),
+            Some(serde_json::json!("reasoning-high-plus")),
+        );
+        let mut body = serde_json::json!({"model": "m"});
+        apply_openai_chat(&mut body, &thinking_with_map(ThinkingLevel::High, Some(map), None))
+            .unwrap();
+        assert_eq!(
+            body["reasoning_effort"],
+            serde_json::json!("reasoning-high-plus")
+        );
+    }
+
+    #[test]
+    fn thinking_value_map_null_omits_the_thinking_field() {
+        let mut map = std::collections::HashMap::new();
+        map.insert("high".to_string(), None);
+        let mut chat = serde_json::json!({"model": "m"});
+        apply_openai_chat(
+            &mut chat,
+            &thinking_with_map(ThinkingLevel::High, Some(map.clone()), None),
+        )
+        .unwrap();
+        assert!(chat.get("reasoning_effort").is_none());
+
+        let mut responses = serde_json::json!({"model": "m"});
+        apply_openai_responses(
+            &mut responses,
+            &thinking_with_map(ThinkingLevel::High, Some(map), None),
+        )
+        .unwrap();
+        assert!(responses.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn sampling_by_level_merges_after_typed_generation() {
+        let mut sampling = std::collections::HashMap::new();
+        sampling.insert(
+            "high".to_string(),
+            serde_json::json!({"top_p": 0.1, "provider_flag": true}),
+        );
+        let mut body = serde_json::json!({"model": "m"});
+        apply_openai_chat(
+            &mut body,
+            &thinking_with_map(ThinkingLevel::High, None, Some(sampling)),
+        )
+        .unwrap();
+        assert_eq!(body["top_p"], serde_json::json!(0.1));
+        assert_eq!(body["provider_flag"], serde_json::json!(true));
+    }
 }

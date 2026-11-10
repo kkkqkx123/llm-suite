@@ -119,6 +119,12 @@ pub fn validate_profile(profile: &LlmProfile) -> LlmResult<()> {
     if let Some(ref gen) = profile.generation {
         validate_generation_params(gen, &profile.format, &profile.id)?;
     }
+    if let Err(reason) = llm_suite_types::llm::parse_request_limits(&profile.parameters) {
+        return Err(LlmError::ConfigError(format!(
+            "Profile '{}' has invalid request limits: {reason}",
+            profile.id
+        )));
+    }
     if let Some(proxy) = profile.proxy.as_deref() {
         llm_suite_proxy::reject_userinfo(proxy).map_err(|_| {
             LlmError::ConfigError(format!(
@@ -139,6 +145,29 @@ fn validate_generation_params(
     profile_id: &str,
 ) -> LlmResult<()> {
     if let Some(ref thinking) = gen.thinking {
+        if let Some(ref value_map) = thinking.value_map {
+            for key in value_map.keys() {
+                if !llm_suite_types::llm::generation::ThinkingLevel::is_canonical_name(key) {
+                    return Err(LlmError::ConfigError(format!(
+                        "Profile '{profile_id}': thinking value_map key '{key}' is not a canonical level name (none, minimal, low, medium, high, xhigh, max)"
+                    )));
+                }
+            }
+        }
+        if let Some(ref sampling) = thinking.sampling_by_level {
+            for (key, value) in sampling {
+                if !llm_suite_types::llm::generation::ThinkingLevel::is_canonical_name(key) {
+                    return Err(LlmError::ConfigError(format!(
+                        "Profile '{profile_id}': thinking sampling key '{key}' is not a canonical level name (none, minimal, low, medium, high, xhigh, max)"
+                    )));
+                }
+                if !value.is_object() {
+                    return Err(LlmError::ConfigError(format!(
+                        "Profile '{profile_id}': thinking sampling override for '{key}' must be an object"
+                    )));
+                }
+            }
+        }
         if matches!(format, llm_suite_types::llm::LlmFormat::GeminiNative)
             && thinking.level.is_some()
             && thinking.budget_tokens.is_some()
@@ -354,5 +383,62 @@ mod tests {
             ..Default::default()
         });
         assert!(validate_profile(&profile).is_ok());
+    }
+
+    #[test]
+    fn thinking_map_keys_must_be_canonical_level_names() {
+        use llm_suite_types::llm::generation::{LlmGenerationParams, LlmThinkingConfig};
+        use std::collections::HashMap;
+
+        let mut profile = valid_profile();
+        let mut value_map = HashMap::new();
+        value_map.insert("high".to_string(), Some(serde_json::json!("x-high")));
+        let mut sampling = HashMap::new();
+        sampling.insert("high".to_string(), serde_json::json!({"top_p": 0.1}));
+        profile.generation = Some(LlmGenerationParams {
+            thinking: Some(LlmThinkingConfig {
+                level: Some(
+                    llm_suite_types::llm::generation::ThinkingLevel::High,
+                ),
+                value_map: Some(value_map),
+                sampling_by_level: Some(sampling),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert!(validate_profile(&profile).is_ok());
+
+        let mut bad = valid_profile();
+        let mut bad_map = HashMap::new();
+        bad_map.insert("off".to_string(), Some(serde_json::json!("low")));
+        bad.generation = Some(LlmGenerationParams {
+            thinking: Some(LlmThinkingConfig {
+                value_map: Some(bad_map),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert!(validate_profile(&bad).is_err());
+
+        let mut bad_sampling = valid_profile();
+        let mut bad_values = HashMap::new();
+        bad_values.insert("high".to_string(), serde_json::json!("flat"));
+        bad_sampling.generation = Some(LlmGenerationParams {
+            thinking: Some(LlmThinkingConfig {
+                sampling_by_level: Some(bad_values),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert!(validate_profile(&bad_sampling).is_err());
+    }
+
+    #[test]
+    fn mistyped_request_limits_fail_profile_validation() {
+        let mut profile = valid_profile();
+        profile.parameters = Some(serde_json::json!({
+            "request_limits": {"max_images_per_message": "two"}
+        }));
+        assert!(validate_profile(&profile).is_err());
     }
 }

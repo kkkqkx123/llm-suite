@@ -6,6 +6,58 @@ use llm_suite_types::llm::generation::{
 };
 use llm_suite_types::llm::ProviderCompat;
 
+/// Resolve the wire value for a thinking level.
+///
+/// An explicit `value_map` entry wins: a mapped JSON value replaces the
+/// codec builtin for that level, an explicit null marks the level
+/// unsupported and yields no field so the endpoint falls back to its model
+/// default. Without a map entry the codec builtin applies.
+pub fn mapped_thinking_value(
+    thinking: &LlmThinkingConfig,
+    level: ThinkingLevel,
+    builtin: &str,
+) -> Option<serde_json::Value> {
+    match thinking
+        .value_map
+        .as_ref()
+        .and_then(|map| map.get(level.as_str()))
+    {
+        Some(Some(value)) => Some(value.clone()),
+        Some(None) => None,
+        None => Some(serde_json::json!(builtin)),
+    }
+}
+
+/// Deep-merge the sampling override for the effective thinking level.
+///
+/// Runs inside the generation mapping so profile and request parameters
+/// applied afterwards still win. A non-object override is ignored with a
+/// warning because the offending value travels the request path, where
+/// registration-time validation never runs.
+pub fn apply_sampling_by_level(body: &mut serde_json::Value, thinking: &LlmThinkingConfig) {
+    let Some(level) = thinking.level else {
+        return;
+    };
+    let Some(overrides) = thinking
+        .sampling_by_level
+        .as_ref()
+        .and_then(|map| map.get(level.as_str()))
+    else {
+        return;
+    };
+    let Some(fields) = overrides.as_object() else {
+        tracing::warn!(
+            level = level.as_str(),
+            "sampling override for thinking level is not an object and was ignored"
+        );
+        return;
+    };
+    if fields.is_empty() {
+        return;
+    }
+    *body = crate::codecs::helpers::deep_merge(body, overrides);
+}
+
 /// Downgrade `strict: true` structured-output markers when the endpoint
 /// cannot honor them.
 ///
@@ -192,8 +244,11 @@ pub fn apply_openai_chat(body: &mut serde_json::Value, gen: &LlmGenerationParams
     }
     if let Some(ref thinking) = gen.thinking {
         if let Some(level) = thinking.level {
-            body["reasoning_effort"] = serde_json::json!(level.as_str());
+            if let Some(value) = mapped_thinking_value(thinking, level, level.as_str()) {
+                body["reasoning_effort"] = value;
+            }
         }
+        apply_sampling_by_level(body, thinking);
     }
     if let Some(verbosity) = gen.verbosity {
         body["verbosity"] = serde_json::json!(verbosity.as_str());
@@ -264,13 +319,20 @@ pub fn apply_openai_responses(
         if thinking.level.is_some() || thinking.summary.is_some() {
             let mut reasoning = serde_json::Map::new();
             if let Some(level) = thinking.level {
-                reasoning.insert("effort".to_string(), serde_json::json!(level.as_str()));
+                if let Some(value) = mapped_thinking_value(thinking, level, level.as_str()) {
+                    reasoning.insert("effort".to_string(), value);
+                }
             }
             if let Some(summary) = thinking.summary {
                 reasoning.insert("summary".to_string(), serde_json::json!(summary.as_str()));
             }
-            body["reasoning"] = serde_json::Value::Object(reasoning);
+            // A level mapped to null carries no effort: an empty reasoning
+            // object would be rejected, so only a non-empty one is sent.
+            if !reasoning.is_empty() {
+                body["reasoning"] = serde_json::Value::Object(reasoning);
+            }
         }
+        apply_sampling_by_level(body, thinking);
     }
     let mut text = body
         .get("text")
@@ -364,6 +426,7 @@ pub fn apply_anthropic(body: &mut serde_json::Value, gen: &LlmGenerationParams) 
     }
     if let Some(ref thinking) = gen.thinking {
         apply_anthropic_thinking(body, thinking, max_tokens)?;
+        apply_sampling_by_level(body, thinking);
     }
     let mut output_config = body
         .get("output_config")
@@ -376,7 +439,7 @@ pub fn apply_anthropic(body: &mut serde_json::Value, gen: &LlmGenerationParams) 
             || (thinking.level.is_some() && thinking.budget_tokens.is_none())
         {
             if let Some(level) = thinking.level {
-                let effort = match level {
+                let builtin = match level {
                     ThinkingLevel::None => None,
                     ThinkingLevel::Minimal => {
                         tracing::warn!("Anthropic effort has no minimal level; mapped to low");
@@ -388,8 +451,10 @@ pub fn apply_anthropic(body: &mut serde_json::Value, gen: &LlmGenerationParams) 
                     ThinkingLevel::Xhigh => Some("xhigh"),
                     ThinkingLevel::Max => Some("max"),
                 };
-                if let Some(effort) = effort {
-                    output_config.insert("effort".to_string(), serde_json::json!(effort));
+                if let Some(effort) =
+                    builtin.and_then(|name| mapped_thinking_value(thinking, level, name))
+                {
+                    output_config.insert("effort".to_string(), effort);
                     has_output_config = true;
                 }
             }
@@ -606,6 +671,17 @@ pub fn apply_gemini_generation_config(
             if level == ThinkingLevel::None {
                 // Gemini switches thinking off through the budget.
                 thinking_config.insert("thinkingBudget".to_string(), serde_json::json!(0));
+            } else if let Some(mapped) = thinking
+                .value_map
+                .as_ref()
+                .and_then(|map| map.get(level.as_str()))
+            {
+                // An explicit map entry bypasses the builtin level member
+                // check so new provider levels need no code change; null
+                // omits the field.
+                if let Some(value) = mapped {
+                    thinking_config.insert("thinkingLevel".to_string(), value.clone());
+                }
             } else {
                 thinking_config.insert(
                     "thinkingLevel".to_string(),
@@ -627,6 +703,7 @@ pub fn apply_gemini_generation_config(
                 "thinking display/summary options are not supported by Gemini and were ignored"
             );
         }
+        apply_sampling_by_level(generation_config, thinking);
     }
     if let Some(ref format) = gen.response_format {
         match format.kind {

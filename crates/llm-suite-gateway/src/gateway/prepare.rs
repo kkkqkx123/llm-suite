@@ -7,7 +7,6 @@ use llm_suite_client::client::LlmClientImpl;
 use llm_suite_codec::error::{LlmError, LlmResult};
 use llm_suite_config::merge_request;
 use llm_suite_types::llm::{LlmProfile, LlmRequest};
-
 use super::LlmGateway;
 
 /// Assembled request ready for dispatch: the resolved profile snapshot,
@@ -88,6 +87,7 @@ impl LlmGateway {
         profile.proxy =
             super::proxy_auth::effective_proxy_url(self.auth.as_deref(), &profile).await?;
         let effective = merge_request(request, &profile)?;
+        enforce_request_limits(&effective, &profile)?;
         let client = self.get_or_create_client(&profile)?;
         let breaker = self.breaker_for(&profile);
         let limiter = self.limiter_for(&profile);
@@ -118,4 +118,28 @@ impl LlmGateway {
 /// point the user at `login`.
 fn auth_error(error: AuthError) -> LlmError {
     LlmError::ConfigError(error.to_string())
+}
+
+/// Enforce the reserved `request_limits` against the merged request before
+/// encoding. Limits come from the merged parameters so a request can narrow
+/// the profile bounds wholesale; violations fail before any transport work.
+fn enforce_request_limits(effective: &LlmRequest, profile: &LlmProfile) -> LlmResult<()> {
+    let limits = llm_suite_types::llm::parse_request_limits(&effective.parameters).map_err(
+        |reason| {
+            LlmError::ConfigError(format!(
+                "Profile '{}' has invalid request limits: {reason}",
+                profile.id
+            ))
+        },
+    )?;
+    if let Some(limits) = limits {
+        llm_suite_types::llm::check_request_limits(&limits, &effective.messages, &effective.tools)
+            .map_err(|reason| {
+                LlmError::ConfigError(format!(
+                    "Profile '{}' rejected the request: {reason}",
+                    profile.id
+                ))
+            })?;
+    }
+    Ok(())
 }

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -29,6 +30,17 @@ impl ThinkingLevel {
 impl std::fmt::Display for ThinkingLevel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+impl ThinkingLevel {
+    /// Whether a config key names a thinking level. Only the canonical
+    /// lowercase names are accepted so provider value maps stay greppable.
+    pub fn is_canonical_name(name: &str) -> bool {
+        matches!(
+            name,
+            "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+        )
     }
 }
 
@@ -112,6 +124,18 @@ pub struct LlmThinkingConfig {
     pub display: Option<ThinkingDisplay>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<ReasoningSummary>,
+    /// Provider value override per thinking level, keyed by the canonical
+    /// level name (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`,
+    /// `max`). A mapped JSON value replaces the codec builtin for that
+    /// level; an explicit null marks the level unsupported and the codec
+    /// omits the thinking field. Unknown keys fail profile validation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value_map: Option<HashMap<String, Option<serde_json::Value>>>,
+    /// Per-level sampling overrides, keyed like `value_map`. The object for
+    /// the effective level is deep-merged into the request body after the
+    /// typed generation mapping; profile and request parameters still win.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sampling_by_level: Option<HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

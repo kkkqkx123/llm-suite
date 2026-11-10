@@ -6,10 +6,12 @@ use llm_suite_types::llm::{LlmProfile, LlmRequest};
 ///
 /// Untyped passthrough keys flow as-is (matching the deprecated TS
 /// `Object.assign(body, otherParams)` behavior) except `stream`, which is
-/// controlled by the caller, and the typed generation keys, which are
-/// emitted through the canonical `generation` resolver instead. This keeps a
-/// single source of truth for thinking/verbosity/limits while preserving an
-/// escape hatch for provider-specific options like `logit_bias`.
+/// controlled by the caller, the typed generation keys, which are
+/// emitted through the canonical `generation` resolver instead, and the
+/// reserved `request_limits` key, which is consumed by gateway admission
+/// and never travels the wire. This keeps a single source of truth for
+/// thinking/verbosity/limits while preserving an escape hatch for
+/// provider-specific options like `logit_bias`.
 pub fn merge_and_apply_params(
     body: &mut serde_json::Value,
     profile: &LlmProfile,
@@ -17,7 +19,10 @@ pub fn merge_and_apply_params(
 ) {
     let merged_params = crate::codecs::helpers::merge_parameters(profile, request_params);
     for (key, value) in merged_params {
-        if key == "stream" || crate::generation::is_typed_param_key(&key) {
+        if key == "stream"
+            || key == llm_suite_types::llm::limits::REQUEST_LIMITS_KEY
+            || crate::generation::is_typed_param_key(&key)
+        {
             continue;
         }
         body[key] = value;

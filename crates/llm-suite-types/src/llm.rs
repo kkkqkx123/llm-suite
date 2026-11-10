@@ -1,5 +1,6 @@
 pub mod circuit_breaker;
 pub mod generation;
+pub mod limits;
 pub mod message_stream_events;
 pub mod model_discovery;
 pub mod model_info;
@@ -17,6 +18,7 @@ pub mod usage;
 
 pub use circuit_breaker::*;
 pub use generation::*;
+pub use limits::*;
 pub use message_stream_events::*;
 pub use model_discovery::*;
 pub use model_info::*;
