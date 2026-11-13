@@ -3,12 +3,19 @@
 //! Provides fast token count estimation supporting ASCII, CJK, and other Unicode.
 //! Used across the codebase for LLM request sizing, chunking, and content compression.
 
-/// Tokens per ASCII symbol (punctuation) character (default: 0.5)
+/// Tokens per ASCII symbol (punctuation) character
 ///
 /// Symbols like `->`, `(`, `{` are typically tokenized separately from
 /// identifiers. Counting them at the latin factor would underestimate
-/// code-heavy text; 0.5 per symbol approximates standalone punctuation tokens.
-pub const SYMBOL_FACTOR: f32 = 0.5;
+/// code-heavy text; bge-m3 bills punctuation almost one token per character,
+/// so symbols are counted at 1.0.
+pub const SYMBOL_FACTOR: f32 = 1.0;
+
+/// Tokens per whitespace character
+///
+/// A space is mostly merged into the following word during tokenization,
+/// so its standalone cost is far below a full token.
+pub const WHITESPACE_FACTOR: f32 = 0.2;
 
 /// Tokens per message metadata overhead (role, separators, etc.)
 pub const MESSAGE_OVERHEAD_TOKENS: u32 = 4;
@@ -76,7 +83,7 @@ impl TokenEstimator {
             let letters = non_ws - symbols;
             let tokens = letters as f32 * self.latin_factor
                 + symbols as f32 * SYMBOL_FACTOR
-                + ascii_ws as f32 * 0.5;
+                + ascii_ws as f32 * WHITESPACE_FACTOR;
             return tokens.round() as usize;
         }
 
@@ -85,7 +92,7 @@ impl TokenEstimator {
         // Count ASCII whitespace quickly
         let ascii_ws =
             count_byte(bytes, b' ') + count_byte(bytes, b'\t') + count_byte(bytes, b'\n');
-        count += ascii_ws as f32 * 0.5;
+        count += ascii_ws as f32 * WHITESPACE_FACTOR;
 
         // Process each character
         for ch in text.chars() {
@@ -151,7 +158,7 @@ impl TokenEstimator {
             } else if ch.is_ascii() && !ch.is_ascii_whitespace() && !ch.is_ascii_control() {
                 self.latin_factor
             } else if ch.is_ascii_whitespace() {
-                0.5
+                WHITESPACE_FACTOR
             } else {
                 1.0
             };
@@ -225,7 +232,7 @@ mod tests {
     fn test_ascii_text() {
         let text = "Hello World";
         let tokens = estimate_tokens(text);
-        // 9 letters * 0.25 + 2 whitespace * 0.5 = 3.25 -> 3
+        // 9 letters * 0.25 + 2 whitespace * 0.2 = 2.65 -> 3
         assert_eq!(tokens, 3, "tokens: {}", tokens);
     }
 
@@ -241,23 +248,23 @@ mod tests {
     fn test_mixed_text() {
         let text = "Hello 世界";
         let tokens = estimate_tokens(text);
-        // "Hello" 5 * 0.25 = 1.25 + 1 ws * 0.5 + 2 CJK = 2 -> 3.75 -> 4
-        assert_eq!(tokens, 4, "tokens: {}", tokens);
+        // "Hello" 5 * 0.25 = 1.25 + 1 ws * 0.2 + 2 CJK = 2 -> 3.45 -> 3
+        assert_eq!(tokens, 3, "tokens: {}", tokens);
     }
 
     #[test]
     fn test_whitespace() {
         let text = "Hello   World";
         let tokens = estimate_tokens(text);
-        // 9 letters * 0.25 = 2.25 + 3 ws * 0.5 = 1.5 -> 3.75 -> 4
-        assert_eq!(tokens, 4, "tokens: {}", tokens);
+        // 9 letters * 0.25 = 2.25 + 3 ws * 0.2 = 0.6 -> 2.85 -> 3
+        assert_eq!(tokens, 3, "tokens: {}", tokens);
     }
 
     #[test]
     fn test_long_ascii() {
         let text = "The quick brown fox jumps over the lazy dog";
         let tokens = estimate_tokens(text);
-        // ~35 letters + 8 spaces -> ~13
+        // ~35 letters * 0.25 + 8 spaces * 0.2 ~= 10
         assert!((10..=16).contains(&tokens), "tokens: {}", tokens);
     }
 
@@ -289,7 +296,7 @@ mod tests {
 
         let text = "How are you?";
         let tokens = estimator.estimate_with_config(text);
-        // 9 letters * 0.3 = 2.7 + "?" 0.5 + 2 ws * 0.5 = 4.2 -> 4
+        // 9 letters * 0.3 = 2.7 + "?" 1.0 + 2 ws * 0.2 = 4.1 -> 4
         assert_eq!(tokens, 4, "tokens: {}", tokens);
     }
 
@@ -317,10 +324,10 @@ mod tests {
         let text = "fn foo() -> u32";
         let tokens = estimate_tokens(text);
         // letters: "fnfoou32" = 8 * 0.25 = 2.0
-        // symbols: "()->" = 4 * 0.5 = 2.0
-        // whitespace: 3 * 0.5 = 1.5
-        // total 5.5 -> 6
-        assert_eq!(tokens, 6, "tokens: {}", tokens);
+        // symbols: "()->" = 4 * 1.0 = 4.0
+        // whitespace: 3 * 0.2 = 0.6
+        // total 6.6 -> 7
+        assert_eq!(tokens, 7, "tokens: {}", tokens);
     }
 
     #[test]

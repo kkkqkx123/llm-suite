@@ -324,9 +324,9 @@ mod tests {
             retry_delay_ms: None,
             extra_headers: None,
         };
-        // system: 13 letters * 0.25 + 3 spaces * 0.5 = 4.75 -> 5 + 4 = 9;
-        // user: 2 + 4 = 6; total 15
-        assert_eq!(estimate_request_tokens(&req), 15);
+        // system: 13 letters * 0.25 + 3 spaces * 0.2 = 3.85 -> 4 + 4 = 8;
+        // user: 2 + 4 = 6; total 14
+        assert_eq!(estimate_request_tokens(&req), 14);
     }
 
     #[test]
