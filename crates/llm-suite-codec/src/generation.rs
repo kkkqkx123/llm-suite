@@ -482,9 +482,7 @@ mod tests {
 
     fn thinking_with_map(
         level: ThinkingLevel,
-        value_map: Option<
-            std::collections::HashMap<String, Option<serde_json::Value>>,
-        >,
+        value_map: Option<std::collections::HashMap<String, Option<serde_json::Value>>>,
         sampling: Option<std::collections::HashMap<String, serde_json::Value>>,
     ) -> LlmGenerationParams {
         LlmGenerationParams {
@@ -506,8 +504,11 @@ mod tests {
             Some(serde_json::json!("reasoning-high-plus")),
         );
         let mut body = serde_json::json!({"model": "m"});
-        apply_openai_chat(&mut body, &thinking_with_map(ThinkingLevel::High, Some(map), None))
-            .unwrap();
+        apply_openai_chat(
+            &mut body,
+            &thinking_with_map(ThinkingLevel::High, Some(map), None),
+        )
+        .unwrap();
         assert_eq!(
             body["reasoning_effort"],
             serde_json::json!("reasoning-high-plus")

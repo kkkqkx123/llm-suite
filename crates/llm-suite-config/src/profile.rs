@@ -397,9 +397,7 @@ mod tests {
         sampling.insert("high".to_string(), serde_json::json!({"top_p": 0.1}));
         profile.generation = Some(LlmGenerationParams {
             thinking: Some(LlmThinkingConfig {
-                level: Some(
-                    llm_suite_types::llm::generation::ThinkingLevel::High,
-                ),
+                level: Some(llm_suite_types::llm::generation::ThinkingLevel::High),
                 value_map: Some(value_map),
                 sampling_by_level: Some(sampling),
                 ..Default::default()

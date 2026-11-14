@@ -33,9 +33,9 @@ pub fn parse_request_limits(
     if limits_value.is_null() {
         return Ok(None);
     }
-    let obj = limits_value.as_object().ok_or_else(|| {
-        format!("'{REQUEST_LIMITS_KEY}' must be an object with limit fields")
-    })?;
+    let obj = limits_value
+        .as_object()
+        .ok_or_else(|| format!("'{REQUEST_LIMITS_KEY}' must be an object with limit fields"))?;
     let mut limits = LlmRequestLimits::default();
     for (key, value) in obj {
         match key.as_str() {
@@ -59,15 +59,14 @@ pub fn parse_request_limits(
 }
 
 fn expect_u64(key: &str, value: &serde_json::Value) -> Result<u64, String> {
-    value.as_u64().ok_or_else(|| {
-        format!("'{REQUEST_LIMITS_KEY}.{key}' must be a non-negative integer")
-    })
+    value
+        .as_u64()
+        .ok_or_else(|| format!("'{REQUEST_LIMITS_KEY}.{key}' must be a non-negative integer"))
 }
 
 fn expect_u32(key: &str, value: &serde_json::Value) -> Result<u32, String> {
     let raw = expect_u64(key, value)?;
-    u32::try_from(raw)
-        .map_err(|_| format!("'{REQUEST_LIMITS_KEY}.{key}' exceeds the u32 range"))
+    u32::try_from(raw).map_err(|_| format!("'{REQUEST_LIMITS_KEY}.{key}' exceeds the u32 range"))
 }
 
 /// Enforce parsed limits against the effective request. Returns the first

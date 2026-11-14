@@ -2,12 +2,12 @@
 
 use std::sync::Arc;
 
+use super::LlmGateway;
 use llm_suite_auth::AuthError;
 use llm_suite_client::client::LlmClientImpl;
 use llm_suite_codec::error::{LlmError, LlmResult};
 use llm_suite_config::merge_request;
 use llm_suite_types::llm::{LlmProfile, LlmRequest};
-use super::LlmGateway;
 
 /// Assembled request ready for dispatch: the resolved profile snapshot,
 /// the merged effective request and the cached client bound to them.
@@ -124,14 +124,13 @@ fn auth_error(error: AuthError) -> LlmError {
 /// encoding. Limits come from the merged parameters so a request can narrow
 /// the profile bounds wholesale; violations fail before any transport work.
 fn enforce_request_limits(effective: &LlmRequest, profile: &LlmProfile) -> LlmResult<()> {
-    let limits = llm_suite_types::llm::parse_request_limits(&effective.parameters).map_err(
-        |reason| {
+    let limits =
+        llm_suite_types::llm::parse_request_limits(&effective.parameters).map_err(|reason| {
             LlmError::ConfigError(format!(
                 "Profile '{}' has invalid request limits: {reason}",
                 profile.id
             ))
-        },
-    )?;
+        })?;
     if let Some(limits) = limits {
         llm_suite_types::llm::check_request_limits(&limits, &effective.messages, &effective.tools)
             .map_err(|reason| {
